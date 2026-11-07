@@ -18,7 +18,15 @@ electron-builder.env
 /.task/
 /docs-archive/
 .idea/
-.claude/
+
+# Local AI agent configuration, skills, and workflow metadata
+/.agents/
+/.claude/
+/.codex/
+/.cursor/
+/AGENTS.md
+/CLAUDE.md
+/docs/agents/
 
 # Local build artifacts dropped in the repo root
 /*.dmg
@@ -29,7 +37,6 @@ electron-builder.env
 # Playwright artifacts
 /test-results/
 
-.cursor/rules/git-remote.mdc
 __pycache__/
 /notes/
 /MEMORY.md
