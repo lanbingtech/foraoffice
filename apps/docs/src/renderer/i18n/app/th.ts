@@ -1,6 +1,8 @@
 import type { zh } from './zh'
 
 export const th = {
+  appExternalAgentFailed: 'ส่งการดำเนินการไปยังเอเจนต์ภายนอกไม่สำเร็จ: {error}',
+  appDocumentDraftPending: 'ยืนยันหรือยกเลิกฉบับร่างของเอกสารก่อน',
   appScTitle: 'แป้นพิมพ์ลัด',
   appScFilter: 'ค้นหาแป้นพิมพ์ลัด',
   appScNone: 'ไม่พบแป้นพิมพ์ลัดที่ตรงกัน',

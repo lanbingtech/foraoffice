@@ -870,8 +870,8 @@ describe('op registry contract', () => {
   it('every registered op is documented in the system prompt and the apply_ops tool description', async () => {
     const { opNames, opSignatures } = await import('../src/renderer/ai/ops')
     const { AGENT_SYSTEM_PROMPT } = await import('../src/renderer/ai/protocol')
-    const { AGENT_TOOLS } = await import('../src/renderer/ai/tools')
-    const tool = AGENT_TOOLS.find((t) => t.name === 'apply_ops')
+    const { DOCS_EDITOR_TOOLS } = await import('../src/renderer/ai/tools')
+    const tool = DOCS_EDITOR_TOOLS.find((t) => t.name === 'apply_ops')
     expect(tool).toBeDefined()
     for (const name of opNames()) {
       expect(tool!.description).toContain(name)

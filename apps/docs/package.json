@@ -10,6 +10,9 @@
     "dev": "electron-vite dev",
     "dev:renderer": "vite --config vite.renderer.config.ts",
     "build": "electron-vite build",
+    "build:embedded": "vite build --config vite.embedded.config.ts",
+    "build:services": "node build-services.mjs",
+    "build:sdk": "node build-sdk.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -19,13 +22,14 @@
   },
   "devDependencies": {
     "@genoffice/agent-core": "*",
-    "@genoffice/i18n": "*",
     "@genoffice/ai-provider": "*",
     "@genoffice/ai-search": "*",
     "@genoffice/docx-engine": "*",
     "@genoffice/file-parse": "*",
+    "@genoffice/i18n": "*",
     "@genoffice/project-store": "*",
     "@genoffice/ui": "*",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@tiptap/core": "3.31.0",
     "@tiptap/extensions": "3.31.0",
     "@tiptap/pm": "3.31.0",
@@ -34,9 +38,11 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.0.4",
+    "dts-bundle-generator": "9.5.1",
     "electron": "^43.8.3",
     "electron-builder": "^26.0.12",
     "electron-vite": "^5.0.0",
+    "esbuild": "^0.25.12",
     "jsdom": "^28.0.0",
     "marked": "^17.0.6",
     "opentype.js": "^2.0.0",
@@ -90,13 +96,14 @@
     }
   },
   "dependencies": {
+    "@genoffice/agent-core": "*",
     "@genoffice/electron-utils": "*",
     "@genoffice/font-metrics": "*",
+    "@genoffice/pptx-render": "*",
+    "@genoffice/xlsx-gateway": "*",
     "electron-updater": "^6.8.9",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.2.108",
-    "@genoffice/pptx-render": "*",
-    "@genoffice/xlsx-gateway": "*",
-    "@genoffice/agent-core": "*"
+    "zod": "^4.6.7"
   }
 }

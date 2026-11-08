@@ -1,6 +1,6 @@
 import { isAbsolute } from 'node:path'
 import { z } from 'zod'
-import type { McpToolDefinition } from '../mcp-server'
+import type { McpInvocation, McpToolDefinition } from '../mcp-server'
 import { familyLabel, withSaveExtension, type SessionFamily } from './formats'
 
 /**
@@ -46,7 +46,12 @@ export type TargetResolver = (
 export interface FamilyDriver {
   family: SessionFamily
   openBlankTab: () => Promise<number>
-  save: (wcId: number, path: string, overwrite: boolean) => Promise<unknown>
+  save: (
+    wcId: number,
+    path: string,
+    overwrite: boolean,
+    invocation?: McpInvocation,
+  ) => Promise<unknown>
 }
 
 interface ActiveSession {
@@ -175,7 +180,7 @@ export function createSessionTools(
           .optional()
           .describe('allow replacing an existing file at `path`; default false'),
       },
-      handler: async (args) => {
+      handler: async (args, invocation) => {
         const session = host.current()
         if (!session) throw new Error('no session is open — call create_session first')
         const driver = byFamily.get(session.family)
@@ -183,7 +188,12 @@ export function createSessionTools(
         const requested = String(args.path ?? '')
         if (!isAbsolute(requested)) throw new Error('path must be absolute')
         const filePath = withSaveExtension(session.family, requested)
-        const result = await driver.save(session.wcId, filePath, args.overwrite === true)
+        const result = await driver.save(
+          session.wcId,
+          filePath,
+          args.overwrite === true,
+          invocation,
+        )
         // Some drivers report a failed write as data rather than by throwing
         // (sheets returns the renderer's SaveOutcome `{ok:false}`), so returning
         // it verbatim would tell the agent the file was written when it was not.

@@ -1,3 +1,5 @@
+import type { AgentToolDef } from './types'
+import { ResourceAccessError } from './resource-access'
 import type { AgentSkill } from './skill'
 import { formatKbSize, kbCiteHref } from './knowledge-base-skill'
 
@@ -58,6 +60,23 @@ The user may attach local files to the conversation (see the "attachment list" i
 const PATHS_PROMPT = `
 - Attachments are listed with their absolute paths: tools that take a file path (converting, building from a template) may use them directly, and a statement drawn from an attachment is cited with its cite link like a knowledge-base file.`
 
+export const READ_ATTACHMENT_TOOL_DEF: AgentToolDef = {
+  name: READ_ATTACHMENT_TOOL,
+  description:
+    'Read the text content of an attachment (parsed locally). Long files are paged: read offset=0 first, then decide whether to continue based on the returned total character count.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      index: {
+        type: 'integer',
+        description: 'attachment index (0-based, see the attachment list)',
+      },
+      offset: { type: 'integer', description: 'start character position, default 0' },
+    },
+    required: ['index'],
+  },
+}
+
 export function createAttachmentsSkill(deps: AttachmentsSkillDeps): AgentSkill {
   const labels = deps.labels ?? {}
   return {
@@ -65,24 +84,7 @@ export function createAttachmentsSkill(deps: AttachmentsSkillDeps): AgentSkill {
     systemPrompt: deps.pathsInContext
       ? ATTACHMENTS_SYSTEM_PROMPT + PATHS_PROMPT
       : ATTACHMENTS_SYSTEM_PROMPT,
-    tools: [
-      {
-        name: READ_ATTACHMENT_TOOL,
-        description:
-          'Read the text content of an attachment (parsed locally). Long files are paged: read offset=0 first, then decide whether to continue based on the returned total character count.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            index: {
-              type: 'integer',
-              description: 'attachment index (0-based, see the attachment list)',
-            },
-            offset: { type: 'integer', description: 'start character position, default 0' },
-          },
-          required: ['index'],
-        },
-      },
-    ],
+    tools: [READ_ATTACHMENT_TOOL_DEF],
     buildContext: () => {
       const list = deps.list()
       if (list.length === 0) return ''
@@ -94,7 +96,8 @@ export function createAttachmentsSkill(deps: AttachmentsSkillDeps): AgentSkill {
       const paths = list.map((a, i) => `${i} = ${a.path}\n    cite: ${kbCiteHref(a.path)}`)
       return `${head}\n\nAbsolute paths and cite links:\n${paths.join('\n')}`
     },
-    executeTool: async (call) => {
+    executeTool: async (call, signal) => {
+      signal?.throwIfAborted()
       if (call.name !== READ_ATTACHMENT_TOOL) {
         return { output: `unknown tool: ${call.name}`, isError: true, summary: call.name }
       }
@@ -118,8 +121,13 @@ export function createAttachmentsSkill(deps: AttachmentsSkillDeps): AgentSkill {
       const offset = Math.max(0, Number(call.input.offset) || 0)
       let page: AttachmentPage
       try {
-        page = await deps.read(att.path, offset, ATTACHMENT_READ_CHUNK_CHARS)
+        page = await deps.read(att.path, offset, ATTACHMENT_READ_CHUNK_CHARS).finally(() => {
+          if (!deps.list().some((current) => current.path === att.path))
+            throw new ResourceAccessError('Attachment access was revoked during the read')
+          signal?.throwIfAborted()
+        })
       } catch (error) {
+        if (error instanceof ResourceAccessError) throw error
         return {
           output: error instanceof Error ? error.message : String(error),
           isError: true,

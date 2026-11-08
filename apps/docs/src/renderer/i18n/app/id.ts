@@ -1,6 +1,8 @@
 import type { zh } from './zh'
 
 export const id = {
+  appExternalAgentFailed: 'Tidak dapat mengirim tindakan ke agen eksternal: {error}',
+  appDocumentDraftPending: 'Selesaikan atau buang draf dokumen terlebih dahulu.',
   appScTitle: 'Pintasan Papan Ketik',
   appScFilter: 'Cari pintasan',
   appScNone: 'Tidak ada pintasan yang cocok',

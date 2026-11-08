@@ -16,6 +16,22 @@ const PHOTO: AttachmentInfo = {
 }
 
 describe('attachments skill', () => {
+  it('does not deliver a source whose attachment grant was revoked while parsing', async () => {
+    let attachments = [NOTES]
+    let release!: (page: { text: string; totalChars: number; offset: number }) => void
+    const skill = createAttachmentsSkill({
+      list: () => attachments,
+      read: () =>
+        new Promise((resolve) => {
+          release = resolve
+        }),
+    })
+    const pending = skill.executeTool({ id: 'read', name: 'read_attachment', input: { index: 0 } })
+    attachments = []
+    release({ text: 'Private evidence', totalChars: 16, offset: 0 })
+    await expect(pending).rejects.toThrow(/revoked/)
+  })
+
   it('lists names only by default and adds paths plus cite links on request', () => {
     const plain = createAttachmentsSkill({ list: () => [NOTES], read: vi.fn() })
     expect(plain.buildContext?.()).toContain('0 | my notes.md | .md | 2KB')

@@ -7,7 +7,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { AiPanel } from '../src/renderer/ai/AiPanel'
-import { AI_PROVIDERS, type AiProviderId, type AiSettings } from '../src/shared/ipc'
+import { AI_PROVIDERS } from '@genoffice/ai-provider/browser'
+import { type AiProviderId, type AiSettings } from '../src/shared/ipc'
 
 type ChunkListener = (chunk: { requestId: string; type: string; error?: string }) => void
 

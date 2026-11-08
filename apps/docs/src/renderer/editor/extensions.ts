@@ -1,3 +1,4 @@
+import { getOptionalDocsHost } from '../host/docs-host'
 import { ScriptFonts } from './script-fonts'
 import {
   asciiFamilyResolver,
@@ -3722,7 +3723,10 @@ export const ImageCopyExtension = Extension.create({
           return false
         }
       }
-      const write = window.desktop?.copyImageToClipboard?.(dataUrl, imageMetaJson(node.attrs))
+      const write = getOptionalDocsHost()?.copyImageToClipboard?.(
+        dataUrl,
+        imageMetaJson(node.attrs),
+      )
       // no bridge: keep the default HTML-only copy instead of an empty clipboard
       if (!write) return false
       event.preventDefault()

@@ -8,7 +8,8 @@ import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { AiPanel } from '../src/renderer/ai/AiPanel'
 import { t } from '../src/renderer/i18n/locale'
-import { AI_PROVIDERS, type AiSettings } from '../src/shared/ipc'
+import { AI_PROVIDERS } from '@genoffice/ai-provider/browser'
+import { type AiSettings } from '../src/shared/ipc'
 
 const settings: AiSettings = {
   provider: 'anthropic',

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { buildDocx } from '../../../packages/docx-engine/tests/helpers/build-docx'
+import type { WebContents } from 'electron'
 
 type IpcHandler = (...args: unknown[]) => unknown
 const state = vi.hoisted(() => ({
@@ -58,7 +59,7 @@ beforeEach(async () => {
   state.pick.mockReset()
   const { registerDocsIpc } = await import('../src/main/docs-main')
   registerDocsIpc()
-})
+}, 30000)
 
 afterEach(() => rmSync(state.root, { recursive: true, force: true }))
 
@@ -124,3 +125,44 @@ it('continues using a valid configured default as the initial suggestion', async
     expect.objectContaining({ defaultPath: join(custom, 'Draft.docx') }),
   )
 })
+
+it.each(['docs:save-as', 'docs:save-new', 'docs:save-to'])(
+  'reports the committed file effect after %s loses its document, without deleting a subsequent external write',
+  async (channel) => {
+    const main = await import('../src/main/docs-main')
+    const atomic = await import('../src/main/atomic-write')
+    const write = atomic.atomicWriteFile
+    const sender = {
+      id: 71,
+      send: vi.fn(),
+      isDestroyed: () => false,
+      getOwnerBrowserWindow: () => null,
+    }
+    const bytes = await documentBytes()
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+    const external = Buffer.from('A later write by another application')
+    let actualPath = ''
+    state.pick.mockResolvedValue({ canceled: false, filePath: selected() })
+    main.authorizeMcpDocWrite(sender.id, selected())
+    const intercepted = vi
+      .spyOn(atomic, 'atomicWriteFile')
+      .mockImplementationOnce(async (...args) => {
+        await write(...args)
+        actualPath = args[0]
+        writeFileSync(actualPath, external)
+        main.teardownDocsRenderer(sender as unknown as WebContents)
+      })
+    try {
+      const args =
+        channel === 'docs:save-to' ? [selected(), buffer, false, null] : ['Draft.docx', buffer]
+      expect(await state.handlers.get(channel)!({ sender }, ...args)).toMatchObject({
+        ok: false,
+        committed: true,
+        errorCode: 'stale_target',
+      })
+      expect(readFileSync(actualPath)).toEqual(external)
+    } finally {
+      intercepted.mockRestore()
+    }
+  },
+)

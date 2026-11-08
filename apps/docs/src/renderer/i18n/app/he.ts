@@ -1,6 +1,8 @@
 import type { zh } from './zh'
 
 export const he = {
+  appExternalAgentFailed: 'לא ניתן לשלוח את הפעולה לסוכן החיצוני: {error}',
+  appDocumentDraftPending: 'יש לסיים או לבטל תחילה את טיוטת המסמך.',
   appScTitle: 'קיצורי מקלדת',
   appScFilter: 'חיפוש קיצור',
   appScNone: 'לא נמצאו קיצורים מתאימים',

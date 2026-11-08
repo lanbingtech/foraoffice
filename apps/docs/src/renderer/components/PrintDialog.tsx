@@ -1,3 +1,4 @@
+import { getDocsHost } from '../host/docs-host'
 /**
  * Print dialog modeled on Word's print sheet (same pattern as the slides app):
  * live page preview on the left (a scaled clone of the pagination-preview page
@@ -47,9 +48,11 @@ function paperOfPreview(): PrintPaper | undefined {
 export function PrintDialog({
   onClose,
   setStatus,
+  canPrint,
 }: {
   onClose: () => void
   setStatus: (s: string) => void
+  canPrint: () => boolean
 }) {
   const { t } = useI18n()
   const [pageCount, setPageCount] = useState(0)
@@ -80,7 +83,7 @@ export function PrintDialog({
 
   useEffect(() => {
     let alive = true
-    window.desktop
+    getDocsHost()
       .listPrinters()
       .then((list) => {
         if (alive) setPrinters(list)
@@ -154,6 +157,7 @@ export function PrintDialog({
   }, [applyZoom, ready])
 
   const doPrint = async () => {
+    if (!canPrint()) return
     const els = pvPages()
     if (!selected || selected.length === 0 || printing) return
     const sel = new Set(selected)
@@ -163,7 +167,7 @@ export function PrintDialog({
     els.forEach((el, i) => el.classList.toggle('pv-print-skip', !sel.has(i)))
     const scale = setPrintZoom('printer')
     try {
-      const r = await window.desktop.print(
+      const r = await getDocsHost().print(
         scale,
         systemDialog ? { deviceName: null } : { deviceName, copies, collate, duplex },
         paperOfPreview(),

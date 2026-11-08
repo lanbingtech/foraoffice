@@ -243,6 +243,7 @@ export async function buildDeckFromDir(
   }
   const pages: unknown[] = []
   for (const file of files) {
+    assertAllowed(file, ctx.env, 'read')
     try {
       pages.push(JSON.parse(readFileSync(file, 'utf-8')))
     } catch (err) {

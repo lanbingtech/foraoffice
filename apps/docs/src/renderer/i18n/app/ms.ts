@@ -1,6 +1,8 @@
 import type { zh } from './zh'
 
 export const ms = {
+  appExternalAgentFailed: 'Tidak dapat menghantar tindakan kepada ejen luaran: {error}',
+  appDocumentDraftPending: 'Selesaikan atau buang draf dokumen terlebih dahulu.',
   appScTitle: 'Pintasan Papan Kekunci',
   appScFilter: 'Cari pintasan',
   appScNone: 'Tiada pintasan yang sepadan',

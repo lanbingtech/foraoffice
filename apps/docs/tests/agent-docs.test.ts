@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'
+import { createDocsRuntime } from '../src/renderer/runtime/docs-runtime'
+import { createNativeDocsWorkflows } from '../src/renderer/ai/native-workflows'
 import { AgentLoop, type AgentStreamCallbacks, type AgentTransport } from '@genoffice/agent-core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { createDocsSkill } from '../src/renderer/ai/docs-skill'
@@ -424,16 +426,21 @@ describe('web_search backend failures', () => {
     w.desktop = {
       webSearch: async () => ({ results: [], method: 'error', error: 'Serper 502' }),
     }
+    const runtime = createDocsRuntime({
+      current: () => ({ editor, identity: editor, numIds: NUM_IDS }),
+    })
     try {
-      const exec = await executeTool(
-        editor,
-        { id: 't', name: 'web_search', input: { query: 'genspark' } },
-        NUM_IDS,
-      )
+      const client = runtime.connect({ id: 'native-search' })
+      const exec = await createNativeDocsWorkflows(client).execute({
+        id: 't',
+        name: 'web_search',
+        input: { query: 'genspark' },
+      })
       expect(exec.isError).toBe(true)
       expect(exec.output).toContain('Serper 502')
       expect(exec.output).not.toContain('(no results)')
     } finally {
+      runtime.dispose()
       w.desktop = saved
     }
   })

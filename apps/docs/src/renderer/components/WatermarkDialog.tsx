@@ -1,3 +1,4 @@
+import { getDocsHost } from '../host/docs-host'
 /**
  * Word's Insert Watermark dialog: No watermark / Picture (scale, washout) /
  * Text (face, size, bold, italic, transparency, color, layout), with a page
@@ -210,7 +211,7 @@ export function WatermarkDialog({
   const canApply = mode === 'none' || resolved !== null
 
   const pick = async () => {
-    const picked = await window.desktop.pickImage()
+    const picked = await getDocsHost().pickImage()
     if (!picked) return
     if (!PICKABLE_MIME.has(picked.mime)) {
       setPickError(true)

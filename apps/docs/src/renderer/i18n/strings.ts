@@ -4,8 +4,19 @@ import { editorStrings } from './strings-editor'
 import { ribbonStrings } from './strings-ribbon'
 import { tableStrings } from './strings-table'
 import { zoteroStrings } from './strings-zotero'
+import type { Lang } from '@genoffice/i18n'
 
-export const strings = {
+type DocsStrings = Record<
+  keyof (typeof appStrings.zh &
+    typeof ribbonStrings.zh &
+    typeof tableStrings.zh &
+    typeof editorStrings.zh &
+    typeof aiStrings.zh &
+    typeof zoteroStrings.zh),
+  string
+>
+
+export const strings: Record<Lang, DocsStrings> = {
   zh: {
     ...appStrings.zh,
     ...ribbonStrings.zh,

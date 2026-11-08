@@ -26,5 +26,11 @@
       "@genoffice/xlsx-gateway/*": ["../../packages/xlsx-gateway/src/*"]
     }
   },
-  "include": ["src", "tests", "electron.vite.config.ts", "vitest.config.ts"]
+  "include": [
+    "src",
+    "tests",
+    "electron.vite.config.ts",
+    "vite.embedded.config.ts",
+    "vitest.config.ts"
+  ]
 }

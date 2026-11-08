@@ -12,6 +12,8 @@
  * Windows ignores `scaleFactor` outright (genoffice#1970), so it prints unzoomed.
  */
 
+import { supportsDocsPrintScale } from './host/docs-host'
+
 export type PrintJob = 'pdf' | 'printer'
 
 // Chromium accepts printToPDF scales in 0.1..2
@@ -35,7 +37,7 @@ const previewRoot = () => document.querySelector<HTMLElement>('.pagination-previ
 
 /** Zooms the preview sheets for print (print media only) and returns the job's print scale. */
 export function setPrintZoom(job: PrintJob = 'pdf'): number {
-  const zoom = printZoom(undefined, job)
+  const zoom = supportsDocsPrintScale() ? printZoom(undefined, job) : 1
   if (zoom !== 1) previewRoot()?.style.setProperty('--pv-print-zoom', String(zoom))
   return 1 / zoom
 }

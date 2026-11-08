@@ -43,6 +43,8 @@ export interface CliRunOutcome {
 }
 
 export interface CliRunOptions {
+  /** Cancel this invocation, including terminating an already-started child. */
+  signal?: AbortSignal
   /** text piped to stdin (for commands that read `-`, e.g. `create --ops -`) */
   input?: string
   /** abort the child after this long; default 120s (the CLI lazily loads jsdom) */
@@ -87,6 +89,13 @@ export const MAX_CLI_OUTPUT_BYTES = 64 * 1024 * 1024
 export function createCliRunner(paths: CliRunnerPaths): CliRunner {
   return {
     run(args, options = {}) {
+      if (options.signal?.aborted)
+        return Promise.resolve({
+          ok: false,
+          code: -1,
+          stdout: '',
+          stderr: 'genoffice canceled before starting',
+        })
       // timeoutMs arrives from tool callers: a NaN/Infinity value would break
       // the watchdog (NaN fires immediately, Infinity never), so normalize it.
       const timeoutMs = Number.isFinite(options.timeoutMs)
@@ -102,35 +111,56 @@ export function createCliRunner(paths: CliRunnerPaths): CliRunner {
         let stderr = ''
         let settled = false
         let truncated = false
+        let stopReason: string | undefined
+        let killTimer: ReturnType<typeof setTimeout> | undefined
         const finish = (outcome: CliRunOutcome): void => {
           if (settled) return
           settled = true
           clearTimeout(timer)
+          clearTimeout(killTimer)
+          options.signal?.removeEventListener('abort', abort)
           resolve(outcome)
+        }
+        const stop = (reason: string): void => {
+          if (stopReason) return
+          stopReason = reason
+          child.kill()
+          // POSIX children may ignore SIGTERM. Still wait for close after the
+          // forced stop; returning early would leave file IO running behind us.
+          killTimer = setTimeout(() => child.kill('SIGKILL'), 2000)
         }
         // Unbounded child output would OOM the shell main process: cap the
         // buffers and kill the child past the budget.
         const onChunk = (chunk: Buffer, stream: 'out' | 'err'): void => {
+          if (truncated) return
           if (stream === 'out') stdout += chunk.toString()
           else stderr += chunk.toString()
           if (stdout.length + stderr.length > MAX_CLI_OUTPUT_BYTES && !truncated) {
             truncated = true
-            child.kill()
+            stop(`output truncated past ${MAX_CLI_OUTPUT_BYTES} bytes`)
             stdout = stdout.slice(0, MAX_CLI_OUTPUT_BYTES)
             stderr = `${stderr.slice(0, 1000)}\n…output truncated past ${MAX_CLI_OUTPUT_BYTES} bytes`
-            finish({ ok: false, code: -1, stdout, stderr })
           }
         }
         const timer = setTimeout(() => {
-          child.kill()
-          finish({ ok: false, code: -1, stdout, stderr: `${stderr}\ngenoffice timed out` })
+          stop('genoffice timed out')
         }, timeoutMs)
+        const abort = () => {
+          stop('genoffice canceled')
+        }
+        options.signal?.addEventListener('abort', abort, { once: true })
         child.stdout?.on('data', (chunk: Buffer) => onChunk(chunk, 'out'))
         child.stderr?.on('data', (chunk: Buffer) => onChunk(chunk, 'err'))
         child.on('error', (err) => {
-          finish({ ok: false, code: -1, stdout, stderr: `${stderr}\n${String(err)}` })
+          if (!child.pid)
+            finish({ ok: false, code: -1, stdout, stderr: `${stderr}\n${String(err)}` })
+          else stop(String(err))
         })
         child.on('close', (code) => {
+          if (stopReason) {
+            finish({ ok: false, code: -1, stdout, stderr: `${stderr}\n${stopReason}` })
+            return
+          }
           const json = parseJson(stdout)
           finish({
             ok: code === 0 && json?.status === 'ok',

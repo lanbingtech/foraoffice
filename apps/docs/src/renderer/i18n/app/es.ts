@@ -1,6 +1,8 @@
 import type { zh } from './zh'
 
 export const es = {
+  appExternalAgentFailed: 'No se pudo enviar la acción al agente externo: {error}',
+  appDocumentDraftPending: 'Primero finaliza o descarta el borrador del documento.',
   appScTitle: 'Atajos de teclado',
   appScFilter: 'Buscar atajo',
   appScNone: 'No hay atajos coincidentes',

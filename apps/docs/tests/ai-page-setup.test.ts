@@ -186,7 +186,6 @@ describe('page setup tools', () => {
         null,
         undefined,
         undefined,
-        undefined,
         access,
       ) as { output: string; isError?: boolean }
 
@@ -223,7 +222,6 @@ describe('page setup tools', () => {
         null,
         undefined,
         undefined,
-        undefined,
         access,
       ) as { output: string; isError?: boolean; mutated: boolean }
     expect(run({ afterBlockIndex: 7 }).isError).toBe(true)
@@ -246,7 +244,6 @@ describe('page setup tools', () => {
         undefined,
         undefined,
         null,
-        undefined,
         undefined,
         undefined,
         access,

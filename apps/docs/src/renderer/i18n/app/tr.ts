@@ -1,6 +1,8 @@
 import type { zh } from './zh'
 
 export const tr = {
+  appExternalAgentFailed: 'İşlem harici aracıya gönderilemedi: {error}',
+  appDocumentDraftPending: 'Önce belge taslağını tamamlayın veya silin.',
   appScTitle: 'Klavye Kısayolları',
   appScFilter: 'Kısayollarda ara',
   appScNone: 'Eşleşen kısayol yok',

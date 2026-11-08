@@ -107,18 +107,17 @@ const BOOLEAN_FLAGS = new Set([
  * An apply with no positional at all is refused rather than guessed.
  */
 export function inPlaceTarget(args: readonly string[]): string | null {
-  const sub = args[1]
-  if (sub !== 'apply' && sub !== 'replace') return null
   let parsed: ParsedArgs
   try {
-    parsed = parseArgs(args.slice(2), BOOLEAN_FLAGS)
+    parsed = parseArgs(args, BOOLEAN_FLAGS)
   } catch (err) {
     throw new HomeCliError(err instanceof Error ? err.message : String(err))
   }
+  const [command, sub, target] = parsed.positionals
+  if (sub !== 'apply' && sub !== 'replace') return null
   if (parsed.flags.out !== undefined || parsed.flags.help !== undefined) return null
-  const target = parsed.positionals[0]
   if (target === undefined) {
-    throw new HomeCliError(`${args[0]} ${sub} needs the file to edit as an argument`)
+    throw new HomeCliError(`${command} ${sub} needs the file to edit as an argument`)
   }
   return target
 }

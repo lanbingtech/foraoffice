@@ -50,6 +50,21 @@ afterEach(() => {
 const errnoError = (code: string) => Object.assign(new Error(`${code}: injected`), { code })
 
 describe('atomicWriteFile', () => {
+  it('refuses a target created while non-overwriting bytes are being prepared', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'eu-aw-exclusive-'))
+    const target = join(dir, 'a.docx')
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+    vi.mocked(writeFile).mockImplementationOnce(async (...args) => {
+      await actual.writeFile(...args)
+      await actual.writeFile(target, 'concurrent document')
+    })
+    await expect(
+      atomicWriteFile(target, Buffer.from('new'), { overwrite: false }),
+    ).rejects.toMatchObject({ code: 'EEXIST' })
+    expect(readFileSync(target, 'utf8')).toBe('concurrent document')
+    expect(readdirSync(dir)).toEqual(['a.docx'])
+  })
+
   it('fsyncs the temp file before the rename publishes it', async () => {
     dir = mkdtempSync(join(tmpdir(), 'eu-aw-'))
     const target = join(dir, 'a.docx')

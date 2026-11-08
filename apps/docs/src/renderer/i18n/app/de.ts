@@ -1,6 +1,9 @@
 import type { zh } from './zh'
 
 export const de = {
+  appExternalAgentFailed:
+    'Die Aktion konnte nicht an den externen Agenten gesendet werden: {error}',
+  appDocumentDraftPending: 'Schließen Sie zuerst den Dokumententwurf ab oder verwerfen Sie ihn.',
   appScTitle: 'Tastenkombinationen',
   appScFilter: 'Tastenkombination suchen',
   appScNone: 'Keine passenden Tastenkombinationen',

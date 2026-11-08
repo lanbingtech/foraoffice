@@ -1,6 +1,8 @@
 import type { zh } from './zh'
 
 export const vi = {
+  appExternalAgentFailed: 'Không thể gửi thao tác đến tác nhân bên ngoài: {error}',
+  appDocumentDraftPending: 'Trước tiên hãy hoàn tất hoặc hủy bản nháp tài liệu.',
   appScTitle: 'Phím tắt bàn phím',
   appScFilter: 'Tìm kiếm phím tắt',
   appScNone: 'Không có phím tắt phù hợp',

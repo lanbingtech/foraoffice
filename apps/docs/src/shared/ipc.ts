@@ -1,3 +1,6 @@
+import type { DocsErrorCode, DocsSaveOutcome } from './operation-result'
+import type { Lang } from '@genoffice/i18n'
+
 export interface OpenFileResult {
   path: string
   name: string
@@ -108,7 +111,6 @@ export type {
   AiStreamRequest,
   GenSparkAccountStatus,
 } from '@genoffice/ai-provider'
-export { AI_PROVIDERS } from '@genoffice/ai-provider/browser'
 
 // ---- agent protocol: canonical types live in @genoffice/agent-core ----
 
@@ -299,6 +301,10 @@ export interface CreateDocumentRequest {
 
 export interface CreateDocumentResult {
   ok: boolean
+  opened?: boolean
+  errorCode?: DocsErrorCode
+  /** An acknowledged creation is an independent effect; null means its outcome is unknown. */
+  committed?: boolean | null
   /** the created file, when it is written directly (pdf/md); docx opens as a new tab that saves itself */
   path?: string
   error?: string
@@ -308,6 +314,8 @@ export interface CreateDocumentResult {
 export interface AiDocContent {
   title: string
   html: string
+  targetPath?: string
+  creationId?: string
 }
 
 export type ZoteroCommand =
@@ -349,9 +357,16 @@ export type McpEditorCommand =
   | 'insert_picture'
   | 'read_document'
   | 'save_document'
+  | 'execute_tool'
+  | 'cancel_operation'
+  | 'close_caller'
 
 export interface McpCommandMessage {
   requestId: string
+  /** Assigned by the MCP transport, never accepted from tool input. */
+  callerId?: string
+  /** Host-assigned action scope; not a model-supplied document selector. */
+  bindingId?: string
   command: McpEditorCommand
   payload: unknown
 }
@@ -367,8 +382,11 @@ export interface McpSaveResult {
   ok: boolean
   path?: string
   error?: string
+  errorCode?: DocsErrorCode
   passwordIntentPending?: boolean
   dataUrl?: string
+  /** null means IO began but its outcome could not be confirmed. */
+  committed?: boolean | null
 }
 
 /** Chromium's misspelling data for a claimed body right-click (`seq` = the claim it answers) */
@@ -407,17 +425,76 @@ export interface PrinterInfo {
   displayName: string
 }
 
-export interface DesktopApi {
+/** Model and account services belong to the native Agent application adapter. */
+export interface DocsNativeAgentApi {
+  getAiSettings(): Promise<AiSettings>
+  setAiSettings(settings: AiSettings): Promise<void>
+  /** ai-settings.json was rewritten by any renderer; re-read it */
+  onAiSettingsChanged(handler: () => void): () => void
+  /** shell only: switch to Home and open Settings › AI Model (rejects in standalone) */
+  openAiModelSettings(): Promise<void>
+  aiChat(request: AiChatRequest): Promise<AiChatResponse>
+  /** start a streaming AI call; deltas arrive via onAiStream with the same requestId */
+  aiStream(request: AiStreamRequest): Promise<void>
+  aiStreamCancel(requestId: string): Promise<void>
+  /** Genspark account status (gsk login state); withEmail also returns the email (needs a network request, slower) */
+  aiGskStatus(withEmail?: boolean): Promise<GenSparkAccountStatus>
+  /** Open the browser to log in to Genspark (fire-and-forget; aiGskStatus flips to logged-in when done) */
+  aiGskLogin(): Promise<void>
+  webSearch(
+    query: string,
+    maxResults?: number,
+  ): Promise<{
+    results: Array<{ title: string; url: string; snippet: string }>
+    answer?: string
+    method: string
+    /** failure reason when method === 'error' */
+    error?: string
+  }>
+  imageSearch(
+    query: string,
+    maxResults?: number,
+  ): Promise<{
+    images: Array<{
+      title: string
+      imageUrl: string
+      sourceUrl: string
+      source: string
+      width?: number
+      height?: number
+    }>
+    method: string
+    /** failure reason when method === 'error' */
+    error?: string
+  }>
+  /** media understanding (image/audio/video) via the configured media provider; returns analysis text */
+  analyzeMedia(op: {
+    mediaUrls: string[]
+    requirements: string
+  }): Promise<{ text?: string; error?: string }>
+  /** AI image generation via the Genspark cloud channel (requires login + cloud tools) */
+  aiGenerateImage(op: {
+    prompt: string
+    aspectRatio?: string
+  }): Promise<{ url?: string; error?: string }>
+  /** subscribe to AI stream chunks; returns unsubscribe */
+  onAiStream(handler: (chunk: AiStreamChunk) => void): () => void
+}
+
+/** Native preload combines both roles; the embedded editor receives DocsEditorApi only. */
+export interface DesktopApi extends DocsEditorApi, DocsNativeAgentApi {}
+
+export interface DocsEditorApi {
+  /** Optional host lifecycle notification for file protections across native services. */
+  reportDocumentPath?(path: string | null): void
+  /** A host-created Word view acknowledges the actual first-save result. */
+  reportCreatedDocument(result: { creationId: string; outcome: DocsSaveOutcome }): void
   /** current UI language (persisted by the shell in app-settings.json) */
-  getLanguage(): Promise<'zh' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'th' | 'id' | 'ru' | 'ar'>
+  getLanguage(): Promise<Lang>
   /** OS regional-settings locale (BCP 47); Word derives the new-document paper size from it */
   getSystemLocale(): Promise<string>
   /** language switched from the shell home page */
-  onLanguageChanged(
-    handler: (
-      lang: 'zh' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'th' | 'id' | 'ru' | 'ar',
-    ) => void,
-  ): () => void
+  onLanguageChanged(handler: (lang: Lang) => void): () => void
   /** current UI theme preference (persisted by the shell in app-settings.json) */
   getTheme(): Promise<UiTheme>
   /** theme switched from the shell home page */
@@ -543,7 +620,12 @@ export interface DesktopApi {
   }>
   /** MCP-driven output: write the current document to an explicit absolute path
    *  with no dialog; refuses to replace an existing file unless overwrite is true */
-  saveDocxTo(path: string, data: ArrayBuffer, overwrite: boolean): Promise<McpSaveResult>
+  saveDocxTo(
+    path: string,
+    data: ArrayBuffer,
+    overwrite: boolean,
+    sourcePath?: string | null,
+  ): Promise<McpSaveResult>
   /** MCP bridge: receive an editor command pushed by the shell main process */
   onMcpCommand(handler: (message: McpCommandMessage) => void): () => void
   /** MCP bridge: report a command's outcome back to the shell main process */
@@ -558,12 +640,6 @@ export interface DesktopApi {
   writeMergeOutput(request: MergeOutputRequest): Promise<MergeOutputResponse>
   /** vertical metrics of an installed family (exact name match), null when missing */
   fontMetrics(family: string): Promise<FaceVerticalMetrics | null>
-  getAiSettings(): Promise<AiSettings>
-  setAiSettings(settings: AiSettings): Promise<void>
-  /** ai-settings.json was rewritten by any renderer; re-read it */
-  onAiSettingsChanged(handler: () => void): () => void
-  /** shell only: switch to Home and open Settings › AI Model (rejects in standalone) */
-  openAiModelSettings(): Promise<void>
   /** shell: switch to Home and open Settings › Integrations (the skills list) */
   openSkillsSettings(): Promise<void>
   /** print the current window; ok=false without error = canceled.
@@ -629,51 +705,7 @@ export interface DesktopApi {
   saveImageAs(src: string): Promise<{ ok: boolean; path?: string; error?: string }>
   /** Native context menu "View Image" on a chrome surface such as the AI panel */
   onViewImage(handler: (src: string) => void): () => void
-  aiChat(request: AiChatRequest): Promise<AiChatResponse>
-  /** start a streaming AI call; deltas arrive via onAiStream with the same requestId */
-  aiStream(request: AiStreamRequest): Promise<void>
-  aiStreamCancel(requestId: string): Promise<void>
-  /** Genspark account status (gsk login state); withEmail also returns the email (needs a network request, slower) */
-  aiGskStatus(withEmail?: boolean): Promise<GenSparkAccountStatus>
-  /** Open the browser to log in to Genspark (fire-and-forget; aiGskStatus flips to logged-in when done) */
-  aiGskLogin(): Promise<void>
-  webSearch(
-    query: string,
-    maxResults?: number,
-  ): Promise<{
-    results: Array<{ title: string; url: string; snippet: string }>
-    answer?: string
-    method: string
-    /** failure reason when method === 'error' */
-    error?: string
-  }>
-  imageSearch(
-    query: string,
-    maxResults?: number,
-  ): Promise<{
-    images: Array<{
-      title: string
-      imageUrl: string
-      sourceUrl: string
-      source: string
-      width?: number
-      height?: number
-    }>
-    method: string
-    /** failure reason when method === 'error' */
-    error?: string
-  }>
-  /** media understanding (image/audio/video) via the configured media provider; returns analysis text */
-  analyzeMedia(op: {
-    mediaUrls: string[]
-    requirements: string
-  }): Promise<{ text?: string; error?: string }>
   fetchImage(url: string): Promise<{ base64: string; mime: string } | null>
-  /** AI image generation via the Genspark cloud channel (requires login + cloud tools) */
-  aiGenerateImage(op: {
-    prompt: string
-    aspectRatio?: string
-  }): Promise<{ url?: string; error?: string }>
   /** file picker for chat attachments (multi-select) */
   pickAttachments(): Promise<AttachmentAddResult | null>
   /** validate dropped paths and return attachment metadata */
@@ -718,8 +750,6 @@ export interface DesktopApi {
   /** all open docs tabs, for View → Switch Tab */
   listDocsTabs(): Promise<DocsTabInfo[]>
   focusDocsTab(id: string): Promise<void>
-  /** subscribe to AI stream chunks; returns unsubscribe */
-  onAiStream(handler: (chunk: AiStreamChunk) => void): () => void
   /** subscribe to native menu commands; returns unsubscribe */
   onMenuCommand(handler: (command: MenuCommand, payload?: string) => void): () => void
   /** Close guard: main process queries pre-close state (dirty flag + autosave switch; if autosave is on, save silently without a dialog) */
@@ -746,6 +776,8 @@ export interface UserSkillEntry {
 
 export interface UserCliRun {
   ok: boolean
+  /** Independent file effect; null when a failed/terminated child cannot confirm its outcome. */
+  committed?: boolean | null
   /** process exit code, or -1 when the process never started */
   code: number
   json?: {

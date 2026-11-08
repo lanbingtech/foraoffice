@@ -1,6 +1,8 @@
 import type { zh } from './zh'
 
 export const en = {
+  appExternalAgentFailed: 'Could not submit the action to the external Agent: {error}',
+  appDocumentDraftPending: 'Finish or discard the document draft first.',
   appScTitle: 'Keyboard Shortcuts',
   appScFilter: 'Search shortcuts',
   appScNone: 'No matching shortcuts',

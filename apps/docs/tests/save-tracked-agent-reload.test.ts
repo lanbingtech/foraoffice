@@ -10,8 +10,19 @@ import { editorExtensions } from '../src/renderer/editor/extensions'
 import { blocksToPmDoc, pmDocOptions } from '../src/renderer/editor/convert'
 import { collectRevisions } from '../src/renderer/editor/revisions'
 import { executeTool } from '../src/renderer/ai/tools'
-import { noteDocumentSwapped, save, type FileActionContext } from '../src/renderer/file-actions'
+import {
+  buildDocBytes,
+  exportHtml,
+  exportMarkdown,
+  exportPdf,
+  exportImages,
+  noteDocumentSwapped,
+  save,
+  type FileActionContext,
+} from '../src/renderer/file-actions'
+import { DraftLanding } from '../src/renderer/runtime/draft-landing'
 import { EMPTY_HF_VARIANTS } from '../src/renderer/doc-state'
+import { createDocsRuntime } from '../src/renderer/runtime/docs-runtime'
 
 ;(globalThis as { CSS?: unknown }).CSS ??= { escape: (s: string) => s }
 
@@ -115,6 +126,74 @@ async function assertUntouched(original: Uint8Array, saved: Uint8Array) {
 }
 
 describe('production save reload with track changes enabled', () => {
+  it('keeps a captured character selection after save rebases the document anchors', async () => {
+    const { editor, ctx } = await fixture(false)
+    let start = 0
+    editor.state.doc.descendants((node, pos) => {
+      if (node.isText && node.text?.startsWith('Respond')) start = pos
+    })
+    editor.commands.setTextSelection({ from: start, to: start + 'Respond'.length })
+    const runtime = createDocsRuntime({
+      current: () => ({ editor, identity: editor, numIds: { bullet: null, ordered: null } }),
+      save: async ({ path }) => {
+        const ok = await save(ctx, false, true)
+        return { ok, path, committed: ok, pending: !ok }
+      },
+    })
+    try {
+      const scope = runtime.capture()
+      const client = scope.connect({ id: 'captured-edit' })
+      expect(
+        (
+          await client.execute({
+            id: 'insert',
+            name: 'insert_content',
+            input: { afterBlockIndex: -1, html: '<p>Inserted before</p>' },
+          })
+        ).isError,
+      ).not.toBe(true)
+      expect((await client.save({ path: ctx.doc!.filePath!, overwrite: true })).ok).toBe(true)
+      expect(
+        (
+          await client.execute({
+            id: 'undo-insert',
+            name: 'document_history',
+            input: { action: 'undo' },
+          })
+        ).isError,
+      ).not.toBe(true)
+      expect(editor.getText()).not.toContain('Inserted before')
+      expect(
+        (
+          await client.execute({
+            id: 'redo-insert',
+            name: 'document_history',
+            input: { action: 'redo' },
+          })
+        ).isError,
+      ).not.toBe(true)
+      client.context({ captureSelection: false })
+      expect(
+        (
+          await client.execute({
+            id: 'replace',
+            name: 'replace_selection',
+            input: { html: 'Confirmed' },
+          })
+        ).isError,
+      ).not.toBe(true)
+      expect(editor.state.doc.childCount).toBe(5)
+      expect(editor.getText()).toContain('Confirmed within forty-eight (48) hours.')
+      expect(editor.getText()).toContain('Inserted before')
+      expect(editor.getText()).toContain('Unchanged opening paragraph.')
+      expect(editor.getText()).toContain('Unchanged closing paragraph.')
+      expect((await client.save({ path: ctx.doc!.filePath!, overwrite: true })).ok).toBe(true)
+      const reparsed = await parseDocx(await readFile(ctx.doc!.filePath!))
+      expect(reparsed.blocks.filter((block) => block.type !== 'passthrough')).toHaveLength(5)
+    } finally {
+      runtime.dispose()
+    }
+  })
   it.each([false, true])(
     'keeps the live model aligned after an agent edit (auto=%s)',
     async (auto) => {
@@ -181,5 +260,68 @@ describe('production save reload with track changes enabled', () => {
     expect(await save(ctx, false, true)).toBe(true)
     expect(editor.state.doc.childCount).toBe(4)
     expect(collectRevisions(editor.state.doc)).toHaveLength(0)
+  })
+
+  it('refuses serialization of an unsettled draft for recovery or export', async () => {
+    const { editor, ctx } = await fixture(false)
+    const draft = new DraftLanding(
+      editor,
+      { bullet: null, ordered: null },
+      { kind: 'after', index: 0 },
+    )
+    try {
+      draft.update('<p>Unaccepted preview</p>')
+      expect(await buildDocBytes(ctx)).toBeNull()
+      expect(
+        await Promise.all([
+          exportHtml(ctx),
+          exportMarkdown(ctx),
+          exportPdf(ctx),
+          exportImages(ctx),
+        ]),
+      ).toEqual([false, false, false, false])
+    } finally {
+      draft.finish()
+    }
+    expect(await buildDocBytes(ctx)).not.toBeNull()
+  })
+
+  it('passes the opened source identity to an explicit save target', async () => {
+    const { ctx, path } = await fixture(false)
+    const target = join(dirs[dirs.length - 1], 'explicit.docx')
+    let sourcePath: string | null | undefined
+    window.desktop = {
+      saveDocxTo: async (
+        output: string,
+        bytes: ArrayBuffer,
+        _overwrite: boolean,
+        source?: string | null,
+      ) => {
+        sourcePath = source
+        await writeFile(output, new Uint8Array(bytes))
+        return { ok: true, path: output }
+      },
+    } as unknown as typeof window.desktop
+    expect(await save(ctx, false, true, undefined, { path: target, overwrite: false })).toBe(true)
+    expect(sourcePath).toBe(path)
+  })
+
+  it('preserves document-side edits made while the file is being written', async () => {
+    const { ctx, editor } = await fixture(false)
+    const body = editor.state.doc
+    let version = {}
+    ctx.getDocumentStateVersion = () => version
+    window.desktop.saveDocx = async (target, data) => {
+      await writeFile(target, new Uint8Array(data))
+      ctx.styleUpserts = {
+        LaterStyle: { styleId: 'LaterStyle', name: 'Later style', type: 'paragraph' },
+      }
+      version = {}
+      return { ok: true }
+    }
+    expect(await save(ctx, false, true)).toBe(true)
+    expect(ctx.saveIncompleteRef.current).toBe(true)
+    expect(ctx.styleUpserts).toHaveProperty('LaterStyle')
+    expect(editor.state.doc).toBe(body)
   })
 })

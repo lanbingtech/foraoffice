@@ -32,6 +32,8 @@ interface AnchorRect {
 
 interface Props {
   editor: Editor
+  /** External mode opens the Harness composer with a captured editor scope. */
+  onOpenHarness?: () => void
   queueFull: boolean
   getItem: (qid: string) => DocsEditQueueItem | undefined
   /** run the instruction right away as a normal selection-scoped request */
@@ -94,6 +96,7 @@ function rangeRect(editor: Editor, from: number, to: number): AnchorRect | null 
 
 export function AiAskPopover({
   editor,
+  onOpenHarness,
   queueFull,
   getItem,
   onSendNow,
@@ -228,6 +231,10 @@ export function AiAskPopover({
 
   // the input takes the DOM selection with it: keep the targeted range visible while the popover is open
   const openFromSelection = () => {
+    if (onOpenHarness) {
+      onOpenHarness()
+      return
+    }
     setText('')
     setKind(selectionKind(editor))
     setOpen({ mode: 'new' })
@@ -412,7 +419,7 @@ export function AiAskPopover({
           {t('aiAskBtn')}
         </button>
       )}
-      {box}
+      {!onOpenHarness && box}
     </>
   )
 }

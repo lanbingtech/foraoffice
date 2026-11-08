@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { clearPrintZoom, printZoom, setPrintZoom } from '../src/renderer/print-zoom'
+import {
+  createExternalDocsHost,
+  installDocsHost,
+  type DocsEditorServices,
+} from '../src/renderer/host/docs-host'
 
 const setDpr = (dpr: number) =>
   Object.defineProperty(window, 'devicePixelRatio', { value: dpr, configurable: true })
@@ -32,6 +37,24 @@ describe('printZoom', () => {
 })
 
 describe('setPrintZoom', () => {
+  it('uses unscaled print geometry when the host cannot apply inverse native scaling', () => {
+    document.body.innerHTML = '<div class="pagination-preview"></div>'
+    setDpr(2)
+    const release = installDocsHost({
+      ...createExternalDocsHost('browser', {} as DocsEditorServices),
+      supportsPrintScale: false,
+    })
+    try {
+      expect(setPrintZoom()).toBe(1)
+      expect(
+        document
+          .querySelector<HTMLElement>('.pagination-preview')!
+          .style.getPropertyValue('--pv-print-zoom'),
+      ).toBe('')
+    } finally {
+      release()
+    }
+  })
   afterEach(() => {
     document.body.innerHTML = ''
     setDpr(1)

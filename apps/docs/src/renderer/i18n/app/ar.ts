@@ -1,6 +1,8 @@
 import type { zh } from './zh'
 
 export const ar = {
+  appExternalAgentFailed: 'تعذر إرسال الإجراء إلى الوكيل الخارجي: {error}',
+  appDocumentDraftPending: 'أكمل مسودة المستند أو تجاهلها أولاً.',
   appScTitle: 'اختصارات لوحة المفاتيح',
   appScFilter: 'البحث عن اختصار',
   appScNone: 'لا توجد اختصارات مطابقة',

@@ -9,7 +9,7 @@ import {
 import {} from '@tiptap/pm/state'
 import type { EditorView } from '@tiptap/pm/view'
 import {} from '@tiptap/pm/tables'
-import { WORDART_PRESETS, wordArtStrokePx } from '@genoffice/ui'
+import { WORDART_PRESETS, wordArtStrokePx } from '@genoffice/ui/wordart-presets'
 import {
   autospaceMode,
   cssAutoLineMult,

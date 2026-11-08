@@ -1,6 +1,8 @@
 import type { zh } from './zh'
 
 export const pt = {
+  appExternalAgentFailed: 'Não foi possível enviar a ação ao agente externo: {error}',
+  appDocumentDraftPending: 'Primeiro conclua ou descarte o rascunho do documento.',
   appScTitle: 'Atalhos de Teclado',
   appScFilter: 'Pesquisar atalho',
   appScNone: 'Nenhum atalho correspondente',

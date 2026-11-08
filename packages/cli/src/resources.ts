@@ -98,6 +98,9 @@ export interface AppLaunch {
 /** How to start the GenOffice GUI: the app binary that hosts this CLI, an installed app, or the dev checkout. */
 export function appLaunch(env: NodeJS.ProcessEnv = process.env): AppLaunch | null {
   if (env.GENOFFICE_APP_BIN) return { command: env.GENOFFICE_APP_BIN, args: [] }
+  // Embedded hosts may supply a renderer explicitly while refusing ambient
+  // installed/checkout applications, which would reopen a different UI host.
+  if (env.GENOFFICE_APP_DISCOVERY === 'off') return null
   if (packagedResourcesDir() && process.versions.electron) {
     return { command: process.execPath, args: [] }
   }

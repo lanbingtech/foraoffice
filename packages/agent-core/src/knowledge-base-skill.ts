@@ -1,5 +1,6 @@
 import type { AgentToolDef } from './types'
 import type { AgentSkill } from './skill'
+import { ResourceAccessError } from './resource-access'
 
 /**
  * The reader's starred files (the star corpus) as a searchable, readable body.
@@ -101,39 +102,41 @@ export function kbCiteHref(path: string): string {
 const KB_EMPTY =
   'The knowledge base is empty (the user has starred no files). Do not search it again; work from the request and the open document.'
 
+export const READ_KNOWLEDGE_FILE_TOOL: AgentToolDef = {
+  name: 'read_knowledge_file',
+  description:
+    'Read a page of a knowledge-base file’s parsed text (docx/pdf/xlsx/pptx/text are parsed locally). ' +
+    'Read offset=0 first; continue with the returned offset while totalChars says more remains.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      index: {
+        type: 'integer',
+        description: 'file index from the knowledge-base list (0-based)',
+      },
+      offset: { type: 'integer', description: 'character offset to read from; default 0' },
+    },
+    required: ['index'],
+  },
+}
+
+export const SEARCH_KNOWLEDGE_BASE_TOOL: AgentToolDef = {
+  name: 'search_knowledge_base',
+  description:
+    'Full-text search over the knowledge base (the user’s starred files), for requests that refer to those files; not for writing or formatting from the request alone. ' +
+    'Returns the matching files with a snippet around the first hit. Literal-word matching: ' +
+    'retry with synonyms or the other language when it returns nothing.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'search words' },
+      limit: { type: 'integer', description: 'max results, default 8, at most 20' },
+    },
+    required: ['query'],
+  },
+}
+
 export function createKnowledgeBaseSkill(deps: KnowledgeBaseDeps): AgentSkill {
-  const readTool: AgentToolDef = {
-    name: 'read_knowledge_file',
-    description:
-      'Read a page of a knowledge-base file’s parsed text (docx/pdf/xlsx/pptx/text are parsed locally). ' +
-      'Read offset=0 first; continue with the returned offset while totalChars says more remains.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        index: {
-          type: 'integer',
-          description: 'file index from the knowledge-base list (0-based)',
-        },
-        offset: { type: 'integer', description: 'character offset to read from; default 0' },
-      },
-      required: ['index'],
-    },
-  }
-  const searchTool: AgentToolDef = {
-    name: 'search_knowledge_base',
-    description:
-      'Full-text search over the knowledge base (the user’s starred files), for requests that refer to those files; not for writing or formatting from the request alone. ' +
-      'Returns the matching files with a snippet around the first hit. Literal-word matching: ' +
-      'retry with synonyms or the other language when it returns nothing.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'search words' },
-        limit: { type: 'integer', description: 'max results, default 8, at most 20' },
-      },
-      required: ['query'],
-    },
-  }
   const empty = () => deps.listFiles().length === 0
   return {
     id: 'knowledge-base',
@@ -143,7 +146,7 @@ export function createKnowledgeBaseSkill(deps: KnowledgeBaseDeps): AgentSkill {
       return empty() ? '' : KB_SYSTEM_PROMPT
     },
     get tools() {
-      return empty() ? [] : [readTool, searchTool]
+      return empty() ? [] : [READ_KNOWLEDGE_FILE_TOOL, SEARCH_KNOWLEDGE_BASE_TOOL]
     },
     buildContext: () => {
       const files = deps.listFiles()
@@ -161,7 +164,8 @@ export function createKnowledgeBaseSkill(deps: KnowledgeBaseDeps): AgentSkill {
           : `${plain.join('\n')}\n\n(The corpus is large; cite links come with search results.)`
       return `Knowledge base — the user's starred files (index | folder | file | type | size):\n${body}`
     },
-    executeTool: async (call) => {
+    executeTool: async (call, signal) => {
+      signal?.throwIfAborted()
       if (deps.listFiles().length === 0) {
         return { output: KB_EMPTY, isError: true, summary: 'knowledge base empty' }
       }
@@ -174,7 +178,11 @@ export function createKnowledgeBaseSkill(deps: KnowledgeBaseDeps): AgentSkill {
         const limit = Number.isFinite(limitRaw)
           ? Math.min(Math.max(1, Math.floor(limitRaw)), 20)
           : 8
-        const hits = await deps.search(query, limit)
+        const authorized = new Set(deps.listFiles().map((file) => file.path))
+        const found = await deps.search(query, limit)
+        signal?.throwIfAborted()
+        const current = new Set(deps.listFiles().map((file) => file.path))
+        const hits = found.filter((hit) => authorized.has(hit.path) && current.has(hit.path))
         if (hits.length === 0)
           return { output: 'no match. Retry with synonyms or the other language.', summary: query }
         const lines = hits.map(
@@ -195,7 +203,13 @@ export function createKnowledgeBaseSkill(deps: KnowledgeBaseDeps): AgentSkill {
           }
         }
         const offsetRaw = Number(call.input.offset)
-        const page = await deps.read(file.path, Number.isFinite(offsetRaw) ? offsetRaw : 0)
+        const page = await deps
+          .read(file.path, Number.isFinite(offsetRaw) ? offsetRaw : 0)
+          .finally(() => {
+            if (!deps.listFiles().some((current) => current.path === file.path))
+              throw new ResourceAccessError('Knowledge source access was revoked during the read')
+            signal?.throwIfAborted()
+          })
         const more = page.offset + page.text.length < page.totalChars
         return {
           output:

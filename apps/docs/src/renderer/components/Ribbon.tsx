@@ -1,3 +1,4 @@
+import { getDocsHost } from '../host/docs-host'
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { Lang } from '@genoffice/i18n'
@@ -50,7 +51,7 @@ import {
   useDismissablePopover,
   useRibbonCollapse,
   useScrollWindow,
-} from '@genoffice/ui'
+} from '@genoffice/ui/editor'
 import { HIGHLIGHT_CSS } from '../editor/extensions'
 import { applyCase, type CaseMode } from '../editor/case-transform'
 import { isRtlUiLang, setParagraphDirection, setSelectionAlign } from '../editor/direction'
@@ -1368,7 +1369,7 @@ function RibbonInner({
   }
 
   const replacePicture = async () => {
-    const picked = await window.desktop.pickImage()
+    const picked = await getDocsHost().pickImage()
     if (!picked) return
     await applyPictureBytes(`data:${picked.mime};base64,${picked.base64}`)
   }

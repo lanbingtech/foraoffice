@@ -56,6 +56,50 @@ function makeDeps(overrides: Partial<KnowledgeBaseDeps> = {}): KnowledgeBaseDeps
 }
 
 describe('createKnowledgeBaseSkill', () => {
+  it('does not deliver a source removed from the corpus during a pending read', async () => {
+    let files = CORPUS
+    let release!: (page: { text: string; totalChars: number; offset: number }) => void
+    const skill = createKnowledgeBaseSkill({
+      listFiles: () => files,
+      search: async () => [],
+      read: () =>
+        new Promise((resolve) => {
+          release = resolve
+        }),
+    })
+    const pending = skill.executeTool({
+      id: 'read',
+      name: 'read_knowledge_file',
+      input: { index: 0 },
+    })
+    files = CORPUS.slice(1)
+    release({ text: 'Private evidence', totalChars: 16, offset: 0 })
+    await expect(pending).rejects.toThrow(/revoked/)
+  })
+
+  it('returns search snippets only for sources authorized before and after the search', async () => {
+    let files = CORPUS
+    let release!: (
+      hits: Array<{ path: string; name: string; ext: string; folder: string; snippet: string }>,
+    ) => void
+    const skill = createKnowledgeBaseSkill({
+      listFiles: () => files,
+      read: async () => ({ text: '', totalChars: 0, offset: 0 }),
+      search: () =>
+        new Promise((resolve) => {
+          release = resolve
+        }),
+    })
+    const pending = skill.executeTool({
+      id: 'search',
+      name: 'search_knowledge_base',
+      input: { query: 'evidence' },
+    })
+    files = CORPUS.slice(1)
+    release([{ ...CORPUS[0]!, snippet: 'Private evidence' }])
+    expect((await pending).output).not.toContain('Private evidence')
+  })
+
   it('builds the corpus listing with folder, name and the absolute paths for citations', async () => {
     const skill = createKnowledgeBaseSkill(makeDeps())
     const context = skill.buildContext!()

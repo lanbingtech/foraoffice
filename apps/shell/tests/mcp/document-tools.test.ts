@@ -14,6 +14,7 @@ import {
 } from '../../src/main/mcp/tools/document-tools'
 import { createSessionHost, createSessionTools } from '../../src/main/mcp/tools/session-tools'
 import { fakeCli } from './fake-cli'
+import { LIVE_DOCS_TOOL_NAMES } from './docs-tool-names'
 
 /**
  * The docx tool surface over a real MCP session. Files are written to a temp dir
@@ -340,21 +341,19 @@ describe('M6 visible-editing tools (docs control wired)', () => {
 
   it('registers the visible session tools alongside the file tools', async () => {
     const { tools } = await client2!.listTools()
-    expect(tools.map((t) => t.name).sort()).toEqual([
-      'apply_ops',
-      'create_docx',
-      'create_session',
-      'fill_template',
-      'get_app_info',
-      'insert_content',
-      'insert_picture',
-      'open_in_genoffice',
-      'read_document',
-      'read_docx',
-      'read_docx_properties',
-      'replace_blocks',
-      'save_session',
-    ])
+    expect(tools.map((t) => t.name).sort()).toEqual(
+      [
+        ...LIVE_DOCS_TOOL_NAMES,
+        'create_docx',
+        'create_session',
+        'fill_template',
+        'get_app_info',
+        'open_in_genoffice',
+        'read_docx',
+        'read_docx_properties',
+        'save_session',
+      ].sort(),
+    )
   })
 
   it('create_session opens a blank docx tab and returns a session id', async () => {

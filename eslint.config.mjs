@@ -78,4 +78,8 @@ export default tseslint.config(
       '@typescript-eslint/no-require-imports': 'off',
     },
   },
+  {
+    files: ['apps/docs/hosts/qt/web/*.js'],
+    languageOptions: { globals: { ...globals.browser } },
+  },
 )

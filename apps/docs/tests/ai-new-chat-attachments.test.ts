@@ -6,7 +6,8 @@ import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { AiPanel } from '../src/renderer/ai/AiPanel'
 import { t } from '../src/renderer/i18n/locale'
-import { AI_PROVIDERS, type AiSettings } from '../src/shared/ipc'
+import { AI_PROVIDERS } from '@genoffice/ai-provider/browser'
+import { type AiSettings } from '../src/shared/ipc'
 
 // New chat must drop staged composer attachments along with the transcript:
 // otherwise unsent files silently join the next chat's file context

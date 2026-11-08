@@ -1,6 +1,8 @@
 import type { zh } from './zh'
 
 export const ko = {
+  appExternalAgentFailed: '외부 에이전트에 작업을 제출하지 못했습니다: {error}',
+  appDocumentDraftPending: '먼저 문서 초안을 확정하거나 삭제하세요.',
   appScTitle: '키보드 바로 가기',
   appScFilter: '바로 가기 검색',
   appScNone: '일치하는 바로 가기가 없습니다',

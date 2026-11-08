@@ -1,3 +1,5 @@
+import { getNativeAgentServices, getOptionalNativeAgentServices } from '../host/docs-host'
+import { getDocsHost, getOptionalDocsHost, getDocsProjects } from '../host/docs-host'
 import { showToast } from '../components/toast-bus'
 import {
   aiPanelWidthAtPointer,
@@ -46,12 +48,7 @@ import type { PmNode } from '../editor/convert'
 import { TABLE_TRAILING_SKIP } from '../editor/extensions'
 import { countWords, findNumId, type NumIds } from './protocol'
 import { DOC_NAV_SCHEME, navigateToBlock, parseDocNavHref } from './doc-nav'
-import {
-  markDocSeen,
-  type AiCommentsAccess,
-  type AiDocExtras,
-  type AiHeaderFooterAccess,
-} from './tools'
+import { type AiCommentsAccess, type AiDocExtras, type AiHeaderFooterAccess } from './tools'
 import type { AiPageSetupAccess } from './page-setup'
 import type { AiNotesAccess } from './note-ops'
 import { createDocsSkill } from './docs-skill'
@@ -60,11 +57,12 @@ import { insertPictureAtSelection } from '../editor/insert-picture'
 import {
   buildDocWriterRequest,
   countFragmentBlocks,
-  DOC_MAX_CHARS,
   extractFragment,
   type DocWriteResult,
   type DocWriteSpec,
+  type DocWriterObserver,
 } from './doc-writer'
+import { DOC_MAX_CHARS } from '../runtime/draft-landing'
 import { EditQueueCard } from './EditQueueCard'
 import {
   buildQueueInstruction,
@@ -230,7 +228,8 @@ const PASTE_MIME_EXT: Record<string, string> = {
 
 export { aiRevisionAuthor }
 
-interface AiPanelProps {
+export interface AiPanelProps {
+  runtime?: import('../runtime/docs-runtime').DocsRuntime
   editor: Editor
   blocks: Block[]
   settings: AiSettings
@@ -323,14 +322,21 @@ const REVISION_TONE: Partial<Record<RevisionRange['kind'], 'ins' | 'del' | 'fmt'
 }
 
 const MODEL_BRIDGE: AiModelPickerBridge = {
-  getSettings: () => window.desktop.getAiSettings(),
-  setSettings: (settings) => window.desktop.setAiSettings(settings),
-  onSettingsChanged: (handler) => window.desktop.onAiSettingsChanged(handler),
-  gskLoggedIn: () => window.desktop.aiGskStatus().then((s) => !!s?.loggedIn),
-  openModelSettings: () => window.desktop.openAiModelSettings().catch(() => {}),
+  getSettings: () => getNativeAgentServices().getAiSettings(),
+  setSettings: (settings) => getNativeAgentServices().setAiSettings(settings),
+  onSettingsChanged: (handler) => getNativeAgentServices().onAiSettingsChanged(handler),
+  gskLoggedIn: () =>
+    getNativeAgentServices()
+      .aiGskStatus()
+      .then((s) => !!s?.loggedIn),
+  openModelSettings: () =>
+    getNativeAgentServices()
+      .openAiModelSettings()
+      .catch(() => {}),
 }
 
 export function AiPanel({
+  runtime,
   editor,
   blocks,
   settings,
@@ -389,8 +395,8 @@ export function AiPanel({
   // on mount and before each send so a freshly starred file is answerable
   const kbFilesRef = useRef<KbFileInfo[]>([])
   const refreshKbFiles = (): Promise<void> => {
-    if (typeof window.desktop?.kbList !== 'function') return Promise.resolve()
-    return window.desktop
+    if (typeof getOptionalDocsHost()?.kbList !== 'function') return Promise.resolve()
+    return getDocsHost()
       .kbList()
       .then((files) => {
         kbFilesRef.current = files
@@ -450,7 +456,7 @@ export function AiPanel({
     for (const a of wanted) {
       if (!ATTACHMENT_IMAGE_EXTS.has(a.ext) || previewRequestedRef.current.has(a.path)) continue
       previewRequestedRef.current.add(a.path)
-      void window.desktop
+      void getDocsHost()
         .readAttachmentImage(a.path)
         .then((r) => {
           if (!previewRequestedRef.current.has(a.path)) return // removed while the read was in flight
@@ -532,7 +538,7 @@ export function AiPanel({
     let alive = true
     const refresh = () => {
       // tests render the panel without a preload bridge
-      void window.desktop
+      void getOptionalNativeAgentServices()
         ?.aiGskStatus?.()
         .then((s) => {
           if (alive) gskLoggedInRef.current = !!s?.loggedIn
@@ -578,24 +584,6 @@ export function AiPanel({
   const notesAccessRef = useRef(notesAccess)
   notesAccessRef.current = notesAccess
 
-  /** drop every aiChanged flag; silent = skip undo history (auto-accept path) */
-  const clearAiHighlights = (silent = false) => {
-    const view = editorRef.current.view
-    let tr = view.state.tr
-    let touched = false
-    view.state.doc.forEach((node, offset) => {
-      if (node.attrs.aiChanged) {
-        tr = tr.setNodeMarkup(offset, undefined, { ...node.attrs, aiChanged: false })
-        touched = true
-      }
-    })
-    if (silent) tr = tr.setMeta('addToHistory', false)
-    if (touched) {
-      view.dispatch(tr)
-      // AI-pipeline housekeeping, not a user edit: keep the freshness baseline current
-      markDocSeen(editorRef.current)
-    }
-  }
   /** instruction of the in-flight run */
   const instructionRef = useRef('')
   /** document state before the run's first edit — attached to the turn's final
@@ -615,7 +603,7 @@ export function AiPanel({
 
   // ── Chat-history persistence ────────────────────────────────────────────
   useEffect(() => {
-    const api = (window as Window & { projectApi?: typeof window.projectApi }).projectApi
+    const api = getDocsProjects()
     if (!api) return
     const tempChatId = `unsaved-${Date.now()}`
     void api
@@ -660,7 +648,7 @@ export function AiPanel({
   /** After an unsaved document's first save yields a real path, bind the unsaved-* history to that file (recoverable by path on reopen) */
   useEffect(() => {
     const ids = chatRefIds.current
-    const api = (window as Window & { projectApi?: typeof window.projectApi }).projectApi
+    const api = getDocsProjects()
     if (!api || !ids || !filePath || !ids.chatId.startsWith('unsaved-')) return
     void api
       .rebindChat({ projectId: ids.projectId, tempChatId: ids.chatId, newFilePath: filePath })
@@ -686,7 +674,7 @@ export function AiPanel({
     scope?: AiScopeQuoteData,
   ) => {
     const ids = chatRefIds.current
-    const api = (window as Window & { projectApi?: typeof window.projectApi }).projectApi
+    const api = getDocsProjects()
     if (!ids || !api) return
     void api
       .appendChat({
@@ -736,7 +724,7 @@ export function AiPanel({
    */
   const runDocWriter = async (
     spec: DocWriteSpec,
-    onProgress: (html: string) => void,
+    observer: DocWriterObserver,
     signal?: AbortSignal,
   ): Promise<DocWriteResult> => {
     const { system, user } = buildDocWriterRequest(spec, aiLangDirective())
@@ -765,7 +753,7 @@ export function AiPanel({
         onProgress: (html) => {
           if (closed) return
           latest = html
-          onProgress(html)
+          observer.onProgress(html)
           if (chipTimer === null) chipTimer = setTimeout(updateChip, CHIP_UPDATE_MS)
         },
       })
@@ -775,6 +763,9 @@ export function AiPanel({
     if (chipTimer !== null) clearTimeout(chipTimer)
     if (outcome.status === 'complete') return { ok: true, html: outcome.text }
     if (outcome.status === 'empty') return { ok: false, error: outcome.error }
+    if (epoch !== writerEpochRef.current) return { ok: false, error: 'the chat was reset' }
+    observer.onProgress(outcome.text)
+    await observer.onStopped()
     if (epoch !== writerEpochRef.current) return { ok: false, error: 'the chat was reset' }
     // the draft stays in the document while the user decides
     const keep = await new Promise<boolean>((resolve) => {
@@ -808,40 +799,57 @@ export function AiPanel({
       bullet: findNumId(blocksRef.current, 'bullet') ?? numIdFallbackRef.current?.bullet ?? null,
       ordered: findNumId(blocksRef.current, 'ordered') ?? numIdFallbackRef.current?.ordered ?? null,
     })
+    const helpers = composeSkills('files+knowledge+skills', '', [
+      // the reader's starred files; empty while the user stars nothing —
+      // buildContext then returns '' and the skill stays out of the way.
+      // Mounted only when the bridge carries the kb channel at all: a test
+      // mock or an older preload must not grow tools that cannot execute.
+      ...(typeof getOptionalDocsHost()?.kbList === 'function'
+        ? [
+            createKnowledgeBaseSkill({
+              listFiles: () => kbFilesRef.current,
+              search: (query, limit) => getDocsHost().kbSearch({ q: query, limit }),
+              read: (path, offset) => getDocsHost().kbRead(path, offset),
+            }),
+          ]
+        : []),
+      createFilesSkill(availableAttachments),
+      createSkillsSkill(),
+    ])
+    const documentSkill = createDocsSkill(
+      () => editorRef.current,
+      numIds,
+      () => (trackChangesRef.current ? { author: aiRevisionAuthor() } : undefined),
+      () => commentsAccessRef.current,
+      () => hfAccessRef.current,
+      () => imageGenerationAvailable(settingsRef.current, gskLoggedInRef.current),
+      () => ({
+        write: (spec, observer, signal) => runDocWriterRef.current(spec, observer, signal),
+      }),
+      () => pageSetupAccessRef.current,
+      () => docExtrasRef.current,
+      () => notesAccessRef.current,
+      () => mediaAnalysisAvailable(settingsRef.current, gskLoggedInRef.current),
+      runtime ? () => runtime : undefined,
+      () => helpers,
+    )
     loopRef.current = new AgentLoop<PmNode>({
       transport: transportRef.current,
       systemSuffix: aiLangDirective,
       skill: composeSkills('docs+files+skills', '', [
-        // the reader's starred files; empty while the user stars nothing —
-        // buildContext then returns '' and the skill stays out of the way.
-        // Mounted only when the bridge carries the kb channel at all: a test
-        // mock or an older preload must not grow tools that cannot execute.
-        ...(typeof window.desktop?.kbList === 'function'
-          ? [
-              createKnowledgeBaseSkill({
-                listFiles: () => kbFilesRef.current,
-                search: (query, limit) => window.desktop.kbSearch({ q: query, limit }),
-                read: (path, offset) => window.desktop.kbRead(path, offset),
-              }),
-            ]
-          : []),
-        createDocsSkill(
-          () => editorRef.current,
-          numIds,
-          () => (trackChangesRef.current ? { author: aiRevisionAuthor() } : undefined),
-          () => commentsAccessRef.current,
-          () => hfAccessRef.current,
-          () => imageGenerationAvailable(settingsRef.current, gskLoggedInRef.current),
-          () => ({
-            write: (spec, onProgress, signal) => runDocWriterRef.current(spec, onProgress, signal),
-          }),
-          () => pageSetupAccessRef.current,
-          () => docExtrasRef.current,
-          () => notesAccessRef.current,
-          () => mediaAnalysisAvailable(settingsRef.current, gskLoggedInRef.current),
-        ),
-        createFilesSkill(availableAttachments),
-        createSkillsSkill(),
+        documentSkill,
+        {
+          id: helpers.id,
+          get systemPrompt() {
+            return helpers.systemPrompt
+          },
+          get tools() {
+            return helpers.tools
+          },
+          buildContext: () => helpers.buildContext?.() ?? '',
+          executeTool: (call, signal) => documentSkill.executeTool(call, signal),
+          verifyResponse: (text, executed) => helpers.verifyResponse?.(text, executed) ?? null,
+        },
       ]),
       captureSnapshot: () => editorRef.current.getJSON() as PmNode,
       events: {
@@ -858,11 +866,6 @@ export function AiPanel({
         onToolExecuted: ({ call, execution, snapshotBefore }) => {
           // The run's first pre-edit state wins so one roll-back undoes the whole run
           if (snapshotBefore && !runSnapshotRef.current) runSnapshotRef.current = snapshotBefore
-          if (execution.mutated) {
-            // tracking off: accept immediately (same tick, so the yellow never paints);
-            // tracking on: revisions stay pending, handled in the Review tab
-            if (!trackChangesRef.current) clearAiHighlights(true)
-          }
           // mind maps ride the UI-only display side channel onto the message
           const display = execution.display
           const mindmap = display?.kind === 'mindmap' ? display.tree : undefined
@@ -951,7 +954,7 @@ export function AiPanel({
           // gsk status rather than matching the localized error text — but only
           // when Genspark is the provider: a BYOK user's error (e.g. their own
           // provider's rate limit) must not advertise a Genspark sign-in (genoffice#1948)
-          void window.desktop
+          void getNativeAgentServices()
             .aiGskStatus()
             .then((status) => {
               if (status.loggedIn) return
@@ -1050,7 +1053,7 @@ export function AiPanel({
   }
   // [name](filenav:///abs/path) citations open the cited file in its own app
   const fileNav = createFileNav((path) => {
-    void window.desktop.openSourcePath(path)
+    void getDocsHost().openSourcePath(path)
   })
 
   // follow the stream, but stop yanking once the user scrolls up to read;
@@ -1076,7 +1079,7 @@ export function AiPanel({
     const images: AgentImage[] = []
     const failures: string[] = []
     for (const att of imageAtts.slice(0, MAX_IMAGES_PER_MESSAGE)) {
-      const result = await window.desktop.readAttachmentImage(att.path)
+      const result = await getDocsHost().readAttachmentImage(att.path)
       if (result.ok && result.base64 && result.mime) {
         images.push({ base64: result.base64, mime: result.mime })
       } else {
@@ -1190,7 +1193,7 @@ export function AiPanel({
     const bodies = await Promise.all(
       names.map(async (name) => {
         try {
-          return { name, body: await window.desktop.skillText(name) }
+          return { name, body: await getDocsHost().skillText(name) }
         } catch {
           return null
         }
@@ -1203,7 +1206,7 @@ export function AiPanel({
   }
 
   const listSkillsForMenu = async () =>
-    (await window.desktop.skillsList()).map(({ name, description }) => ({ name, description }))
+    (await getDocsHost().skillsList()).map(({ name, description }) => ({ name, description }))
   const toggleSkill = (name: string) =>
     setAttachedSkills((prev) =>
       prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
@@ -1304,31 +1307,31 @@ export function AiPanel({
     }
   }
 
-  const pickAttachments = async () => mergeAttachments(await window.desktop.pickAttachments())
+  const pickAttachments = async () => mergeAttachments(await getDocsHost().pickAttachments())
 
   const onDrop = async (e: React.DragEvent) => {
     e.preventDefault()
     e.stopPropagation()
     setDragOver(false)
     const paths = Array.from(e.dataTransfer.files)
-      .map((f) => window.desktop.getPathForFile(f))
+      .map((f) => getDocsHost().getPathForFile(f))
       .filter(Boolean)
-    if (paths.length > 0) mergeAttachments(await window.desktop.addAttachmentPaths(paths))
+    if (paths.length > 0) mergeAttachments(await getDocsHost().addAttachmentPaths(paths))
   }
 
   /** Files pasted into the input: ones with a local path go through regular attachments; pure bitmaps like screenshots hit a temp file first */
   const onPasteFiles = async (files: File[]) => {
     const paths: string[] = []
     for (const f of files) {
-      const p = window.desktop.getPathForFile(f)
+      const p = getDocsHost().getPathForFile(f)
       if (p) {
         paths.push(p)
         continue
       }
       const ext = PASTE_MIME_EXT[f.type] ?? f.name.split('.').pop()?.toLowerCase() ?? 'bin'
-      mergeAttachments(await window.desktop.addPastedImage(await f.arrayBuffer(), ext))
+      mergeAttachments(await getDocsHost().addPastedImage(await f.arrayBuffer(), ext))
     }
-    if (paths.length > 0) mergeAttachments(await window.desktop.addAttachmentPaths(paths))
+    if (paths.length > 0) mergeAttachments(await getDocsHost().addAttachmentPaths(paths))
   }
 
   const removeAttachment = (path: string) =>
@@ -1439,7 +1442,7 @@ export function AiPanel({
         <div className="ai-panel-header-actions">
           <AiPanelSideButton
             lang={lang}
-            onMove={(side) => window.desktop.setAiPanelPrefs({ side })}
+            onMove={(side) => getDocsHost().setAiPanelPrefs({ side })}
           />
           {(chat.length > 0 || historicChat.length > 0) && (
             <button
@@ -1587,7 +1590,10 @@ export function AiPanel({
                 <div className="ai-msg-error">{t('aiErrorPrefix', { error: entry.error })}</div>
               )}
               {entry.loginRequired && (
-                <button className="ai-login-btn" onClick={() => void window.desktop.aiGskLogin()}>
+                <button
+                  className="ai-login-btn"
+                  onClick={() => void getNativeAgentServices().aiGskLogin()}
+                >
                   {t('aiGskLoginBtn')}
                 </button>
               )}
@@ -1937,7 +1943,7 @@ export function AiPanel({
                 selected={attachedSkills}
                 onToggle={toggleSkill}
                 onAddFile={() => void pickAttachments()}
-                onManage={() => void window.desktop.openSkillsSettings?.()}
+                onManage={() => void getDocsHost().openSkillsSettings?.()}
               />
               <button
                 type="button"

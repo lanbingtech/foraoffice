@@ -8,7 +8,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { copyFile, open, rename, unlink, writeFile } from 'node:fs/promises'
+import { copyFile, link, open, rename, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 
 /** Transient Windows codes: antivirus/indexer briefly locks the rename target. */
@@ -72,7 +72,11 @@ function syncFileBestEffortSync(path: string): void {
  * network mounts (gvfs SMB refuses with EEXIST, genoffice#1877); either way the
  * save falls back to an in-place write rather than failing.
  */
-export async function atomicWriteFile(filePath: string, data: Buffer): Promise<void> {
+export async function atomicWriteFile(
+  filePath: string,
+  data: Buffer,
+  options: { overwrite?: boolean } = {},
+): Promise<void> {
   const tmp = tempPathBeside(filePath)
   try {
     await writeFile(tmp, data)
@@ -80,6 +84,15 @@ export async function atomicWriteFile(filePath: string, data: Buffer): Promise<v
   } catch (error) {
     await unlink(tmp).catch(() => {})
     throw error
+  }
+  if (options.overwrite === false) {
+    try {
+      // Publish completed bytes without replacing a concurrently created target.
+      await link(tmp, filePath)
+    } finally {
+      await unlink(tmp).catch(() => {})
+    }
+    return
   }
   try {
     await renameWithRetry(tmp, filePath)

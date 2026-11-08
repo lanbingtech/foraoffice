@@ -2,25 +2,22 @@ import { placeholderInstruction } from './redact'
 import { redactLabelsOf } from './redact-view'
 import type { Editor } from '@tiptap/core'
 import type { AgentSkill } from '@genoffice/agent-core'
-import {
-  AGENT_SYSTEM_PROMPT,
-  buildDocContext,
-  getSelectionScope,
-  type AiTrack,
-  type NumIds,
-} from './protocol'
+import { AGENT_SYSTEM_PROMPT, type AiTrack, type NumIds } from './protocol'
 import type { AiDocWriter } from './doc-writer'
 import type { AiPageSetupAccess } from './page-setup'
 import {
-  AGENT_TOOLS,
-  executeTool,
-  markDocSeen,
+  DOCS_EDITOR_TOOLS,
   type AiCommentsAccess,
   type AiHeaderFooterAccess,
-  type FrozenSelection,
   type AiDocExtras,
 } from './tools'
 import type { AiNotesAccess } from './note-ops'
+import { createDocsRuntime, type DocsRuntime } from '../runtime/docs-runtime'
+import type { DocsResourceTools } from '../../shared/resource-tools'
+import { DOCS_FILE_COMMANDS } from '../../shared/resource-tools'
+import { NATIVE_DOCS_WORKFLOW_TOOLS } from './native-tool-catalog'
+import { createNativeDocsWorkflows } from './native-workflows'
+import { z } from 'zod'
 
 const IMAGE_GEN_OFF_NOTE =
   '\n\nNote: generate_image is currently unavailable (no image provider: signed out of Genspark or cloud tools off, and no media API key in Settings). Do not call or promise it; use image_search for imagery.'
@@ -49,11 +46,24 @@ export function createDocsSkill(
   getNotes?: () => AiNotesAccess | undefined,
   /** same as imageGenAvailable, for analyze_media (seeing pictures that are in the document) */
   mediaAnalysisAvailable?: () => boolean,
+  getRuntime?: () => DocsRuntime,
+  getResources?: () => DocsResourceTools | undefined,
 ): AgentSkill {
-  // Selection frozen per run: tools act on the range the prompt described,
-  // not on wherever the user's live selection has wandered mid-run. The doc
-  // snapshot bounds the freeze's validity (see FrozenSelection).
-  let frozen: FrozenSelection | null = null
+  const runtime =
+    getRuntime?.() ??
+    createDocsRuntime({
+      current: () => ({
+        editor: getEditor(),
+        identity: getEditor(),
+        numIds: getNumIds(),
+        track: getTrack?.(),
+        comments: getComments?.(),
+        headerFooter: getHf?.(),
+        pageSetup: getPageSetup?.(),
+        extras: getExtras?.(),
+        notes: getNotes?.(),
+      }),
+    })
   /** tools that need a media provider: Genspark login + cloud tools, or a BYOK media key in Settings */
   const mediaToolsOff = (): Set<string> => {
     const hidden = new Set<string>()
@@ -65,6 +75,12 @@ export function createDocsSkill(
     [...mediaToolsOff()]
       .map((name) => (name === 'generate_image' ? IMAGE_GEN_OFF_NOTE : MEDIA_ANALYSIS_OFF_NOTE))
       .join('')
+  const client = runtime.connect({ id: crypto.randomUUID(), resources: getResources })
+  const workflows = createNativeDocsWorkflows(client, getWriter)
+  const catalog = [...DOCS_EDITOR_TOOLS, ...NATIVE_DOCS_WORKFLOW_TOOLS]
+  const schemas = new Map(
+    NATIVE_DOCS_WORKFLOW_TOOLS.map((tool) => [tool.name, z.fromJSONSchema(tool.inputSchema)]),
+  )
   return {
     id: 'docx',
     // live: the predicate is re-read before every model request
@@ -81,34 +97,77 @@ export function createDocsSkill(
     },
     get tools() {
       const hidden = mediaToolsOff()
-      return hidden.size === 0 ? AGENT_TOOLS : AGENT_TOOLS.filter((t) => !hidden.has(t.name))
-    },
-    buildContext: () => {
-      const editor = getEditor()
-      markDocSeen(editor) // the context the model receives is the freshness baseline for index-addressed writes
-      frozen = { scope: getSelectionScope(editor), doc: editor.state.doc }
-      return buildDocContext(
-        editor,
-        frozen.scope,
-        getComments?.()?.list(),
-        getHf?.()?.read(),
-        getPageSetup?.()?.list(),
+      return catalog.filter(
+        (tool) => !hidden.has(tool.name) && (tool.name !== 'write_document' || !!getWriter?.()),
       )
     },
-    executeTool: (call, signal) =>
-      executeTool(
-        getEditor(),
-        call,
-        getNumIds(),
-        getTrack?.(),
-        signal,
-        frozen,
-        getComments?.(),
-        getHf?.(),
-        getWriter?.(),
-        getPageSetup?.(),
-        getExtras?.(),
-        getNotes?.(),
-      ),
+    buildContext: () => client.context().text,
+    executeTool: async (call, signal) => {
+      const schema = schemas.get(call.name)
+      if (schema) {
+        if (mediaToolsOff().has(call.name))
+          return {
+            output: `${call.name} is unavailable in the native provider configuration`,
+            summary: call.name,
+            isError: true,
+            errorCode: 'unavailable',
+            committed: false,
+          }
+        const input = schema.safeParse(call.input)
+        if (!input.success)
+          return {
+            output: input.error.message,
+            summary: call.name,
+            isError: true,
+            errorCode: 'invalid_input',
+            committed: false,
+          }
+        return workflows.execute(call, signal)
+      }
+      if (
+        call.name === 'run_cli' &&
+        !DOCS_FILE_COMMANDS.has(String((call.input.args as unknown[] | undefined)?.[0] ?? ''))
+      ) {
+        const resources = getResources?.()
+        const tool = resources?.tools.find((tool) => tool.name === call.name)
+        if (resources && tool) {
+          const capabilities = await client.execute(
+            { id: crypto.randomUUID(), name: 'get_editor_capabilities', input: {} },
+            signal,
+          )
+          if (capabilities.isError) return capabilities
+          const availability = (
+            JSON.parse(capabilities.output).tools as Array<{
+              name: string
+              available: boolean
+              reason?: string
+              errorCode?: string
+            }>
+          ).find((tool) => tool.name === call.name)
+          if (!availability?.available)
+            return {
+              output: availability?.reason ?? 'The resource helper is unavailable',
+              summary: call.name,
+              isError: true,
+              errorCode: availability?.errorCode ?? 'unavailable',
+              committed: false,
+            }
+          const input = z.fromJSONSchema(tool.inputSchema).safeParse(call.input)
+          if (!input.success)
+            return {
+              output: input.error.message,
+              summary: call.name,
+              isError: true,
+              errorCode: 'invalid_input',
+              committed: false,
+            }
+          return resources.executeTool(
+            call,
+            AbortSignal.any([client.signal, ...(signal ? [signal] : [])]),
+          )
+        }
+      }
+      return client.execute(call, signal)
+    },
   }
 }

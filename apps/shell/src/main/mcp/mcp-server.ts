@@ -4,7 +4,8 @@ import type { Socket } from 'node:net'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import type { ZodRawShape } from 'zod'
+import type { ZodRawShape, ZodType } from 'zod'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 
 /**
  * Local MCP server for GenOffice.
@@ -18,13 +19,30 @@ import type { ZodRawShape } from 'zod'
  * objects directly, so express would add a dependency for nothing.
  */
 
+export interface McpInvocation {
+  callerId: string
+  signal: AbortSignal
+  /** Injected by a host-controlled scoped endpoint, never read from tool arguments. */
+  bindingId?: string
+}
+
+export class McpToolExecutionError extends Error {
+  constructor(
+    message: string,
+    readonly result: Record<string, unknown>,
+  ) {
+    super(message)
+  }
+}
+
 export interface McpToolDefinition {
   name: string
   description: string
   /** zod raw shape, as the SDK expects (not a z.object()) */
-  inputSchema?: ZodRawShape
+  inputSchema?: ZodRawShape | ZodType
   /** return value is serialized as JSON text; a thrown error becomes isError */
-  handler: (args: Record<string, unknown>) => Promise<unknown> | unknown
+  handler: (args: Record<string, unknown>, context?: McpInvocation) => Promise<unknown> | unknown
+  formatResult?: (result: unknown) => CallToolResult
 }
 
 export interface McpServerOptions {
@@ -37,7 +55,7 @@ export interface McpServerOptions {
    * so two connected clients never fight over one active session. Read the
    * current settings inside the factory: it runs at connect time.
    */
-  toolsFactory?: () => McpToolDefinition[]
+  toolsFactory?: (connection: McpInvocation) => McpToolDefinition[]
   logger?: (message: string) => void
   /** reported to clients in the initialize handshake; defaults to the app version when wired */
   version?: string
@@ -52,7 +70,7 @@ const MAX_BODY_BYTES = 32 * 1024 * 1024
 
 export class McpServerService {
   private readonly tools: McpToolDefinition[]
-  private readonly toolsFactory?: () => McpToolDefinition[]
+  private readonly toolsFactory?: (connection: McpInvocation) => McpToolDefinition[]
   private readonly logger: (message: string) => void
   private readonly version: string
   private readonly maxListenAttempts: number
@@ -97,26 +115,46 @@ export class McpServerService {
 
   private createSessionServer(): McpServer {
     const server = new McpServer({ name: 'GenOffice', version: this.version })
+    const lifetime = new AbortController()
+    const connection = { callerId: randomUUID(), signal: lifetime.signal }
+    server.server.onclose = () => lifetime.abort()
     // a factory gives each connected client its own tool instances (session
     // state lives in their closures); otherwise the fixed set is shared
-    const tools = this.toolsFactory ? this.toolsFactory() : this.tools
+    const tools = this.toolsFactory ? this.toolsFactory(connection) : this.tools
     for (const tool of tools) {
       server.registerTool(
         tool.name,
         {
           description: tool.description,
-          ...(tool.inputSchema ? { inputSchema: tool.inputSchema } : {}),
+          inputSchema: tool.inputSchema ?? {},
         },
-        (async (args: Record<string, unknown>) => {
+        (async (args: Record<string, unknown>, extra: { signal: AbortSignal }) => {
           const started = Date.now()
           try {
-            const result = await tool.handler(args ?? {})
+            const result = await tool.handler(args ?? {}, {
+              callerId: connection.callerId,
+              signal: AbortSignal.any([extra.signal, lifetime.signal]),
+            })
             this.logger(`[mcp] tool ${tool.name} ok (${Date.now() - started}ms)`)
-            return { content: [{ type: 'text' as const, text: stringifyResult(result) }] }
+            if (tool.formatResult) return tool.formatResult(result)
+            return {
+              content: [{ type: 'text' as const, text: stringifyResult(result) }],
+              ...(result !== null && typeof result === 'object' && !Array.isArray(result)
+                ? { structuredContent: result as Record<string, unknown> }
+                : {}),
+            }
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
             this.logger(`[mcp] tool ${tool.name} error (${Date.now() - started}ms): ${message}`)
-            return { content: [{ type: 'text' as const, text: message }], isError: true }
+            if (tool.formatResult && error instanceof McpToolExecutionError)
+              return tool.formatResult(error.result)
+            return {
+              content: [{ type: 'text' as const, text: message }],
+              isError: true,
+              ...(error instanceof McpToolExecutionError
+                ? { structuredContent: error.result }
+                : {}),
+            }
           }
         }) as never,
       )

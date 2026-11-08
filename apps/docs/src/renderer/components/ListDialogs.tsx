@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { ChangeEvent, ReactNode } from 'react'
-import { Dropdown } from '@genoffice/ui'
+import { Dropdown } from '@genoffice/ui/editor'
 import { formatNumber, type CustomNumberingLevel, type StyleInfo } from '@genoffice/docx-engine'
 import { useI18n, type StringKey } from '../i18n/locale'
 import { fontFamiliesFor } from '../font-list'
