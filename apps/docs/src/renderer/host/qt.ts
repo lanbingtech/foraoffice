@@ -5,6 +5,14 @@ import type { DocsOperationResult } from '../../shared/operation-result'
 import { createDocsResourceTools } from '../runtime/resource-tools'
 import { ResourceAccessError } from '@genoffice/agent-core/resource-tools'
 import type { AttachmentMeta } from '../../shared/ipc'
+import type { DocsInspection } from '../sdk/inspection'
+import type { DocsAnnotations } from '../sdk/annotations'
+import type {
+  DocsDocumentCommands,
+  DocsDocumentHost,
+  DocsHostedDocument,
+} from '../../shared/document-host'
+import { executeDocsSdkCall } from '../sdk/calls'
 
 export interface QtSignal<Args extends unknown[]> {
   connect(listener: (...args: Args) => void): void
@@ -21,6 +29,9 @@ export interface DocsQtChannel {
 }
 
 interface EditorEndpoint {
+  inspection?: DocsInspection
+  annotations?: DocsAnnotations
+  documents?: DocsDocumentCommands
   commands: {
     handle(message: McpCommandMessage): Promise<unknown>
     releaseScope(bindingId: string): void
@@ -121,7 +132,45 @@ export function createQtDocsHost(channel: DocsQtChannel) {
         callerId: string
       }
     }
-    if (message.method === 'editor.releaseScope')
+    if (message.method === 'sdk.request') {
+      const params = message.params as unknown as {
+        operation: string
+        args: Record<string, unknown>
+      }
+      void Promise.resolve()
+        .then(() => {
+          if (!editor?.inspection || !editor.annotations || !editor.documents)
+            throw new Error('The public document SDK is not ready')
+          return executeDocsSdkCall(
+            {
+              inspection: editor.inspection,
+              annotations: editor.annotations,
+              documents: editor.documents,
+            },
+            params.operation,
+            params.args,
+          )
+        })
+        .then(
+          (result) => {
+            if (!disposed)
+              channel.complete(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }))
+          },
+          (error: unknown) => {
+            if (!disposed)
+              channel.complete(
+                JSON.stringify({
+                  jsonrpc: '2.0',
+                  id: message.id,
+                  error: {
+                    code: -32000,
+                    message: error instanceof Error ? error.message : String(error),
+                  },
+                }),
+              )
+          },
+        )
+    } else if (message.method === 'editor.releaseScope')
       editor?.commands.releaseScope(message.params.bindingId)
     else if (message.method === 'editor.disconnect')
       editor?.commands.disconnect(message.params.callerId)
@@ -204,7 +253,58 @@ export function createQtDocsHost(channel: DocsQtChannel) {
     attachments: AttachmentMeta[]
     knowledge: typeof knowledge
     cliAvailable: boolean
+    documentHost?: Pick<DocsDocumentHost, 'capabilities' | 'autoSave'> & { enabled: boolean }
+    checkers?: string[]
   }) => {
+    if (state.checkers)
+      host.checkers = Object.fromEntries(
+        state.checkers.map((source) => [
+          source,
+          async (snapshot: import('../sdk/inspection').DocsTextSnapshot) =>
+            request('services.call', {
+              method: 'checkDocument',
+              args: [source, snapshot],
+            }) as Promise<import('../sdk/annotations').DocsAnnotation[]>,
+        ]),
+      )
+    if (state.documentHost?.enabled && !host.documents) {
+      const document = async (
+        method: string,
+        args: unknown[] = [],
+      ): Promise<DocsHostedDocument | null> => {
+        const result = (await request('services.call', { method, args })) as
+          (Omit<DocsHostedDocument, 'data'> & { data?: { base64: string } }) | null
+        if (!result) return null
+        return {
+          ...result,
+          ...(result.data
+            ? {
+                data: Uint8Array.from(atob(result.data.base64), (char) => char.charCodeAt(0))
+                  .buffer,
+              }
+            : {}),
+        } as DocsHostedDocument
+      }
+      host.documents = {
+        capabilities: state.documentHost.capabilities,
+        autoSave: state.documentHost.autoSave,
+        initialDocument: () => document('initialDocument'),
+        newDocument: () => document('newDocument'),
+        openDocument: (id) => document('openDocument', [id ?? null]),
+        recentDocuments: () =>
+          request('services.call', { method: 'recentDocuments', args: [] }) as ReturnType<
+            NonNullable<DocsDocumentHost['recentDocuments']>
+          >,
+        saveDocument: (value) =>
+          request('services.call', { method: 'saveDocument', args: [value] }) as ReturnType<
+            NonNullable<DocsDocumentHost['saveDocument']>
+          >,
+        createDocument: (value) =>
+          request('services.call', { method: 'createDocument', args: [value] }) as ReturnType<
+            NonNullable<DocsDocumentHost['createDocument']>
+          >,
+      }
+    }
     attachments = state.attachments
     knowledge = state.knowledge
     if (cliAvailable === state.cliAvailable && resources) return

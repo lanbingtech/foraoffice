@@ -17,6 +17,7 @@ export const EMPTY_HF_VARIANTS: HfVariantsState = {
 }
 
 export interface DocState {
+  hosted?: import('../shared/document-host').DocsHostedIdentity
   parsed: ParsedDocFull
   /** null until a new document is saved for the first time */
   filePath: string | null

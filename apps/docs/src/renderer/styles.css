@@ -15442,6 +15442,19 @@ tr > .page-gap-cut {
   color: var(--text);
 }
 
+.sdk-range-decoration {
+  background: var(--sdk-annotation-background, transparent);
+  color: var(--sdk-annotation-color, inherit);
+  text-decoration-line: var(--sdk-annotation-underline, none);
+}
+@media print {
+  .sdk-range-decoration {
+    background: transparent !important;
+    color: inherit !important;
+    text-decoration: none !important;
+  }
+}
+
 /* Word's View Gridlines: a faint dashed grid on screen only, never printed or exported */
 @media screen {
   .show-table-gridlines .doc-table td,

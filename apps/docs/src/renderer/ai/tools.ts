@@ -1,5 +1,6 @@
 import { getDocsHost } from '../host/docs-host'
 import { embeddedImageBytes } from './image-input'
+import { readToolImage, toolImageSource, type DocsImageSource } from './image-source'
 import { docsToolCatalog } from '../../shared/tool-catalog'
 import type { DocsErrorCode } from '../../shared/operation-result'
 import type { Editor } from '@tiptap/core'
@@ -354,9 +355,7 @@ async function executeAsyncTool(
     case 'insert_picture':
       return insertPicture(editor, call, signal, readState)
     case 'insert_image': {
-      const url = String(call.input.url ?? '')
-      if (!/^https?:\/\/|^data:image\//.test(url))
-        return fail(t('aiSumInsertImage'), 'url must be an http(s) or data: image URL')
+      const url = toolImageSource(call.input)
       return insertImageFromUrl(
         editor,
         url,
@@ -503,9 +502,7 @@ async function insertPicture(
   readState?: DocReadState,
 ): Promise<ToolExecution> {
   const summary = t('aiSumInsertPicture')
-  const url = String(call.input.url ?? '')
-  if (!/^https?:\/\/|^data:image\//.test(url))
-    return fail(summary, 'url must be an http(s) or data: image URL')
+  const url = toolImageSource(call.input)
   let float: FloatSpec | undefined
   if (call.input.float !== undefined) {
     const r = resolveFloat(call.input.float)
@@ -514,9 +511,7 @@ async function insertPicture(
   }
   const at = insertPosition(editor, call.input.afterBlockIndex)
   if ('error' in at) return fail(summary, at.error)
-  const fetched = url.startsWith('data:')
-    ? embeddedImageBytes(url)
-    : await getDocsHost().fetchImage(url)
+  const fetched = await readToolImage(url)
   if (signal?.aborted) return fail(summary, 'stopped by the user; the picture was not inserted')
   if (!fetched)
     return fail(
@@ -558,16 +553,14 @@ async function insertPicture(
 /** download a direct image URL and insert it at the cursor as a protected image block */
 async function insertImageFromUrl(
   editor: Editor,
-  url: string,
+  url: string | DocsImageSource,
   maxW: number,
   signal: AbortSignal | undefined,
   labels: { failLabel: string; doneLabel: string; blockLabel: string },
   readState?: DocReadState,
   selection?: () => { from: number; to: number },
 ): Promise<ToolExecution> {
-  const fetched = url.startsWith('data:')
-    ? embeddedImageBytes(url)
-    : await getDocsHost().fetchImage(url)
+  const fetched = await readToolImage(url)
   // never write after the user hit stop (the download may resolve long after the abort)
   if (signal?.aborted)
     return fail(labels.failLabel, 'stopped by the user; the image was not inserted')

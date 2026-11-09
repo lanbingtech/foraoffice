@@ -12,6 +12,9 @@ export interface OpenFileResult {
   encrypted?: boolean
   /** content came from a newer crash-recovery copy and still needs an explicit save */
   recovered?: boolean
+  /** Hosted content has identity and bytes independently of a filesystem path. */
+  hosted?: import('./document-host').DocsHostedIdentity
+  data?: ArrayBuffer
 }
 
 /** Password-protected (ECMA-376 encrypted) docx: the renderer prompts for the
@@ -485,6 +488,8 @@ export interface DocsNativeAgentApi {
 export interface DesktopApi extends DocsEditorApi, DocsNativeAgentApi {}
 
 export interface DocsEditorApi {
+  /** Authorized local paths and opaque host asset references; absent means unavailable. */
+  readImageSource?(source: { path: string } | { asset: string }): Promise<PickImageResult | null>
   /** Optional host lifecycle notification for file protections across native services. */
   reportDocumentPath?(path: string | null): void
   /** A host-created Word view acknowledges the actual first-save result. */

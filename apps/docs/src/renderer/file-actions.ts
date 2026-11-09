@@ -1,4 +1,7 @@
-import { getDocsHost } from './host/docs-host'
+import { getDocsHost, getDocsDocumentHost } from './host/docs-host'
+import { hostedOpenResult } from './host/document-services'
+import { assertDocumentOperation, validateHostedIdentity } from '../shared/document-host'
+import type { DocsHostedIdentity } from '../shared/document-host'
 /**
  * Document lifecycle: open/new (full state reset from a parsed docx), the
  * save pipeline (PM doc → save plan → docx bytes → reparse), and PDF export.
@@ -121,6 +124,7 @@ export type PendingPdfExport = {
 
 /** The App state the file actions need; built fresh per call. */
 export interface FileActionContext {
+  beforeDocumentReplace?(): void
   editor: Editor | null
   doc: DocState | null
   dirtyRef: { current: boolean }
@@ -506,21 +510,30 @@ export async function loadFile(
   ctx: FileActionContext,
   result: OpenDocxResult,
 ): Promise<LoadFileOutcome> {
-  if (!result || !ctx.editor) return 'canceled'
+  if (!result || !ctx.editor || ctx.editor.isDestroyed) return 'canceled'
   if ('needsPassword' in result) {
     ctx.promptDocxPassword({ path: result.path, name: result.name })
     return 'password'
   }
   const generation = ++openGeneration
+  const openingHost = getDocsDocumentHost()
+  const currentOpen = () =>
+    generation === openGeneration &&
+    !ctx.editor!.isDestroyed &&
+    openingHost === getDocsDocumentHost()
   try {
-    const bytes = await fetchDocBytes(result.dataUrl)
+    const bytes = result.data
+      ? new Uint8Array(result.data)
+      : result.hosted
+        ? await blankDocxBytes()
+        : await fetchDocBytes(result.dataUrl)
     // a 0-byte .docx (touch, failed download) is not a corrupt archive but an
     // empty document: open the blank template under the file's own path
     const parsed = await parseDocxOffThread(
       bytes.byteLength === 0 ? await blankDocxBytes() : bytes,
       { owned: true },
     )
-    if (generation !== openGeneration) return 'superseded'
+    if (!currentOpen()) return 'superseded'
     const tier = openTierFor(docWeight(parsed.blocks))
     if (tier === 'refuse') {
       const msg = t('appDocTooLargeBlocks', {
@@ -536,15 +549,17 @@ export async function loadFile(
     setLazyMediaHashes(parsed.extras.lazyMediaHashes)
     // before setContent: blockAttrs/marks bake fontTable-driven factors and chains into the DOM
     const adopted = await adoptEmbeddedFonts(parsed.embeddedFonts)
-    if (!adopted || generation !== openGeneration) return 'superseded'
+    if (!adopted || !currentOpen()) return 'superseded'
     setDocFontTable(parsed.fontTable)
     await prefetchFaces(collectDocFonts(parsed))
     await loadBundledStandIns(collectDocFonts(parsed))
-    if (generation !== openGeneration) return 'superseded'
+    if (!currentOpen()) return 'superseded'
     ctx.editor.storage.listNumbering.styles = parsed.styles
     ctx.editor.storage.listNumbering.docDefaults = parsed.docDefaults
     ctx.editor.storage.listNumbering.defs = parsed.numbering
     applyDocLayoutSettings(ctx.editor, parsed)
+    ctx.beforeDocumentReplace?.()
+    if (!currentOpen()) return 'superseded'
     setContentPhased(
       phasedHostFor(ctx),
       blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)),
@@ -554,7 +569,8 @@ export async function loadFile(
     noteDocumentSwapped()
     ctx.setDoc({
       parsed,
-      filePath: result.path,
+      filePath: result.hosted ? null : result.path,
+      hosted: result.hosted,
       fileName: result.name,
       hash: result.hash,
       encrypted: result.encrypted,
@@ -682,32 +698,56 @@ async function blankDocxBytes(): Promise<Uint8Array> {
 
 /** new document from the built-in blank template (AI can then generate into it) */
 export async function newFile(ctx: FileActionContext): Promise<boolean | undefined> {
-  if (!ctx.editor) return
+  if (!ctx.editor || ctx.editor.isDestroyed) return
   const generation = ++openGeneration
+  const host = getDocsDocumentHost()
+  const currentNew = () =>
+    generation === openGeneration && !ctx.editor!.isDestroyed && host === getDocsDocumentHost()
+  let hosted: DocsHostedIdentity | undefined
+  if (host) {
+    assertDocumentOperation(host, 'new')
+    if (!host.newDocument) throw new Error('The host does not provide new documents')
+    const target = await host.newDocument()
+    if (ctx.editor.isDestroyed || host !== getDocsDocumentHost() || generation !== openGeneration)
+      return false
+    if (!target) return false
+    validateHostedIdentity(target)
+    if (target.data) return (await loadFile(ctx, hostedOpenResult(target))) === 'ok'
+    hosted = { id: target.id, name: target.name, readOnly: target.readOnly }
+  }
   try {
     const bytes = await blankDocxBytes()
     const parsed = await parseDocx(bytes)
-    if (generation !== openGeneration) return
+    if (!currentNew()) return
     setLazyMediaHashes([])
     const adopted = await adoptEmbeddedFonts(parsed.embeddedFonts)
-    if (!adopted || generation !== openGeneration) return
+    if (!adopted || !currentNew()) return
     setDocFontTable(parsed.fontTable)
     await prefetchFaces(collectDocFonts(parsed))
     await loadBundledStandIns(collectDocFonts(parsed))
-    if (generation !== openGeneration) return
+    if (!currentNew()) return
     ctx.editor.storage.listNumbering.styles = parsed.styles
     ctx.editor.storage.listNumbering.docDefaults = parsed.docDefaults
     ctx.editor.storage.listNumbering.defs = parsed.numbering
     applyDocLayoutSettings(ctx.editor, parsed)
     // a tail still streaming for the previous document must never land in this one
     cancelPhasedContent()
+    ctx.beforeDocumentReplace?.()
+    if (!currentNew()) return
     ctx.editor.commands.setContent(
       blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)) as never,
     )
     resetEditorHistory(ctx.editor)
     focusDocumentStart(ctx.editor)
     noteDocumentSwapped()
-    ctx.setDoc({ parsed, filePath: null, fileName: t('appUntitledDocx'), hash: '', isBlank: true })
+    ctx.setDoc({
+      parsed,
+      filePath: null,
+      fileName: hosted?.name ?? t('appUntitledDocx'),
+      hash: '',
+      isBlank: true,
+      hosted,
+    })
     // a very large document opened in Read Mode must not leave it on for the new one
     ctx.setReadMode(false)
     ctx.setLargeDocSpellOff(false)
@@ -998,6 +1038,8 @@ export async function buildDocBytes(
  * later tick then covers it like any opened file.
  */
 export async function writeRecoveryCopy(ctx: FileActionContext): Promise<void> {
+  // Managed storage owns recovery policy; a pathless object is not an unsaved local file.
+  if (getDocsDocumentHost()) return
   const { doc, editor } = ctx
   if (
     !doc ||
@@ -1043,10 +1085,11 @@ const runSerializedSave = createSaveSerializer()
 function discardStalePasswordIntents(): void {
   // Start the IPC now, before the replacement document can record a password.
   // The destructive half stays serialized behind an old in-flight save.
-  const throughRevision = getDocsHost().docPasswordIntentRevision()
+  const services = getDocsHost()
+  const throughRevision = services.docPasswordIntentRevision()
   void runSerializedSave(
     async () => {
-      await getDocsHost().discardDocPasswordIntents(await throughRevision)
+      await services.discardDocPasswordIntents(await throughRevision)
       return false // not a save: a queued save pass must never reuse this result
     },
     () => false,
@@ -1098,6 +1141,14 @@ export function save(
   newDocName?: string,
   explicitTarget?: ExplicitSaveTarget,
 ): Promise<boolean> {
+  const host = getDocsDocumentHost()
+  if (
+    host &&
+    (host.capabilities?.[saveAs ? 'saveAs' : 'save'] === false || ctx.doc?.hosted?.readOnly)
+  ) {
+    explicitTarget?.onError?.('The host does not permit this save', 'permission_denied')
+    return Promise.resolve(false)
+  }
   const draftSettled = () => {
     if (!ctx.editor || !hasActiveDocumentDraft(ctx.editor)) return true
     const message = t('appDocumentDraftPending')
@@ -1244,12 +1295,13 @@ async function saveOnce(
   explicitTarget?: ExplicitSaveTarget,
 ): Promise<boolean> {
   const { doc, editor } = ctx
-  if (!doc || !editor) return false
+  if (!doc || !editor || editor.isDestroyed) return false
   ctx.saveInFlightRef.current = true
   ctx.saveIncompleteRef.current = false
   try {
     // a mid-stream save would serialize (and write) a truncated document
     const generation = docGeneration
+    const documentHost = getDocsDocumentHost()
     await waitForFullContent()
     // the wait ended because another document replaced this one: nothing to write
     if (docGeneration !== generation) return false
@@ -1261,6 +1313,12 @@ async function saveOnce(
     const stateSnapshot = ctx.getDocumentStateVersion?.()
     const bytes = await buildDocBytes(ctx)
     if (!bytes) return false
+    if (
+      editor.isDestroyed ||
+      docGeneration !== generation ||
+      documentHost !== getDocsDocumentHost()
+    )
+      return false
     const buffer = bytes.buffer.slice(
       bytes.byteOffset,
       bytes.byteOffset + bytes.byteLength,
@@ -1268,9 +1326,52 @@ async function saveOnce(
     // a pathless snapshot may belong to a document that an earlier queued pass
     // already landed on disk — overwrite that file instead of creating another
     let savedPath = doc.filePath ?? pathlessDocSavedPath
+    let savedIdentity = doc.hosted
     let passwordIntentPending = false
     let fullBytes: Uint8Array | undefined
-    if (explicitTarget) {
+    if (doc.hosted) {
+      const host = getDocsDocumentHost()
+      if (!host?.saveDocument) throw new Error('The host does not provide document saving')
+      assertDocumentOperation(host, saveAs ? 'saveAs' : 'save')
+      if (doc.hosted.readOnly) throw new Error('The hosted document is read-only')
+      explicitTarget?.onEffect?.('writing')
+      const result = await host.saveDocument({
+        document: { ...doc.hosted },
+        data: buffer,
+        kind: saveAs ? 'saveAs' : 'save',
+        auto,
+        ...(explicitTarget
+          ? { requestedPath: explicitTarget.path, overwrite: explicitTarget.overwrite }
+          : {}),
+      })
+      if (!result.ok || result.committed !== true || result.pending) {
+        explicitTarget?.onEffect?.(result.committed === false ? 'refused' : 'writing')
+        explicitTarget?.onError?.(
+          result.error ?? 'The host did not commit the document',
+          result.errorCode,
+        )
+        if (result.error) ctx.setStatus(t('appSaveFailed', { error: result.error }))
+        return false
+      }
+      explicitTarget?.onEffect?.('written')
+      if (saveAs && (typeof result.adopt !== 'boolean' || (result.adopt && !result.document))) {
+        ctx.setStatus(
+          t('appSaveFailed', {
+            error: 'The host must explicitly adopt an identified copy or export without switching',
+          }),
+        )
+        return false
+      }
+      // Exporting a copy must not mark the current object saved or change its identity.
+      if (saveAs && result.adopt === false) return true
+      if (result.document) {
+        validateHostedIdentity(result.document)
+        savedIdentity = { ...result.document }
+      }
+      savedPath = null
+    } else if (getDocsDocumentHost()) {
+      throw new Error('The current document has no hosted identity')
+    } else if (explicitTarget) {
       // MCP-driven explicit output: no dialog, no derived name — always write to
       // the caller's path (overwrite policy is enforced in the main process).
       explicitTarget.onEffect?.('writing')
@@ -1347,7 +1448,12 @@ async function saveOnce(
     // parse before the identity check: a document opened during this await must not be rewritten
     const reparsed = await parseDocxOffThread(fullBytes ?? bytes)
     // The write belongs to the old document; never attach its path or state to a replacement.
-    if (docGeneration !== generation) return true
+    if (
+      docGeneration !== generation ||
+      editor.isDestroyed ||
+      documentHost !== getDocsDocumentHost()
+    )
+      return true
     if (
       editor.state.doc !== docSnapshot ||
       ctx.getDocumentStateVersion?.() !== stateSnapshot ||
@@ -1365,7 +1471,8 @@ async function saveOnce(
           ? {
               ...prev,
               filePath: savedPath,
-              fileName: savedPath?.split(/[\\/]/).pop() ?? prev.fileName,
+              hosted: savedIdentity,
+              fileName: savedIdentity?.name ?? savedPath?.split(/[\\/]/).pop() ?? prev.fileName,
             }
           : prev,
       )
@@ -1423,7 +1530,8 @@ async function saveOnce(
             ...prev,
             parsed: reparsed,
             filePath: savedPath,
-            fileName: savedPath?.split(/[\\/]/).pop() ?? prev.fileName,
+            hosted: savedIdentity,
+            fileName: savedIdentity?.name ?? savedPath?.split(/[\\/]/).pop() ?? prev.fileName,
           }
         : prev,
     )

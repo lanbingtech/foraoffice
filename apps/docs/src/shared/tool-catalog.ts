@@ -10,6 +10,8 @@ import {
 
 /** Editing remains in the runtime; inference and orchestration use the Harness's own facilities. */
 
+import { DOCS_IMAGE_SOURCE_SCHEMA } from './media-policy'
+
 export const DOCS_READ_TOOLS = new Set([
   'read_attachment',
   'search_knowledge_base',
@@ -357,7 +359,7 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
     {
       name: 'insert_image',
       description:
-        'Insert an image at the captured cursor/selection. Accepts a direct http(s) image link or a PNG/JPEG/GIF base64 data URL supplied by the caller (25 MB maximum). No local file URL is accepted.',
+        'Insert an image at the captured cursor/selection. Accepts an http(s)/data image URL or an authorized local path/host asset source. Sources are read by the host, then embedded using the normal insertion pipeline.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -366,13 +368,21 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
             description: 'direct http(s) image link or data:image/png|jpeg|gif;base64,...',
           },
           maxWidthPx: { type: 'integer', description: 'maximum width (px), default 480' },
+          source: DOCS_IMAGE_SOURCE_SCHEMA,
           label: {
             type: 'string',
             maxLength: 500,
             description: 'optional picture label, preserved in the editor document model',
           },
         },
-        required: ['url'],
+        oneOf: [
+          { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+          {
+            type: 'object',
+            properties: { source: DOCS_IMAGE_SOURCE_SCHEMA },
+            required: ['source'],
+          },
+        ],
       },
     },
     {

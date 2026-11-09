@@ -60,6 +60,8 @@ export const FLOAT_SCHEMA = {
   required: ['x', 'y'],
 }
 
+import { DOCS_IMAGE_SOURCE_SCHEMA } from './media-policy'
+
 export const INSERT_PICTURE_TOOL: AgentToolDef = {
   name: 'insert_picture',
   description:
@@ -75,6 +77,7 @@ export const INSERT_PICTURE_TOOL: AgentToolDef = {
         type: 'integer',
         description: 'insert after this block (-1 = start of document); default: end of document',
       },
+      source: DOCS_IMAGE_SOURCE_SCHEMA,
       width: {
         type: ['number', 'string'],
         description: `display width, ${LENGTH_DESC}; default natural size capped at 480px`,
@@ -86,7 +89,10 @@ export const INSERT_PICTURE_TOOL: AgentToolDef = {
       float: FLOAT_SCHEMA,
       altText: { type: 'string', description: 'alternative text (accessibility)' },
     },
-    required: ['url'],
+    oneOf: [
+      { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
+      { type: 'object', properties: { source: DOCS_IMAGE_SOURCE_SCHEMA }, required: ['source'] },
+    ],
   },
 }
 

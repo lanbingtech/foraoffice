@@ -79,6 +79,92 @@ write was rolled back. An outstanding draft must be finalized, retained or
 discarded before saving. A stale target is refused; obtain fresh context and
 reassess the intended operation before submitting a new call.
 
+## Hosted documents, inspection and view annotations
+
+The optional `host.documents: DocsDocumentHost` owns managed document identity
+and storage. An identity is an opaque `id` and display `name`; `data` contains
+complete DOCX bytes and can be omitted for a new blank document. A local path
+is not required. Configure `initialDocument`, `newDocument`, `openDocument`,
+`recentDocuments`, `saveDocument` and, when supported, `createDocument`.
+Unsupported or disabled operations never fall back to local storage.
+
+`saveDocument` receives the current identity, serialized bytes, `kind`
+(`save`/`saveAs`) and `auto`. Return the normal `ok`, `committed`, `pending`
+outcome. A successful save requires `committed: true` and `pending: false`.
+Return a replacement `document` identity when adopting a new object. For Save As,
+Save As requires an explicit boolean `adopt`; `true` also requires the adopted
+`document` identity. `adopt: false` exports a copy while preserving the active object and dirty state.
+The editor retains its existing save queue and handling of edits during saves.
+`capabilities` can disable new/open/save/saveAs/export/create at their execution
+boundary. Managed automatic saving is off unless the host enables `autoSave`;
+the host can set its interval and whether blur triggers it. Hosted `readOnly`
+restricts editing and saving while permitting inspection and view annotations.
+The host owns managed recovery; the local recovery timer does not persist a
+managed object behind its back. Independent file CLI tools retain their file
+authorization and are not an alternate path for saving the current hosted object.
+
+`editor.documents` exposes `new()`, `open(id?)`, `save(saveAs?)` and `state()`.
+A managed mount with no initial document can become ready without creating an
+object; the host or user can then choose New/Open. The editing runtime requires
+an active document before document tool calls.
+
+`editor.inspection.find(query, options?)` uses the UI's literal, wildcard and
+regular-expression engine and returns ordered matches with document/revision
+references. `locate(match, { focus?: boolean })` selects and scrolls to one
+occurrence, including in read-only documents, without forcing keyboard focus.
+`replace(result, replacement, index?)` uses the native replacement expression
+rules and returns the replacement count; omitted index replaces the original
+match set in one transaction. Edits or document replacement invalidate old
+results. Host business values must be escaped according to the native
+replacement syntax; the SDK does not introduce field-filling semantics.
+Search scope and supported patterns are identical to the existing UI.
+
+`editor.annotations` supplies document-local `setRules(source, rules)`,
+`setRanges(source, ranges)`, `registerChecker(source, checker)`, `remove(source)`,
+`refresh()`, `diagnostics()`, `errors()` and `onChange(listener)`.
+Explicit ranges carry the inspection snapshot's document/revision reference.
+Ranges map through edits; rule-based results recompute. Rules accept a regular
+expression, optional message/severity, and background/color/underline styles.
+An optional capture and allowed-values catalog can identify unknown values.
+An editor-local checker receives a snapshot with text, character-to-document
+positions and blocks plus an AbortSignal, and returns range annotations.
+It can parse malformed, nested or cross-paragraph constructs; no business grammar
+is built in. Stale asynchronous results are discarded and checker errors remain
+observable through `errors()`/`onChange`. Diagnostics are advisory and cannot
+prevent ordinary save/export. Decorations remain independent of diagnostics.
+
+Configure reusable host-provided checkers in `host.checkers`; they are installed
+anew for each document. Ad-hoc registrations are cleared when the document is
+replaced. View annotations work in read-only documents and do not enter document
+JSON, DOCX, ordinary copying, print or export; they do not dirty the document or
+add history entries. Register/change/remove annotations through the SDK rather
+than inserting marks, placeholder nodes or DOM content into the document.
+
+`insert_image` and `insert_picture` accept either the existing `url` or
+`source: { path }` / `source: { asset }`. Hosts implement the optional
+`services.readImageSource` for asset references. The default Node service handles
+local paths under canonical read roots or explicit file grants, using manual
+insertion's image validation and embedding behavior. Node consumers can reuse
+`readAuthorizedImage(access, path)`. The model does not carry the image bytes.
+
+Qt hosts call `setServiceHandler(name, handler)` to override a service and
+`setServiceEnabled(name, enabled)` to enforce availability. An empty handler
+restores the default. Complete on the GUI thread with a `result` or `error`
+JSON-RPC member; cancellation is an ordinary result and never requests fallback.
+For managed storage, set `DocsQtOptions.documentHost` to a configuration with
+`enabled: true`, optional `capabilities` and `autoSave`, then register the lifecycle
+service handlers above. Binary `data` is transported as `{ base64 }`.
+Set `documentCheckers` to source names and provide a `checkDocument` service
+handler taking `[source, snapshot]` and returning range annotations. The host
+can implement a complete parser without passing JavaScript functions across Qt.
+
+`callSdk(operation, arguments, completion)` calls the same public browser methods.
+Operations are `snapshot`, `find`, `locate`, `replace`, `documents.new/open/save/state`
+and `annotations.setRules/setRanges/remove/diagnostics/errors/refresh`.
+Native calls use JSON-RPC result/error replies and have a 30-second reply timeout.
+Trusted Qt hosts can `grantFile(path, read, write, completion)` and `revokeFile`;
+those permission-changing calls are not renderer/Agent services.
+
 ## Standard MCP
 
 The Node entry `@foraoffice/docs-sdk/mcp` uses standard MCP over stdio. The owning

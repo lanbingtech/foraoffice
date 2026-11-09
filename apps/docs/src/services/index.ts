@@ -1,5 +1,6 @@
 export { createDocsFileSession } from './document-files'
 export { createDocsFileAccess } from './file-access'
+export { readAuthorizedImage } from './image-source'
 export type { DocsFileAccess, DocsFileAccessOptions } from './file-access'
 export { createDocsResourceServices } from './resource-services'
 export type { DocsResourceServices, DocsResourceServicesOptions } from './resource-services'

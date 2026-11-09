@@ -18,6 +18,15 @@ try {
     get commands() {
       return editor.commands
     },
+    get inspection() {
+      return editor.inspection
+    },
+    get annotations() {
+      return editor.annotations
+    },
+    get documents() {
+      return editor.documents
+    },
     dispose,
   }
   host.attach(editor)

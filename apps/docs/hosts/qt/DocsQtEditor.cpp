@@ -40,6 +40,7 @@
 #include <QWebEngineUrlSchemeHandler>
 #include <QWebEngineView>
 #include <memory>
+#include <utility>
 
 namespace foraoffice {
 namespace {
@@ -267,6 +268,7 @@ DocsQtEditor::DocsQtEditor(DocsQtOptions options, QWidget* parent) : QWidget(par
 }
 
 DocsQtEditor::~DocsQtEditor() {
+    disposing_ = true;
     stopBackend();
     delete printing_;
     printing_ = nullptr;
@@ -434,6 +436,36 @@ void DocsQtEditor::triggerMenuCommand(const QString& command, const QString& pay
     if (ready_ && !stopping_) hostEvent(QStringLiteral("onMenuCommand"), {command, payload});
 }
 QString DocsQtEditor::nativeText(const QString& key) const { return nativeStrings_.value(key).toString(key); }
+void DocsQtEditor::setServiceHandler(const QString& service, ServiceHandler handler) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (handler) serviceHandlers_.insert(service, std::move(handler));
+    else serviceHandlers_.remove(service);
+}
+void DocsQtEditor::setServiceEnabled(const QString& service, bool enabled) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (enabled) disabledServices_.remove(service);
+    else disabledServices_.insert(service);
+}
+void DocsQtEditor::callSdk(const QString& operation, const QJsonObject& arguments, Completion done) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!ready_ || stopping_ || sdkPending_.size() >= 64) {
+        done(errorResult(QJsonValue::Null, tr("The document SDK is unavailable or busy."))); return;
+    }
+    const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    sdkPending_.insert(id, std::move(done));
+    QTimer::singleShot(30000, this, [this, id] {
+        auto callback = sdkPending_.take(id);
+        if (callback) callback(errorResult(id, tr("The document SDK operation timed out.")));
+    });
+    emit channel_->command(json({{"jsonrpc", "2.0"}, {"id", id}, {"method", "sdk.request"},
+        {"params", QJsonObject{{"operation", operation}, {"args", arguments}}}}));
+}
+void DocsQtEditor::grantFile(const QString& path, bool read, bool write, Completion done) {
+    backendCall(QStringLiteral("files.grant"), {{"path", path}, {"read", read}, {"write", write}}, std::move(done));
+}
+void DocsQtEditor::revokeFile(const QString& path, Completion done) {
+    backendCall(QStringLiteral("files.revoke"), {{"path", path}}, std::move(done));
+}
 void DocsQtEditor::fromRenderer(const QString& source) {
     const auto message = QJsonDocument::fromJson(source.toUtf8()).object();
     const auto id = message.value("id");
@@ -459,21 +491,56 @@ void DocsQtEditor::fromRenderer(const QString& source) {
 void DocsQtEditor::fromRendererResult(const QString& source) {
     const auto message = QJsonDocument::fromJson(source.toUtf8()).object();
     const auto id = message.value("id").toString();
-    if (message.value("jsonrpc") != "2.0" || !editorRequests_.remove(id)) return;
+    if (message.value("jsonrpc") != "2.0") return;
+    auto callback = sdkPending_.take(id);
+    if (callback) { callback(message); return; }
+    if (!editorRequests_.remove(id)) return;
     sendBackend(message);
 }
 
 void DocsQtEditor::serviceCall(const QJsonValue& id, const QString& method, const QJsonArray& args) {
+    if (disabledServices_.contains(method)) {
+        rendererError(id, tr("The host disabled this service."), {{"errorCode", "permission_denied"}});
+        return;
+    }
+    const auto handler = serviceHandlers_.value(method);
+    if (handler) {
+        auto completed = std::make_shared<bool>(false);
+        handler(args, [self = QPointer<DocsQtEditor>(this), id, completed](const QJsonObject& response) {
+            if (!self || self->stopping_ || std::exchange(*completed, true)) return;
+            Q_ASSERT(QThread::currentThread() == self->thread());
+            if (response.contains("error")) {
+                const auto error = response.value("error").toObject();
+                self->rendererError(id, error.value("message").toString(), error.value("data").toObject());
+            } else if (response.contains("result")) self->rendererReply(id, response.value("result"));
+            else self->rendererError(id, tr("The host returned an invalid service outcome."));
+        });
+        return;
+    }
+    // A managed host cannot accidentally reach local persistence through an omitted callback.
+    if (options_.documentHost.value("enabled").toBool()) {
+        static const QSet<QString> localLifecycle{"openDocx", "openDocxPath", "openDocxDecrypt",
+            "saveDocx", "saveDocxAs", "saveDocxNew", "saveDocxTo", "writeRecoveryCopy", "createDocument"};
+        if (localLifecycle.contains(method)) {
+            rendererError(id, tr("The managed host does not provide this document operation."), {{"errorCode", "unavailable"}});
+            return;
+        }
+    }
     static const QSet<QString> nodeServices{"consumePendingOpenDocx", "consumeNewBlankDoc", "consumeAiDocContent", "consumeHeadlessExport",
         "openDocx", "openDocxPath", "openDocxDecrypt", "saveDocx", "saveDocxAs", "saveDocxNew", "saveDocxTo", "writeRecoveryCopy",
-        "setDocPassword", "docPasswordIntentRevision", "discardDocPasswordIntents", "getRecentFiles", "fontMetrics", "fetchImage", "pickImage",
+        "setDocPassword", "docPasswordIntentRevision", "discardDocPasswordIntents", "getRecentFiles", "fontMetrics", "fetchImage", "pickImage", "readImageSource",
         "createDocument", "getResourceState", "readAttachment", "kbList", "kbSearch", "kbRead", "runCli", "cancelCli", "pickMergeDataSource", "writeMergeOutput",
         "exportPdf", "exportHtml", "exportMarkdown", "printPdfBuffer", "saveMergedPdf", "pickExportImagesTarget", "takeExportPdf", "writeExportImage", "saveImageAs"};
     if (nodeServices.contains(method)) {
         backendCall(QStringLiteral("services.call"), {{"method", method}, {"args", args}}, [this, id, method](const QJsonObject& response) {
             if (qEnvironmentVariableIsSet("FORAOFFICE_DOCS_DIAGNOSTICS")) qInfo("Docs service completed: %s ok=%d", qPrintable(method), !response.contains("error"));
             if (response.contains("error")) rendererError(id, response.value("error").toObject().value("message").toString(), response.value("error").toObject().value("data").toObject());
-            else rendererReply(id, response.value("result"));
+            else if (method == "getResourceState") {
+                auto result = response.value("result").toObject();
+                if (!options_.documentHost.isEmpty()) result.insert("documentHost", options_.documentHost);
+                result.insert("checkers", QJsonArray::fromStringList(options_.documentCheckers));
+                rendererReply(id, result);
+            } else rendererReply(id, response.value("result"));
         });
     } else if (method == "copyImageToClipboard") {
         const auto meta = args.at(1).toString();
@@ -587,9 +654,14 @@ void DocsQtEditor::serviceNotify(const QString& method, const QJsonArray& args) 
 void DocsQtEditor::fail(const QString& message) {
     status_->setText(nativeText("qtHostError").replace("{error}", message)); status_->show();
     const auto pending = std::move(pending_); pending_.clear();
+    const auto sdkPending = std::move(sdkPending_); sdkPending_.clear();
     QPointer<DocsQtEditor> self(this);
     stopBackend();
     for (const auto& callback : pending) {
+        callback(errorResult(QJsonValue::Null, message));
+        if (!self) return;
+    }
+    for (const auto& callback : sdkPending) {
         callback(errorResult(QJsonValue::Null, message));
         if (!self) return;
     }
@@ -601,8 +673,17 @@ void DocsQtEditor::stopBackend() {
     backendReady_ = false;
     ready_ = false;
     pending_.clear(); editorRequests_.clear();
+    const auto sdkPending = std::exchange(sdkPending_, {});
     closeTimer_->stop();
     emit backendStopRequested();
+    // QWidget::close normally hides the view; settle callers before their timers expire.
+    // Destruction removes their owner and must not invoke reentrant application callbacks.
+    if (disposing_) return;
+    QPointer<DocsQtEditor> self(this);
+    for (const auto& callback : sdkPending) {
+        callback(errorResult(QJsonValue::Null, tr("The document SDK operation was canceled.")));
+        if (!self) return;
+    }
 }
 void DocsQtEditor::acceptClose() { closeAllowed_ = true; close(); }
 void DocsQtEditor::resolveCloseCheck(bool allowed) {

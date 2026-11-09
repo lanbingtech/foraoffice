@@ -46,4 +46,22 @@ if(FORAOFFICE_DOCS_QT_BUILD_TESTS)
   add_test(NAME docs-qt-backend-lifecycle COMMAND docs-qt-backend-test -o -,txt)
   set_tests_properties(docs-qt-backend-lifecycle PROPERTIES TIMEOUT 60
     ENVIRONMENT "FORAOFFICE_QT_TEST_NODE=${DOCS_TEST_NODE}")
+  add_executable(docs-qt-services-test tests/services.cpp)
+  target_link_libraries(docs-qt-services-test PRIVATE ForaOfficeDocsQt Qt6::Test)
+  if(MSVC)
+    target_compile_options(docs-qt-services-test PRIVATE /W4 /utf-8 /permissive-)
+  endif()
+  add_test(NAME docs-qt-service-overrides COMMAND docs-qt-services-test -o -,txt)
+  set_tests_properties(docs-qt-service-overrides PROPERTIES TIMEOUT 30
+    ENVIRONMENT "FORAOFFICE_QT_TEST_NODE=${DOCS_TEST_NODE};FORAOFFICE_QT_TEST_PACKAGE=${DOCS_TEST_PACKAGE_ROOT}"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Test>")
+  add_executable(docs-qt-sdk-test tests/sdk.cpp)
+  target_link_libraries(docs-qt-sdk-test PRIVATE ForaOfficeDocsQt Qt6::Test)
+  if(MSVC)
+    target_compile_options(docs-qt-sdk-test PRIVATE /W4 /utf-8 /permissive-)
+  endif()
+  add_test(NAME docs-qt-public-sdk COMMAND docs-qt-sdk-test -o "${CMAKE_BINARY_DIR}/sdk-test-results.txt,txt")
+  set_tests_properties(docs-qt-public-sdk PROPERTIES TIMEOUT 180
+    ENVIRONMENT "FORAOFFICE_QT_TEST_NODE=${DOCS_TEST_NODE};FORAOFFICE_QT_TEST_PACKAGE=${DOCS_TEST_PACKAGE_ROOT};FORAOFFICE_QT_TEST_RESULTS=${CMAKE_BINARY_DIR}/sdk-test-output"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Test>")
 endif()

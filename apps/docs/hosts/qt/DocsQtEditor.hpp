@@ -25,6 +25,9 @@ struct DocsQtOptions {
     QString defaultSaveDirectory;
     QString initialPath;
     QJsonObject initialContent;
+    /** Optional managed-document service configuration; callbacks use setServiceHandler. */
+    QJsonObject documentHost;
+    QStringList documentCheckers;
     QStringList attachments;
     QStringList knowledge;
     QString language = QStringLiteral("zh");
@@ -55,6 +58,8 @@ public:
                                              const QJsonObject& grant, Completion done)>;
     using CreateWordHandler = std::function<void(const QJsonObject& content, Completion done)>;
     using OpenFileHandler = std::function<bool(const QString& path)>;
+    /** Complete on the GUI thread with a JSON-RPC result or error member, including cancellation. */
+    using ServiceHandler = std::function<void(const QJsonArray& arguments, Completion done)>;
     /** Call before constructing QApplication, as required by Qt WebEngine. */
     static void registerUrlSchemes();
     explicit DocsQtEditor(DocsQtOptions options, QWidget* parent = nullptr);
@@ -63,6 +68,14 @@ public:
     void setActionHandler(ActionHandler handler) { actionHandler_ = std::move(handler); }
     void setCreateWordHandler(CreateWordHandler handler) { createWordHandler_ = std::move(handler); }
     void setOpenFileHandler(OpenFileHandler handler) { openFileHandler_ = std::move(handler); }
+    /** An empty handler restores the default; a handler's cancellation/failure never falls back. */
+    void setServiceHandler(const QString& service, ServiceHandler handler);
+    void setServiceEnabled(const QString& service, bool enabled);
+    /** Invoke a named public browser SDK operation; completion is a JSON-RPC result/error. */
+    void callSdk(const QString& operation, const QJsonObject& arguments, Completion done);
+    /** Trusted host grants, never exposed as renderer/Agent services. */
+    void grantFile(const QString& path, bool read, bool write, Completion done);
+    void revokeFile(const QString& path, Completion done);
     /** Trusted native menu entry; uses the editor's existing manual command handler. */
     void triggerMenuCommand(const QString& command, const QString& payload = {});
     QString nativeText(const QString& key) const;
@@ -95,6 +108,7 @@ private:
     DocsQtOptions options_;
     QJsonObject nativeStrings_;
     QHash<QString, Completion> pending_;
+    QHash<QString, Completion> sdkPending_;
     QSet<QString> editorRequests_;
     DocsQtChannel* channel_ = nullptr;
     QWebEngineProfile* profile_ = nullptr;
@@ -103,11 +117,14 @@ private:
     ActionHandler actionHandler_;
     CreateWordHandler createWordHandler_;
     OpenFileHandler openFileHandler_;
+    QHash<QString, ServiceHandler> serviceHandlers_;
+    QSet<QString> disabledServices_;
     DocsQtPrinting* printing_ = nullptr;
     bool creationReported_ = false;
     bool ready_ = false;
     bool backendReady_ = false;
     bool stopping_ = false;
+    bool disposing_ = false;
     bool closeCheck_ = false;
     bool closeAllowed_ = false;
     std::function<void(bool)> closeDecision_;

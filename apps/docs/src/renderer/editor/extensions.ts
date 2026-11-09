@@ -242,6 +242,7 @@ import { InactiveSelectionExtension } from './inactive-selection'
 import { FieldCodesExtension } from './field-codes'
 import { FormattingMarksExtension } from './formatting-marks'
 import { AiQueueAnchorsExtension } from './ai-queue-anchors'
+import { DocsAnnotationsExtension } from '../sdk/annotations'
 import { CheckboxToggleExtension } from './checkbox-toggle'
 import { DoubleClickWordExtension } from './dblclick-word'
 import { OutlineViewExtension } from './outline-view'
@@ -7400,6 +7401,7 @@ export const editorExtensions = [
   FloatTableSpacingExtension,
   InactiveSelectionExtension,
   AiQueueAnchorsExtension,
+  DocsAnnotationsExtension,
   CheckboxToggleExtension,
   DoubleClickWordExtension,
   OutlineViewExtension,

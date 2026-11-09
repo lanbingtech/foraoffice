@@ -1,4 +1,10 @@
-import { getDocsHost, getDocsHarness, getDocsResources } from './host/docs-host'
+import {
+  getDocsHost,
+  getDocsHarness,
+  getDocsResources,
+  getDocsDocumentHost,
+  getDocsCheckers,
+} from './host/docs-host'
 import type { DocsEditorAction } from '../shared/editor-action'
 import { scriptFontHtml } from './editor/script-fonts'
 import { carryDocSeen } from './ai/tools'
@@ -511,6 +517,7 @@ import {
   saveExplicit,
   suggestedSaveAsName,
   writeRecoveryCopy as writeRecoveryCopyImpl,
+  currentDocGeneration,
   type FileActionContext,
   type PendingPdfExport,
 } from './file-actions'
@@ -544,6 +551,9 @@ import { runHeadlessDocumentExport } from './headless-export'
 import { installMcpBridge } from './mcp-bridge'
 import { createDocsRuntime, type RuntimeDocument } from './runtime/docs-runtime'
 import { createDocsCommandRouter } from './runtime/command-router'
+import { createDocsInspection } from './sdk/inspection'
+import { createDocsAnnotations } from './sdk/annotations'
+import type { DocsDocumentCommands } from '../shared/document-host'
 import { findNumId } from './ai/protocol'
 import {
   clampDocsZoom,
@@ -777,8 +787,11 @@ function shadowPlanDiff(
 }
 
 export interface DocsAppRuntime {
+  documents: DocsDocumentCommands
   runtime: ReturnType<typeof createDocsRuntime>
   commands: ReturnType<typeof createDocsCommandRouter>
+  inspection: ReturnType<typeof createDocsInspection>
+  annotations: ReturnType<typeof createDocsAnnotations>
 }
 
 export function App({
@@ -800,6 +813,7 @@ export function App({
     null,
   )
   const bootHandledRef = useRef(false)
+  const [bootComplete, setBootComplete] = useState(false)
   /** password prompt for an ECMA-376 encrypted docx; submit retries via openDocxDecrypt */
   const [docPwdPrompt, setDocPwdPrompt] = useState<{
     path: string
@@ -1188,7 +1202,10 @@ export function App({
     otherName: string
     entries: CompareEntry[]
   } | null>(null)
-  const [autoSave, setAutoSave] = useAutoSavePref('aidocs.autoSave', getDocsHost())
+  const [storedAutoSave, setAutoSave] = useAutoSavePref('aidocs.autoSave', getDocsHost())
+  const autoSave = getDocsDocumentHost()
+    ? getDocsDocumentHost()?.autoSave?.enabled === true
+    : storedAutoSave
   // tab closed but this renderer kept alive (shell freeze workaround): go inert
   const [tornDown, setTornDown] = useState(false)
   const [aiPreset, setAiPreset] = useState<{
@@ -2111,6 +2128,7 @@ export function App({
   const writeLocked = !!writeProtection?.hash && !modifyUnlocked
   /** body is read-only (readOnly/forms/comments restriction or write lock) */
   const isProtected =
+    doc?.hosted?.readOnly === true ||
     writeLocked ||
     editRestriction === 'readOnly' ||
     editRestriction === 'forms' ||
@@ -2130,14 +2148,14 @@ export function App({
   // StreamingTailGuardExtension; saves wait for the full content).
   useEffect(() => {
     if (!editor) return
-    editor.setEditable(!readMode && !isProtected)
+    editor.setEditable(!readMode && !isProtected && !doc?.hosted?.readOnly, false)
     if (!readMode) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setReadMode(false)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [editor, readMode, isProtected])
+  }, [editor, readMode, isProtected, doc?.hosted?.readOnly])
 
   // Track Changes: the recorder plugin reads its toggle from extension storage
   useEffect(() => {
@@ -2410,7 +2428,8 @@ export function App({
     const outcome = await loadFileImpl(fileCtxRef.current, result)
     // a failed open with no document yet (boot, or the open that superseded the
     // boot open) must land on blank instead of the "Opening…" screen
-    if (outcome === 'failed' && !fileCtxRef.current.doc) await newFileImpl(fileCtxRef.current)
+    if (outcome === 'failed' && !fileCtxRef.current.doc && !getDocsDocumentHost())
+      await newFileImpl(fileCtxRef.current)
     return outcome
   }, [])
   const resetFile = useCallback(() => newFileImpl(fileCtxRef.current), [])
@@ -2463,7 +2482,7 @@ export function App({
         // line explaining why (github.com/genspark-ai/genoffice issue #102).
         // 'password': the prompt is up; its cancel path lands on blank instead.
         const outcome = pending ? await loadFile(pending) : 'canceled'
-        if (outcome === 'canceled') await resetFile()
+        if (outcome === 'canceled' && !getDocsDocumentHost()) await resetFile()
         if (aiContent && !pending) {
           // fileCtxRef refreshes per render: wait until resetFile's setDoc landed
           for (let i = 0; i < 100 && !fileCtxRef.current.doc; i++) {
@@ -2498,40 +2517,59 @@ export function App({
         }
       })
       // Open failures also land on a blank document, or the tab stays at "Opening…" forever
-      .catch(() => {
+      .catch((error: unknown) => {
         if (bootHandledRef.current) return
         bootHandledRef.current = true
-        void resetFile().catch(() => {})
+        if (getDocsDocumentHost()) setStatus(t('appOpenFailed', { error: String(error) }))
+        if (!getDocsDocumentHost()) void resetFile().catch(() => {})
       })
+      .finally(() => setBootComplete(true))
     return unsubscribe
   }, [commitOpenedFile, editor, loadFile, resetFile])
 
+  const documentActionFailed = useCallback((error: unknown, creating = false) => {
+    setStatus(
+      creating
+        ? t('appNewFailed', { error: String(error) })
+        : t('appOpenFailed', { error: String(error) }),
+    )
+    return false
+  }, [])
+  const confirmCurrentDocumentReplace = useCallback(() => {
+    const currentEditor = fileCtxRef.current.editor
+    return currentEditor && !currentEditor.isDestroyed
+      ? getDocsHost().confirmDocumentReplace()
+      : Promise.resolve(false)
+  }, [])
   const openFile = useCallback(
     () =>
       runGuardedCandidate(
-        () => getDocsHost().confirmDocumentReplace(),
+        confirmCurrentDocumentReplace,
         () => getDocsHost().openDocx(),
         commitOpenedFile,
         replacesDocument,
-      ),
-    [commitOpenedFile],
+      ).catch(documentActionFailed),
+    [commitOpenedFile, documentActionFailed, confirmCurrentDocumentReplace],
   )
 
   /** new document from the built-in blank template (AI can then generate into it) */
   const newFile = useCallback(
-    () => runGuardedDocumentAction(() => getDocsHost().confirmDocumentReplace(), resetFile),
-    [resetFile],
+    () =>
+      runGuardedDocumentAction(confirmCurrentDocumentReplace, resetFile).catch((error: unknown) =>
+        documentActionFailed(error, true),
+      ),
+    [resetFile, documentActionFailed, confirmCurrentDocumentReplace],
   )
 
   const openRecent = useCallback(
     (path: string) =>
       runGuardedCandidate(
-        () => getDocsHost().confirmDocumentReplace(),
+        confirmCurrentDocumentReplace,
         () => getDocsHost().openDocxPath(path),
         commitOpenedFile,
         replacesDocument,
-      ),
-    [commitOpenedFile],
+      ).catch(documentActionFailed),
+    [commitOpenedFile, documentActionFailed, confirmCurrentDocumentReplace],
   )
 
   /** decrypt-and-open retry loop for the password prompt (wrong password stays in the dialog) */
@@ -6131,7 +6169,9 @@ export function App({
     const offCheck = getDocsHost().onCloseCheck?.(() => {
       getDocsHost().reportCloseCheck({
         dirty: !!doc && (anyDirtyRef.current || dirtyRef.current),
-        autoSave: autoSave && !!doc?.filePath,
+        autoSave:
+          (getDocsDocumentHost()?.autoSave?.enabled ?? autoSave) &&
+          !!(doc?.filePath || doc?.hosted),
         filePath: doc?.filePath ?? null,
       })
     })
@@ -6158,7 +6198,15 @@ export function App({
 
   // autosave: every 30s and on window blur, silently persist pending changes
   useEffect(() => {
-    if (tornDown || !autoSave || !doc || !doc.filePath) return
+    const policy = getDocsDocumentHost()?.autoSave
+    if (
+      tornDown ||
+      !(policy?.enabled ?? autoSave) ||
+      !doc ||
+      (!doc.filePath && !doc.hosted) ||
+      doc.hosted?.readOnly
+    )
+      return
     const tick = () => {
       if (!isDocDirty(fileCtxRef.current)) return
       if (editor?.view.composing) return // don't interrupt IME input
@@ -6166,8 +6214,8 @@ export function App({
       if (active?.closest('td[contenteditable], .doc-textbox')) return // mid in-place edit
       void save(false, true)
     }
-    const id = window.setInterval(tick, 30_000)
-    window.addEventListener('blur', tick)
+    const id = window.setInterval(tick, Math.max(1000, policy?.intervalMs ?? 30_000))
+    if (policy?.onBlur !== false) window.addEventListener('blur', tick)
     return () => {
       window.clearInterval(id)
       window.removeEventListener('blur', tick)
@@ -6181,6 +6229,7 @@ export function App({
   useEffect(() => {
     const handler = () => {
       const cur = fileCtxRef.current
+      if (getDocsDocumentHost()) return
       if (!cur.doc || cur.doc.filePath || !anyDirtyRef.current) return
       if (editor?.view.composing) return
       void save(false, true)
@@ -7571,7 +7620,11 @@ export function App({
     [editor],
   )
 
-  const runtimeIdentity = useMemo(() => ({ generation: aiPanelKey }), [aiPanelKey])
+  const hostedId = doc?.hosted?.id
+  const runtimeIdentity = useMemo(
+    () => ({ generation: aiPanelKey, hostedId }),
+    [aiPanelKey, hostedId],
+  )
   const sideState = fileCtxRef.current
   const authoredStores = [
     sideState.comments,
@@ -7650,6 +7703,54 @@ export function App({
     [],
   )
   const docsCommands = useMemo(() => createDocsCommandRouter(docsRuntime), [docsRuntime])
+  const docsDocuments = useMemo<DocsDocumentCommands>(
+    () => ({
+      async new() {
+        const before = currentDocGeneration()
+        await newFile()
+        return currentDocGeneration() !== before
+      },
+      async open(id) {
+        const before = currentDocGeneration()
+        await (id === undefined ? openFile() : openRecent(id))
+        return currentDocGeneration() !== before
+      },
+      save: (saveAs = false) => save(saveAs),
+      state() {
+        const current = fileCtxRef.current.doc
+        return current
+          ? {
+              id: current.hosted?.id ?? current.filePath ?? '',
+              name: current.hosted?.name ?? current.fileName,
+              path: current.filePath,
+              dirty: isDocDirty(fileCtxRef.current),
+              readOnly: current.hosted?.readOnly || !fileCtxRef.current.editor?.isEditable,
+            }
+          : null
+      },
+    }),
+    [newFile, openFile, openRecent, save],
+  )
+  const docsInspection = useMemo(() => createDocsInspection(() => runtimeDocumentRef.current), [])
+  const docsAnnotations = useMemo(
+    () => createDocsAnnotations(() => runtimeDocumentRef.current, docsInspection),
+    [docsInspection],
+  )
+  fileCtxRef.current.beforeDocumentReplace = () => docsAnnotations.reset()
+  useEffect(() => {
+    if (runtimeDocumentRef.current) {
+      docsAnnotations.activate()
+      for (const [source, checker] of Object.entries(getDocsCheckers()))
+        docsAnnotations.registerChecker(source, checker)
+    }
+  }, [runtimeIdentity, docsAnnotations, editor])
+  useEffect(
+    () => () => {
+      docsAnnotations.dispose()
+      docsInspection.dispose()
+    },
+    [docsAnnotations, docsInspection],
+  )
   externalActionRef.current = async (kind, instruction) => {
     const harness = getDocsHarness()
     if (!harness) throw new Error('No external Harness conversation is bound to this editor')
@@ -7672,12 +7773,26 @@ export function App({
   }
   useEffect(() => () => docsRuntime.dispose(), [docsRuntime])
   useEffect(() => () => docsCommands.dispose(), [docsCommands])
-  const runtimeReady = !!editor && !!doc && !tornDown
+  const runtimeReady = !!editor && (!!doc || (bootComplete && !!getDocsDocumentHost())) && !tornDown
   useEffect(() => {
     if (!runtimeReady) return
-    onRuntime?.({ runtime: docsRuntime, commands: docsCommands })
+    onRuntime?.({
+      runtime: docsRuntime,
+      commands: docsCommands,
+      inspection: docsInspection,
+      annotations: docsAnnotations,
+      documents: docsDocuments,
+    })
     return () => onRuntime?.(null)
-  }, [runtimeReady, docsRuntime, docsCommands, onRuntime])
+  }, [
+    runtimeReady,
+    docsRuntime,
+    docsCommands,
+    docsInspection,
+    docsAnnotations,
+    docsDocuments,
+    onRuntime,
+  ])
   useEffect(() => {
     if (tornDown || !editor) return
     return installMcpBridge({
@@ -8018,6 +8133,7 @@ export function App({
           <input
             type="checkbox"
             checked={autoSave}
+            disabled={!!getDocsDocumentHost()}
             onChange={(e) => setAutoSave(e.target.checked)}
           />
         </label>

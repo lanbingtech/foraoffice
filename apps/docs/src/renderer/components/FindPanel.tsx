@@ -8,7 +8,7 @@ import {
   RESULTS_LIST_CAP,
   SCAN_THRESHOLD,
   compileFind,
-  expandReplacement,
+  applyFindReplacement,
   findInDoc,
   findInDocAsync,
   matchContext,
@@ -352,20 +352,7 @@ export function FindPanel({
   /** insert the replacement, splitting the block wherever the template had a paragraph mark */
   const applyReplacement = useCallback(
     (tr: Transaction, m: FindMatch) => {
-      const segs = expandReplacement(replacement, m, mode)
-      const joined = segs.join('\u0000')
-      tr.insertText(joined, m.from, m.to)
-      const splitsAt: number[] = []
-      let offset = 0
-      for (let k = 0; k < segs.length - 1; k++) {
-        offset += segs[k].length
-        splitsAt.push(m.from + offset)
-        offset += 1
-      }
-      for (const p of splitsAt.reverse()) {
-        tr.delete(p, p + 1)
-        tr.split(p)
-      }
+      applyFindReplacement(tr, m, replacement, mode)
     },
     [replacement, mode],
   )

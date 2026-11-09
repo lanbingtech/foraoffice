@@ -8,6 +8,9 @@ import { setAuthorName } from './author-name'
 import { getDocsHost, installDocsHost, type DocsHostAdapter } from './host/docs-host'
 import type { DocsRuntime } from './runtime/docs-runtime'
 import type { DocsCommands } from './runtime/command-router'
+import type { DocsInspection } from './sdk/inspection'
+import type { DocsAnnotations } from './sdk/annotations'
+import type { DocsDocumentCommands } from '../shared/document-host'
 import type { DocTheme, UiTheme } from '../shared/ipc'
 
 export { createExternalDocsHost } from './host/docs-host'
@@ -21,6 +24,30 @@ export type { DocsResourceOptions } from './runtime/resource-tools'
 export type { DocsRuntime, DocsRuntimeClient, DocsRuntimeScope } from './runtime/docs-runtime'
 export type { DocsCommands } from './runtime/command-router'
 export type {
+  DocsDocumentHost,
+  DocsHostedIdentity,
+  DocsHostedDocument,
+  DocsHostedSaveRequest,
+  DocsHostedSaveOutcome,
+  DocsDocumentOperation,
+} from '../shared/document-host'
+export type { DocsDocumentCommands } from '../shared/document-host'
+export type { DocsImageSource } from './ai/image-source'
+export type {
+  DocsInspection,
+  DocsFindResult,
+  DocsTextReference,
+  DocsTextSnapshot,
+} from './sdk/inspection'
+export type {
+  DocsAnnotations,
+  DocsAnnotation,
+  DocsDiagnostic,
+  DocsRangeStyle,
+  DocsMatchRule,
+  DocsChecker,
+} from './sdk/annotations'
+export type {
   DocsOperationResult,
   DocsSaveResult,
   DocsSaveOutcome,
@@ -33,6 +60,9 @@ export interface DocsEditorHandle {
   readonly ready: Promise<void>
   readonly runtime: DocsRuntime
   readonly commands: DocsCommands
+  readonly inspection: DocsInspection
+  readonly annotations: DocsAnnotations
+  readonly documents: DocsDocumentCommands
   dispose(): void
 }
 
@@ -51,10 +81,23 @@ export async function mountDocsEditor(
   const releaseHost = installDocsHost(options.host)
   const disposers: Array<() => void> = []
   let root: Root | undefined
-  let live: Pick<DocsEditorHandle, 'runtime' | 'commands'> | null = null
+  let live: Pick<
+    DocsEditorHandle,
+    'runtime' | 'commands' | 'inspection' | 'annotations' | 'documents'
+  > | null = null
   let disposed = false
   let loaded = false
   let delivered = false
+  const activeDocuments = () => {
+    if (!live || disposed) throw new Error('The document lifecycle API is disposed or not ready')
+    return live.documents
+  }
+  const documents: DocsDocumentCommands = {
+    new: async () => activeDocuments().new(),
+    open: async (id) => activeDocuments().open(id),
+    save: async (saveAs) => activeDocuments().save(saveAs),
+    state: () => activeDocuments().state(),
+  }
   const lifetime = new AbortController()
   let resolveReady!: () => void
   let rejectReady!: (reason: unknown) => void
@@ -160,6 +203,18 @@ export async function mountDocsEditor(
       get commands() {
         if (!live || disposed) throw new Error('The document command endpoint is not ready')
         return live.commands
+      },
+      get inspection() {
+        if (!live || disposed) throw new Error('The document inspection API is not ready')
+        return live.inspection
+      },
+      get annotations() {
+        if (!live || disposed) throw new Error('The document annotations API is not ready')
+        return live.annotations
+      },
+      get documents() {
+        activeDocuments()
+        return documents
       },
       dispose,
     }

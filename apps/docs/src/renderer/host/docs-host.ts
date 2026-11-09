@@ -4,8 +4,14 @@ import { electronDocsProjects, electronDocsServices } from './electron'
 import type { DocsHarnessAdapter } from '../../shared/editor-action'
 import type { DocsResourceTools } from '../../shared/resource-tools'
 import { DOCS_FILE_COMMANDS } from '../../shared/resource-tools'
+import type { DocsDocumentHost } from '../../shared/document-host'
+import { withDocumentServices } from './document-services'
+import type { DocsChecker } from '../sdk/annotations'
 
 export interface DocsHostAdapter {
+  /** Host-provided checkers are installed anew for each document; findings never cross identities. */
+  checkers?: Record<string, DocsChecker>
+  documents?: DocsDocumentHost
   kind: 'electron' | 'qt' | 'browser'
   services: DocsEditorServices
   projects?: ProjectApi
@@ -82,7 +88,14 @@ let installed: DocsHostAdapter | undefined
 /** Install before mounting an editor. Disposal cannot remove a subsequently installed host. */
 export function installDocsHost(adapter: DocsHostAdapter): () => void {
   if (installed) throw new Error('A Docs host is already installed in this renderer')
-  const instance = { ...adapter, services: editorServices(adapter.services) }
+  const instance = {
+    ...adapter,
+    services: editorServices(
+      adapter.documents
+        ? withDocumentServices(adapter.services, adapter.documents)
+        : adapter.services,
+    ),
+  }
   installed = instance
   return () => {
     if (installed === instance) installed = undefined
@@ -125,4 +138,11 @@ export function getDocsHarness(): DocsHarnessAdapter | undefined {
 
 export function getDocsResources(): DocsResourceTools | undefined {
   return installed?.resources?.()
+}
+
+export function getDocsDocumentHost(): DocsDocumentHost | undefined {
+  return installed?.documents
+}
+export function getDocsCheckers(): Record<string, DocsChecker> {
+  return installed?.checkers ?? {}
 }

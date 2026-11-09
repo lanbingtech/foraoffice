@@ -22,6 +22,7 @@ import { createDocsFileServices, type DocsFileServices } from './file-services'
 import { createDocsAssetServer, type DocsAssetServer } from './asset-server'
 import { createDocsHostBridge, type DocsHostBridge } from './host-bridge'
 import { readPickedImage } from './picked-image'
+import { readAuthorizedImage } from './image-source'
 import {
   DocsOperationError,
   isDocsOperationResult,
@@ -374,6 +375,11 @@ async function callService(method: string, args: unknown[]): Promise<unknown> {
         .parse(await nativeRequest('host.dialog', { kind: 'image' }))
       return path ? readPickedImage(path) : null
     }
+    case 'readImageSource': {
+      if (!access) throw new Error('File access is not initialized')
+      const source = z.object({ path: z.string() }).strict().parse(args[0])
+      return readAuthorizedImage(access, source.path)
+    }
     case 'fontMetrics':
       return familyVerticalMetrics(text(0))
     case 'fetchImage': {
@@ -534,6 +540,20 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
   if (method === 'services.call') {
     const call = callSchema.parse(params)
     return callService(call.method, call.args)
+  }
+  if (method === 'files.grant') {
+    if (!access || closing) throw new Error('File access is not initialized')
+    const grant = z
+      .object({ path: z.string(), read: z.boolean(), write: z.boolean() })
+      .strict()
+      .parse(params)
+    await access.grantFile(grant.path, grant)
+    return { ok: true }
+  }
+  if (method === 'files.revoke') {
+    if (!access || closing) throw new Error('File access is not initialized')
+    await access.revokeFile(z.object({ path: z.string() }).strict().parse(params).path)
+    return { ok: true }
   }
   if (method === 'document.hintPath') {
     const { path } = z.object({ path: z.string().nullable() }).strict().parse(params)
