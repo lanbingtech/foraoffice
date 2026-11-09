@@ -4,7 +4,6 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonValue>
-#include <QProcess>
 #include <QSet>
 #include <QWidget>
 #include <functional>
@@ -74,6 +73,8 @@ signals:
 protected:
     void closeEvent(QCloseEvent* event) override;
 private:
+    Q_SIGNAL void backendSend(QJsonObject message);
+    Q_SIGNAL void backendStopRequested();
     friend class DocsQtChannel;
     void fromRenderer(const QString& source);
     void fromRendererResult(const QString& source);
@@ -93,8 +94,6 @@ private:
     void requestCloseState();
     DocsQtOptions options_;
     QJsonObject nativeStrings_;
-    QProcess backend_;
-    QByteArray output_;
     QHash<QString, Completion> pending_;
     QSet<QString> editorRequests_;
     DocsQtChannel* channel_ = nullptr;
@@ -107,6 +106,7 @@ private:
     DocsQtPrinting* printing_ = nullptr;
     bool creationReported_ = false;
     bool ready_ = false;
+    bool backendReady_ = false;
     bool stopping_ = false;
     bool closeCheck_ = false;
     bool closeAllowed_ = false;

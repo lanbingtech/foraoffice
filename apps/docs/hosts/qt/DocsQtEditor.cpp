@@ -1,4 +1,5 @@
 #include "DocsQtEditor.hpp"
+#include "DocsQtBackend.hpp"
 #include "DocsQtPrinting.hpp"
 #include <QBuffer>
 #include <QApplication>
@@ -23,6 +24,7 @@
 #include <QNetworkRequest>
 #include <QPointer>
 #include <QTimer>
+#include <QThread>
 #include <QUuid>
 #include <QUrlQuery>
 #include <QVBoxLayout>
@@ -38,9 +40,6 @@
 #include <QWebEngineUrlSchemeHandler>
 #include <QWebEngineView>
 #include <memory>
-#ifdef Q_OS_WIN
-#include <qt_windows.h>
-#endif
 
 namespace foraoffice {
 namespace {
@@ -231,46 +230,40 @@ DocsQtEditor::DocsQtEditor(DocsQtOptions options, QWidget* parent) : QWidget(par
     });
     connect(page, &QWebEnginePage::renderProcessTerminated, this, [this] { fail(tr("The Word renderer stopped. Your saved file is unchanged.")); });
     connect(page, &QWebEnginePage::windowCloseRequested, this, &QWidget::close);
-    connect(&backend_, &QProcess::readyReadStandardOutput, this, [this] {
-        output_ += backend_.readAllStandardOutput();
-        if (output_.size() > 80 * 1024 * 1024) { fail(tr("The document backend response exceeded its limit.")); stopBackend(); return; }
-        qsizetype newline;
-        while ((newline = output_.indexOf('\n')) >= 0) {
-            const auto line = output_.left(newline); output_.remove(0, newline + 1);
-            QJsonParseError error;
-            const auto document = QJsonDocument::fromJson(line, &error);
-            if (error.error != QJsonParseError::NoError || !document.isObject()) { fail(tr("Invalid document backend response.")); continue; }
-            backendMessage(document.object());
-        }
+    QJsonObject backendOptions{{"stateDirectory", options_.stateDirectory}, {"readRoots", QJsonArray::fromStringList(options_.readRoots)},
+        {"writeRoots", QJsonArray::fromStringList(options_.writeRoots)}, {"defaultSaveDirectory", options_.defaultSaveDirectory},
+        {"attachments", QJsonArray::fromStringList(options_.attachments)}, {"knowledge", QJsonArray::fromStringList(options_.knowledge)}};
+    if (!options_.initialPath.isEmpty()) backendOptions.insert("initialPath", options_.initialPath);
+    if (!options_.initialContent.isEmpty()) backendOptions.insert("initialContent", options_.initialContent);
+    const auto cli = QDir(options_.packageRoot).filePath("cli/genoffice.cjs");
+    if (QFileInfo::exists(cli)) backendOptions.insert("cli", QJsonObject{{"executable", options_.nodeExecutable}, {"entry", cli}});
+    auto* thread = new QThread(qApp);
+    auto* backend = new DocsQtBackend(options_.nodeExecutable,
+        QDir(options_.packageRoot).filePath("services/node-host.cjs"), backendOptions);
+    backend->moveToThread(thread);
+    connect(thread, &QThread::started, backend, &DocsQtBackend::start);
+    connect(this, &DocsQtEditor::backendSend, backend, &DocsQtBackend::send, Qt::QueuedConnection);
+    connect(this, &DocsQtEditor::backendStopRequested, backend, &DocsQtBackend::stop, Qt::QueuedConnection);
+    connect(backend, &DocsQtBackend::initialized, this, [this, resources](const QJsonObject& assets) {
+        if (stopping_) return;
+        backendReady_ = true;
+        resources->setAssets(assets);
+        view_->load(QUrl(QStringLiteral("foraoffice-docs://editor/index.html")));
     });
-    connect(&backend_, &QProcess::readyReadStandardError, this, [this] { backend_.readAllStandardError(); });
-    connect(&backend_, &QProcess::errorOccurred, this, [this] { if (!stopping_) fail(tr("The independent document backend could not run.")); });
-    connect(&backend_, &QProcess::finished, this, [this](int, QProcess::ExitStatus) {
-        if (!stopping_) fail(tr("The independent document backend disconnected."));
+    connect(backend, &DocsQtBackend::received, this,
+        [this](const QJsonObject& message, const DocsQtRequestLifetime& lifetime) {
+            if (!stopping_ && (!lifetime || lifetime->load())) backendMessage(message);
+        }, Qt::QueuedConnection);
+    connect(backend, &DocsQtBackend::failed, this, [this](const QString& message) {
+        if (!stopping_) fail(message);
     });
-    connect(&backend_, &QProcess::started, this, [this, resources] {
-        QJsonObject options{{"stateDirectory", options_.stateDirectory}, {"readRoots", QJsonArray::fromStringList(options_.readRoots)},
-            {"writeRoots", QJsonArray::fromStringList(options_.writeRoots)}, {"defaultSaveDirectory", options_.defaultSaveDirectory}};
-        if (!options_.initialPath.isEmpty()) options.insert("initialPath", options_.initialPath);
-        if (!options_.initialContent.isEmpty()) options.insert("initialContent", options_.initialContent);
-        options.insert("attachments", QJsonArray::fromStringList(options_.attachments));
-        options.insert("knowledge", QJsonArray::fromStringList(options_.knowledge));
-        const auto cli = QDir(options_.packageRoot).filePath("cli/genoffice.cjs");
-        if (QFileInfo::exists(cli)) options.insert("cli", QJsonObject{{"executable", options_.nodeExecutable}, {"entry", cli}});
-        backendCall(QStringLiteral("initialize"), options, [this, resources](const QJsonObject& response) {
-            if (response.contains("error")) { fail(response.value("error").toObject().value("message").toString()); return; }
-            resources->setAssets(response.value("result").toObject().value("assets").toObject());
-            view_->load(QUrl(QStringLiteral("foraoffice-docs://editor/index.html")));
-        });
-    });
-#ifdef Q_OS_WIN
-    backend_.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* arguments) { arguments->flags |= CREATE_NO_WINDOW; });
-#endif
-    QTimer::singleShot(0, this, [this] {
-        const auto entry = QDir(options_.packageRoot).filePath("services/node-host.cjs");
-        if (!QFileInfo::exists(entry) || !QFileInfo::exists(options_.nodeExecutable)) { fail(tr("The packaged document backend or Node executable is missing.")); return; }
-        backend_.start(options_.nodeExecutable, {entry});
-    });
+    connect(backend, &DocsQtBackend::stopped, thread, &QThread::quit, Qt::DirectConnection);
+    connect(thread, &QThread::finished, backend, &QObject::deleteLater);
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    // Normal view disposal never waits. Application exit joins cleanup, which needs no GUI replies.
+    connect(qApp, &QCoreApplication::aboutToQuit, backend, &DocsQtBackend::stop, Qt::QueuedConnection);
+    connect(qApp, &QCoreApplication::aboutToQuit, thread, [thread] { thread->wait(); });
+    thread->start();
 }
 
 DocsQtEditor::~DocsQtEditor() {
@@ -284,10 +277,10 @@ DocsQtEditor::~DocsQtEditor() {
 }
 
 void DocsQtEditor::sendBackend(const QJsonObject& message) {
-    if (backend_.state() == QProcess::Running) backend_.write(QJsonDocument(message).toJson(QJsonDocument::Compact) + '\n');
+    if (backendReady_ && !stopping_) emit backendSend(message);
 }
 void DocsQtEditor::backendCall(const QString& method, const QJsonObject& params, Completion done) {
-    if (backend_.state() != QProcess::Running || stopping_ || pending_.size() >= 64) {
+    if (!backendReady_ || stopping_ || pending_.size() >= 64) {
         done(errorResult(QJsonValue::Null, tr("The document backend is unavailable or busy."))); return;
     }
     const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -594,18 +587,22 @@ void DocsQtEditor::serviceNotify(const QString& method, const QJsonArray& args) 
 void DocsQtEditor::fail(const QString& message) {
     status_->setText(nativeText("qtHostError").replace("{error}", message)); status_->show();
     const auto pending = std::move(pending_); pending_.clear();
-    for (const auto& callback : pending) callback(errorResult(QJsonValue::Null, message));
+    QPointer<DocsQtEditor> self(this);
+    stopBackend();
+    for (const auto& callback : pending) {
+        callback(errorResult(QJsonValue::Null, message));
+        if (!self) return;
+    }
     emit failed(message);
 }
 void DocsQtEditor::stopBackend() {
     if (stopping_) return;
     stopping_ = true;
+    backendReady_ = false;
+    ready_ = false;
     pending_.clear(); editorRequests_.clear();
-    backend_.closeWriteChannel();
-    if (backend_.state() != QProcess::NotRunning && !backend_.waitForFinished(5000)) {
-        backend_.terminate();
-        if (!backend_.waitForFinished(2000)) { backend_.kill(); backend_.waitForFinished(2000); }
-    }
+    closeTimer_->stop();
+    emit backendStopRequested();
 }
 void DocsQtEditor::acceptClose() { closeAllowed_ = true; close(); }
 void DocsQtEditor::resolveCloseCheck(bool allowed) {

@@ -169,6 +169,27 @@ viewer. Without it those files are created successfully with `opened: false`.
 `setActionHandler` forwards editor-originated actions and scoped grants to an
 external conversation; `--harness-stdio` demonstrates that handoff without a model.
 
+The Qt adapter runs process startup, initialization, stdio parsing and request
+tracking on an internal worker thread. These steps progress while the GUI event
+loop is busy. Backend initialization has a 30-second timeout. WebEngine,
+dialogs, printing and live document execution stay on
+the GUI thread; backend initialization alone does not mean the editor is ready.
+Start the widget before synchronous workbench construction to overlap backend
+initialization with that work. Ordinary view disposal requests asynchronous
+backend shutdown. The worker closes stdin, then escalates to terminate after
+five seconds and kill after another two seconds if needed. Application exit
+joins the worker after process cleanup; this is not a hard exit-time guarantee
+if the operating system itself blocks process creation or termination.
+
+Native regressions are opt-in: configure `hosts/qt` with
+`-DFORAOFFICE_DOCS_QT_BUILD_TESTS=ON`, build, then run
+`ctest --test-dir BUILD_DIRECTORY --output-on-failure`. Tests additionally need
+Qt Test and Node on PATH. `DOCS_TEST_PACKAGE_ROOT` can select the built SDK;
+checkout and packaged layouts are detected by default. The tests cover real
+backend initialization with GUI event processing paused, nonblocking widget
+disposal, and worker cancellation/crash/late-reply behavior. This controlled
+pause checks thread independence; measure normal startup separately.
+
 Qt printing uses the current paginated editor view, native printer enumeration,
 the system print dialog and PDF bytes. The driver supports scale 1, advertised by
 `supportsPrintScale: false`; the renderer therefore avoids an inverse print zoom.
