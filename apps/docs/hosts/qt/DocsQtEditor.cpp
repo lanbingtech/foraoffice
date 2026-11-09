@@ -336,6 +336,9 @@ void DocsQtEditor::backendMessage(const QJsonObject& message) {
         sendBackend({{"jsonrpc", "2.0"}, {"id", id}, {"result", openFileHandler_ ? openFileHandler_(path) : false}});
     } else if (method == "host.resourcesChanged") {
         hostEvent(QStringLiteral("onResourceStateChanged"), {message.value("params")});
+    } else if (method == "host.mcpStateChanged") {
+        mcpState_ = message.value("params").toObject();
+        emit mcpStateChanged(mcpState_);
     } else if (method == "host.dialog") {
         const auto params = message.value("params").toObject();
         const auto kind = params.value("kind").toString();
@@ -417,7 +420,7 @@ void DocsQtEditor::backendMessage(const QJsonObject& message) {
         sendBackend({{"jsonrpc", "2.0"}, {"id", id}, {"result", result}});
     } else if (method == "host.cancel") editorRequests_.remove(message.value("params").toObject().value("id").toString());
     else if (method.startsWith("editor.")) {
-        if (method == "editor.request") editorRequests_.insert(id);
+        if (!id.isEmpty()) editorRequests_.insert(id);
         emit channel_->command(json(message));
     }
 }
@@ -463,6 +466,23 @@ void DocsQtEditor::callSdk(const QString& operation, const QJsonObject& argument
 void DocsQtEditor::grantFile(const QString& path, bool read, bool write, Completion done) {
     backendCall(QStringLiteral("files.grant"), {{"path", path}, {"read", read}, {"write", write}}, std::move(done));
 }
+void DocsQtEditor::startMcp(Completion done) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!ready_ || stopping_) {
+        done(errorResult(QJsonValue::Null, tr("The live document editor is not ready."))); return;
+    }
+    backendCall(QStringLiteral("mcp.start"), {}, std::move(done));
+}
+void DocsQtEditor::mcpState(Completion done) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!backendReady_ || stopping_) { done({{"result", mcpState_}}); return; }
+    backendCall(QStringLiteral("mcp.state"), {}, std::move(done));
+}
+void DocsQtEditor::stopMcp(Completion done) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!backendReady_ || stopping_) { done({{"result", mcpState_}}); return; }
+    backendCall(QStringLiteral("mcp.stop"), {}, std::move(done));
+}
 void DocsQtEditor::revokeFile(const QString& path, Completion done) {
     backendCall(QStringLiteral("files.revoke"), {{"path", path}}, std::move(done));
 }
@@ -476,6 +496,9 @@ void DocsQtEditor::fromRenderer(const QString& source) {
     else if (method == "services.notify") serviceNotify(params.value("method").toString(), params.value("args").toArray());
     else if (method == "editor.ready") { ready_ = true; status_->hide(); emit ready(); }
     else if (method == "editor.disposed") { ready_ = false; editorRequests_.clear(); stopBackend(); }
+    else if (method == "editor.mcpRevoked") {
+        sendBackend({{"jsonrpc", "2.0"}, {"method", "mcp.revoke"}, {"params", params}});
+    }
     else if (method == "editor.submitAction") {
         if (!actionHandler_) { rendererError(id, tr("No external Harness conversation is configured.")); return; }
         backendCall(QStringLiteral("document.bindAction"), params, [this, id, params](const QJsonObject& response) {
@@ -652,11 +675,13 @@ void DocsQtEditor::serviceNotify(const QString& method, const QJsonArray& args) 
     }
 }
 void DocsQtEditor::fail(const QString& message) {
+    mcpState_ = {{"status", "failed"}};
     status_->setText(nativeText("qtHostError").replace("{error}", message)); status_->show();
     const auto pending = std::move(pending_); pending_.clear();
     const auto sdkPending = std::move(sdkPending_); sdkPending_.clear();
     QPointer<DocsQtEditor> self(this);
     stopBackend();
+    if (!self) return;
     for (const auto& callback : pending) {
         callback(errorResult(QJsonValue::Null, message));
         if (!self) return;
@@ -672,18 +697,25 @@ void DocsQtEditor::stopBackend() {
     stopping_ = true;
     backendReady_ = false;
     ready_ = false;
-    pending_.clear(); editorRequests_.clear();
+    const auto pending = std::exchange(pending_, {});
+    editorRequests_.clear();
     const auto sdkPending = std::exchange(sdkPending_, {});
     closeTimer_->stop();
     emit backendStopRequested();
+    if (mcpState_.value("status") != "failed") mcpState_ = {{"status", "stopped"}};
     // QWidget::close normally hides the view; settle callers before their timers expire.
     // Destruction removes their owner and must not invoke reentrant application callbacks.
     if (disposing_) return;
     QPointer<DocsQtEditor> self(this);
+    for (const auto& callback : pending) {
+        callback(errorResult(QJsonValue::Null, tr("The document backend operation was canceled.")));
+        if (!self) return;
+    }
     for (const auto& callback : sdkPending) {
         callback(errorResult(QJsonValue::Null, tr("The document SDK operation was canceled.")));
         if (!self) return;
     }
+    emit mcpStateChanged(mcpState_);
 }
 void DocsQtEditor::acceptClose() { closeAllowed_ = true; close(); }
 void DocsQtEditor::resolveCloseCheck(bool allowed) {

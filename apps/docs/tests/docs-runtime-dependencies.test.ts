@@ -15,7 +15,14 @@ it.each(['runtime/docs-runtime.ts', 'embedded.tsx'])(
       format: 'esm',
       logLevel: 'silent',
       outdir: 'runtime-dependency-check',
-      loader: { '.png': 'dataurl', '.woff2': 'dataurl', '.woff': 'dataurl', '.ttf': 'dataurl' },
+      // Audit executable imports without encoding the editor's font/style assets.
+      loader: {
+        '.css': 'empty',
+        '.png': 'empty',
+        '.woff2': 'empty',
+        '.woff': 'empty',
+        '.ttf': 'empty',
+      },
     })
     const dependencies = Object.keys(bundle.metafile!.inputs).map((path) =>
       path.replaceAll('\\', '/'),

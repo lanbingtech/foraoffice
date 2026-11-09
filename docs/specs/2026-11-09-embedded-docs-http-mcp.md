@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-The user approved the proposed capability and required the project to remain neutral. This document defines the additional SDK contract for review before ticket breakdown and implementation, following the previously agreed delivery sequence. It supplements `2026-11-09-neutral-docs-sdk.md`; the already delivered SDK work remains its own accepted scope.
+The user approved the proposed capability, required the project to remain neutral, and subsequently explicitly authorized implementation with the `implement` skill on 2026-11-09. This document defines the additional SDK contract. It supplements `2026-11-09-neutral-docs-sdk.md`; the already delivered SDK work remains its own accepted scope.
 
 ## Problem
 

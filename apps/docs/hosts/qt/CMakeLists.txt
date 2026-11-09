@@ -45,7 +45,8 @@ if(FORAOFFICE_DOCS_QT_BUILD_TESTS)
   endif()
   add_test(NAME docs-qt-backend-lifecycle COMMAND docs-qt-backend-test -o -,txt)
   set_tests_properties(docs-qt-backend-lifecycle PROPERTIES TIMEOUT 60
-    ENVIRONMENT "FORAOFFICE_QT_TEST_NODE=${DOCS_TEST_NODE}")
+    ENVIRONMENT "FORAOFFICE_QT_TEST_NODE=${DOCS_TEST_NODE}"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Test>")
   add_executable(docs-qt-services-test tests/services.cpp)
   target_link_libraries(docs-qt-services-test PRIVATE ForaOfficeDocsQt Qt6::Test)
   if(MSVC)
@@ -63,5 +64,14 @@ if(FORAOFFICE_DOCS_QT_BUILD_TESTS)
   add_test(NAME docs-qt-public-sdk COMMAND docs-qt-sdk-test -o "${CMAKE_BINARY_DIR}/sdk-test-results.txt,txt")
   set_tests_properties(docs-qt-public-sdk PROPERTIES TIMEOUT 180
     ENVIRONMENT "FORAOFFICE_QT_TEST_NODE=${DOCS_TEST_NODE};FORAOFFICE_QT_TEST_PACKAGE=${DOCS_TEST_PACKAGE_ROOT};FORAOFFICE_QT_TEST_RESULTS=${CMAKE_BINARY_DIR}/sdk-test-output"
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Test>")
+  add_executable(docs-qt-mcp-test tests/mcp.cpp)
+  target_link_libraries(docs-qt-mcp-test PRIVATE ForaOfficeDocsQt Qt6::Test)
+  if(MSVC)
+    target_compile_options(docs-qt-mcp-test PRIVATE /W4 /utf-8 /permissive-)
+  endif()
+  add_test(NAME docs-qt-http-mcp COMMAND docs-qt-mcp-test -o "${CMAKE_BINARY_DIR}/mcp-test-results.txt,txt")
+  set_tests_properties(docs-qt-http-mcp PROPERTIES TIMEOUT 180
+    ENVIRONMENT "FORAOFFICE_QT_TEST_NODE=${DOCS_TEST_NODE};FORAOFFICE_QT_TEST_PACKAGE=${DOCS_TEST_PACKAGE_ROOT}"
     ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Test>")
 endif()

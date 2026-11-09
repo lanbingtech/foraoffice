@@ -7703,6 +7703,11 @@ export function App({
     [],
   )
   const docsCommands = useMemo(() => createDocsCommandRouter(docsRuntime), [docsRuntime])
+  const hasRuntimeDocument = !!doc
+  useLayoutEffect(
+    () => () => docsCommands.releaseAll(),
+    [runtimeIdentity, editor, hasRuntimeDocument, tornDown, docsCommands],
+  )
   const docsDocuments = useMemo<DocsDocumentCommands>(
     () => ({
       async new() {
@@ -7736,7 +7741,10 @@ export function App({
     () => createDocsAnnotations(() => runtimeDocumentRef.current, docsInspection),
     [docsInspection],
   )
-  fileCtxRef.current.beforeDocumentReplace = () => docsAnnotations.reset()
+  fileCtxRef.current.beforeDocumentReplace = () => {
+    docsCommands.releaseAll()
+    docsAnnotations.reset()
+  }
   useEffect(() => {
     if (runtimeDocumentRef.current) {
       docsAnnotations.activate()

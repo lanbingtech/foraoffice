@@ -73,6 +73,10 @@ public:
     void setServiceEnabled(const QString& service, bool enabled);
     /** Invoke a named public browser SDK operation; completion is a JSON-RPC result/error. */
     void callSdk(const QString& operation, const QJsonObject& arguments, Completion done);
+    /** Host-controlled standard HTTP MCP for the current document; no AI action is required. */
+    void startMcp(Completion done);
+    void mcpState(Completion done);
+    void stopMcp(Completion done);
     /** Trusted host grants, never exposed as renderer/Agent services. */
     void grantFile(const QString& path, bool read, bool write, Completion done);
     void revokeFile(const QString& path, Completion done);
@@ -83,6 +87,8 @@ signals:
     void ready();
     void failed(QString message);
     void documentCreated(QJsonObject outcome);
+    /** Status and document identity only; obtain credentials through startMcp/mcpState. */
+    void mcpStateChanged(QJsonObject state);
 protected:
     void closeEvent(QCloseEvent* event) override;
 private:
@@ -107,6 +113,7 @@ private:
     void requestCloseState();
     DocsQtOptions options_;
     QJsonObject nativeStrings_;
+    QJsonObject mcpState_{{"status", "stopped"}};
     QHash<QString, Completion> pending_;
     QHash<QString, Completion> sdkPending_;
     QSet<QString> editorRequests_;

@@ -187,6 +187,58 @@ MCP; the bridge is local host IPC, not an alternative Agent protocol.
 model. `createDocsMcpServer({ endpoint, bindingId?, version })` is also available
 for hosts that own a standard MCP transport directly.
 
+### Host-controlled HTTP MCP in Qt
+
+After `DocsQtEditor::ready`, call `startMcp(completion)` to authorize the current
+document and start a loopback HTTP MCP endpoint. No action handler, AI-button
+interaction, model or conversation is required. A ready managed mount without
+an active document reports an error; create/open a document first.
+
+```cpp
+editor.startMcp([](const QJsonObject& reply) {
+    if (reply.contains("error")) return; // Handle the normal JSON-RPC error.
+    const auto connection = reply.value("result").toObject().value("connection").toObject();
+    // Give connection to a compatible external MCP client through trusted host IPC.
+});
+```
+
+The JSON-RPC result contains `{ status: "running", connection }`. `connection`
+contains `url`, `transport: "streamable-http"`, `headers` (including its Bearer
+credential), an opaque runtime `documentId`, and `protocolVersions`.
+Configure a standard client with the URL and headers. Never publish the
+credential in document text, tool results or logs. `mcpState(completion)` returns
+the same running connection or `{ status: "stopped" | "failed" }`.
+`mcpStateChanged(state)` reports status and optional document identity without
+credentials. All native methods/completions use the GUI thread.
+
+`stopMcp(completion)` revokes access without closing the editor and is safe to
+repeat. Repeated start for the same active document reuses its grant. Document
+replacement, close checks, view disposal and backend/renderer failure revoke
+access; a replacement document requires an explicit new start. A canceled close
+check may already have revoked access. A connection binds when enabled, even
+if its first client connects later; it never follows a newly opened document.
+Unsaved edits remain live, and existing read-only, draft, save, hosted storage
+and file-permission rules apply. Stopping does not roll back committed work.
+
+The service binds `127.0.0.1` on an allocated port and uses the installed MCP SDK
+1.32.1 transport for revisions `2025-03-26`, `2025-06-18` and `2025-11-25`.
+Protocol sessions use the SDK's standard initialization and session headers;
+each session has independent document caller state. Terminating one session
+does not revoke the host grant. This is not a claim of support for the changed
+`2026-07-28` transport, legacy SSE endpoints, or remote network publication.
+
+`examples/mcp-http-client.mjs` accepts the connection object on stdin, discovers
+tools and reads the live document using the standard client. It prints no
+credentials and needs no model. The host supplies any external client's own
+configuration format and conversation lifecycle.
+
+Node hosts can reuse `createDocsHttpMcpServer({ version, endpoint, bindingId,
+documentId, releaseScope })` from `@foraoffice/docs-sdk/services`. Bind a captured
+runtime scope before creating the service; release/close the service on document
+replacement and host disposal. `service.connection` has the same connection
+shape; `service.close()` is idempotent. The existing `/docs` command bridge is
+private host IPC and is never the HTTP MCP URL.
+
 ## Resource helpers
 
 `createDocsResourceTools({ attachments?, knowledge?, runCli? })` composes the

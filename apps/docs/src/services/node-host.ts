@@ -21,6 +21,8 @@ import { createDocsFileSession, type DocsFileSession } from './document-files'
 import { createDocsFileServices, type DocsFileServices } from './file-services'
 import { createDocsAssetServer, type DocsAssetServer } from './asset-server'
 import { createDocsHostBridge, type DocsHostBridge } from './host-bridge'
+import { createDocsHttpMcpServer, type DocsHttpMcpServer } from './docs-http-mcp'
+import type { DocsCommandEndpoint } from './docs-mcp'
 import { readPickedImage } from './picked-image'
 import { readAuthorizedImage } from './image-source'
 import {
@@ -29,12 +31,12 @@ import {
   isDocsSaveOutcome,
 } from '../shared/operation-result'
 import type { AiDocContent, CreateDocumentRequest } from '../shared/ipc'
-import type { McpCommandMessage, McpCommandResult } from '../shared/ipc'
+import type { McpCommandResult } from '../shared/ipc'
 
 // This owned server reserves stdout for JSON-RPC, including when parsers log diagnostics.
 globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr })
 
-// Native-host IPC only. Agent-facing calls use the separate standard MCP executable.
+// Stdout is native-host IPC; Agent traffic uses standard MCP transports.
 const messageSchema = z
   .object({
     jsonrpc: z.literal('2.0'),
@@ -133,6 +135,10 @@ let newBlank = false
 let initialContent: AiDocContent | null = null
 let activePath: string | undefined
 const recent: string[] = []
+let httpMcp: { bindingId: string; service: DocsHttpMcpServer } | undefined
+let startingMcp:
+  { bindingId: string; controller: AbortController; promise: Promise<unknown> } | undefined
+let mcpStatus: 'stopped' | 'failed' = 'stopped'
 
 const send = (value: unknown) => {
   if (!closing) process.stdout.write(JSON.stringify(value) + '\n')
@@ -163,6 +169,100 @@ function nativeRequest(method: string, params: unknown, signal?: AbortSignal): P
     signal?.addEventListener('abort', abort, { once: true })
     send({ jsonrpc: '2.0', id, method, params })
   })
+}
+
+const documentEndpoint: DocsCommandEndpoint = {
+  async request(message, signal) {
+    const cancel = () => notify('editor.cancel', { message })
+    signal.addEventListener('abort', cancel, { once: true })
+    try {
+      const response = (await nativeRequest(
+        'editor.request',
+        { message },
+        signal,
+      )) as McpCommandResult
+      if (!response.ok) {
+        if (isDocsOperationResult(response.result))
+          throw new DocsOperationError(response.error ?? response.result.output, response.result)
+        throw new Error(response.error ?? 'The editor command failed')
+      }
+      return response.result
+    } finally {
+      signal.removeEventListener('abort', cancel)
+    }
+  },
+  closeCaller: (callerId) => notify('editor.disconnect', { callerId }),
+}
+const mcpState = () =>
+  httpMcp ? { status: 'running', connection: httpMcp.service.connection } : { status: mcpStatus }
+const reportMcpState = () =>
+  notify('host.mcpStateChanged', {
+    status: httpMcp ? 'running' : mcpStatus,
+    ...(httpMcp ? { documentId: httpMcp.service.connection.documentId } : {}),
+  })
+
+async function stopHttpMcp(bindingId?: string) {
+  const starting = startingMcp
+  const active = httpMcp
+  if (bindingId && starting?.bindingId !== bindingId && active?.bindingId !== bindingId) return
+  startingMcp = undefined
+  httpMcp = undefined
+  mcpStatus = 'stopped'
+  if (starting) {
+    starting.controller.abort()
+    notify('editor.releaseScope', { bindingId: starting.bindingId })
+  }
+  const stopped = active?.service.close()
+  reportMcpState()
+  await Promise.all([stopped, starting?.promise.catch(() => undefined)])
+}
+
+function startHttpMcp(): Promise<unknown> {
+  if (!ready || closing) return Promise.reject(new Error('The document backend is not ready'))
+  if (httpMcp) return Promise.resolve(mcpState())
+  if (startingMcp) return startingMcp.promise
+  const attempt = {
+    bindingId: randomUUID(),
+    controller: new AbortController(),
+    promise: Promise.resolve<unknown>(undefined),
+  }
+  startingMcp = attempt
+  attempt.promise = (async () => {
+    const binding = z
+      .object({ bindingId: z.literal(attempt.bindingId), documentId: z.string().uuid() })
+      .parse(
+        await nativeRequest(
+          'editor.bindMcp',
+          { bindingId: attempt.bindingId },
+          attempt.controller.signal,
+        ),
+      )
+    const service = await createDocsHttpMcpServer({
+      version: '0.1.0',
+      endpoint: documentEndpoint,
+      ...binding,
+      releaseScope: (bindingId) => notify('editor.releaseScope', { bindingId }),
+    })
+    if (closing || startingMcp !== attempt || attempt.controller.signal.aborted) {
+      await service.close()
+      throw new Error('MCP access was stopped while starting')
+    }
+    httpMcp = { bindingId: binding.bindingId, service }
+    reportMcpState()
+    return mcpState()
+  })()
+    .catch((error: unknown) => {
+      notify('editor.releaseScope', { bindingId: attempt.bindingId })
+      if (startingMcp === attempt) {
+        mcpStatus = 'failed'
+        reportMcpState()
+      }
+      throw error
+    })
+    .finally(() => {
+      if (startingMcp === attempt) startingMcp = undefined
+    })
+  return attempt.promise
 }
 
 function bytes(value: unknown): ArrayBuffer {
@@ -579,6 +679,16 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
     notify('host.resourcesChanged', state)
     return state
   }
+  if (method === 'mcp.start') return startHttpMcp()
+  if (method === 'mcp.state') return mcpState()
+  if (method === 'mcp.stop' || method === 'mcp.revoke') {
+    const bindingId =
+      method === 'mcp.revoke'
+        ? z.object({ bindingId: z.string().uuid() }).strict().parse(params).bindingId
+        : undefined
+    await stopHttpMcp(bindingId)
+    return mcpState()
+  }
   if (method === 'document.bindAction') {
     if (!ready || !files || closing) throw new Error('The document backend is not initialized')
     const action = z.object({ bindingId: z.string().uuid() }).passthrough().parse(params)
@@ -590,31 +700,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       const bridge = await createDocsHostBridge({
         bindingId: action.bindingId,
         releaseScope: (bindingId) => notify('editor.releaseScope', { bindingId }),
-        endpoint: {
-          request: async (message: McpCommandMessage, signal) => {
-            const cancel = () => notify('editor.cancel', { message })
-            signal.addEventListener('abort', cancel, { once: true })
-            try {
-              const response = (await nativeRequest(
-                'editor.request',
-                { message },
-                signal,
-              )) as McpCommandResult
-              if (!response.ok) {
-                if (isDocsOperationResult(response.result))
-                  throw new DocsOperationError(
-                    response.error ?? response.result.output,
-                    response.result,
-                  )
-                throw new Error(response.error ?? 'The editor command failed')
-              }
-              return response.result
-            } finally {
-              signal.removeEventListener('abort', cancel)
-            }
-          },
-          closeCaller: (callerId) => notify('editor.disconnect', { callerId }),
-        },
+        endpoint: documentEndpoint,
       })
       if (closing || creation.revoked) {
         await bridge.close()
@@ -636,6 +722,7 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
     return { released: !!bridge || !!creating }
   }
   if (method === 'document.releaseAllActions') {
+    await stopHttpMcp()
     const grants = [...bridges.values()]
     const creating = [...creatingBindings.values()].filter((binding) => !binding.revoked)
     for (const binding of creating) binding.revoked = true
@@ -658,7 +745,7 @@ async function shutdown() {
     operation.reject(new Error('The native host disconnected'))
   pending.clear()
   try {
-    await Promise.all([...bridges.values()].map((bridge) => bridge.close()))
+    await Promise.all([stopHttpMcp(), ...[...bridges.values()].map((bridge) => bridge.close())])
   } finally {
     bridges.clear()
     try {

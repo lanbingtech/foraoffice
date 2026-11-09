@@ -4,8 +4,10 @@ import type { DocsRuntime, DocsRuntimeClient, DocsRuntimeScope } from './docs-ru
 import { DocsOperationError } from '../../shared/operation-result'
 
 export interface DocsCommands {
-  bindScope(bindingId: string, scope: DocsRuntimeScope): void
+  bindScope(bindingId: string, scope: DocsRuntimeScope, onRelease?: () => void): void
   releaseScope(bindingId: string): void
+  /** End document authority before replacing the active generation. */
+  releaseAll(): void
   handle(message: McpCommandMessage, signal?: AbortSignal): Promise<unknown>
   disconnect(callerId: string): void
   dispose(): void
@@ -18,6 +20,7 @@ export function createDocsCommandRouter(runtime: DocsRuntime): DocsCommands {
     { callerId: string; bindingId?: string; client: DocsRuntimeClient }
   >()
   const scopes = new Map<string, DocsRuntimeScope>()
+  const releases = new Map<string, () => void>()
   const operations = new Map<
     string,
     { callerId: string; bindingId?: string; controller: AbortController }
@@ -31,22 +34,34 @@ export function createDocsCommandRouter(runtime: DocsRuntime): DocsCommands {
         callers.delete(key)
       }
   }
+  const releaseScope = (bindingId: string) => {
+    for (const operation of operations.values())
+      if (operation.bindingId === bindingId) operation.controller.abort()
+    scopes.get(bindingId)?.close()
+    scopes.delete(bindingId)
+    for (const [key, entry] of callers)
+      if (entry.bindingId === bindingId) {
+        entry.client.close()
+        callers.delete(key)
+      }
+    const released = releases.get(bindingId)
+    releases.delete(bindingId)
+    released?.()
+  }
+  const releaseAll = () => {
+    for (const operation of operations.values()) operation.controller.abort()
+    for (const { client } of callers.values()) client.close()
+    callers.clear()
+    for (const bindingId of [...scopes.keys()]) releaseScope(bindingId)
+  }
   return {
-    bindScope(bindingId: string, scope: DocsRuntimeScope) {
+    bindScope(bindingId: string, scope: DocsRuntimeScope, onRelease?: () => void) {
       if (scopes.has(bindingId)) throw new Error('The action scope is already registered')
       scopes.set(bindingId, scope)
+      if (onRelease) releases.set(bindingId, onRelease)
     },
-    releaseScope(bindingId: string) {
-      for (const operation of operations.values())
-        if (operation.bindingId === bindingId) operation.controller.abort()
-      scopes.get(bindingId)?.close()
-      scopes.delete(bindingId)
-      for (const [key, entry] of callers)
-        if (entry.bindingId === bindingId) {
-          entry.client.close()
-          callers.delete(key)
-        }
-    },
+    releaseScope,
+    releaseAll,
     async handle(message: McpCommandMessage, signal?: AbortSignal): Promise<unknown> {
       const callerId = message.callerId ?? 'legacy-mcp'
       if (message.command === 'close_caller') {
@@ -113,12 +128,8 @@ export function createDocsCommandRouter(runtime: DocsRuntime): DocsCommands {
     },
     disconnect,
     dispose() {
-      for (const operation of operations.values()) operation.controller.abort()
+      releaseAll()
       operations.clear()
-      for (const { client } of callers.values()) client.close()
-      callers.clear()
-      for (const scope of scopes.values()) scope.close()
-      scopes.clear()
     },
   }
 }

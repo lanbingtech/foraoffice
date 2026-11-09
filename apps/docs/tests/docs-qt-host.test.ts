@@ -1,5 +1,8 @@
 import { expect, it, vi } from 'vitest'
 import { createQtDocsHost, type DocsQtChannel, type QtSignal } from '../src/renderer/host/qt'
+import { Editor } from '@tiptap/core'
+import { createDocsRuntime } from '../src/renderer/runtime/docs-runtime'
+import { createDocsCommandRouter } from '../src/renderer/runtime/command-router'
 
 function signal<Args extends unknown[]>(): QtSignal<Args> & { emit(...args: Args): void } {
   const listeners = new Set<(...args: Args) => void>()
@@ -107,6 +110,61 @@ it('dispatches the native host’s MCP command to the public runtime and rejects
     }),
   )
   expect(handle).toHaveBeenCalledTimes(1)
+})
+
+it('binds the current document for host-started MCP and reports scope revocation without an AI action', async () => {
+  const { editorExtensions } = await import('../src/renderer/editor/extensions')
+  const editor = new Editor({
+    element: document.createElement('div'),
+    extensions: editorExtensions,
+    content: '<p>Live</p>',
+  })
+  const runtime = createDocsRuntime({
+    current: () => ({ editor, identity: editor, numIds: { bullet: null, ordered: null } }),
+  })
+  const commands = createDocsCommandRouter(runtime)
+  const channel = {
+    request: vi.fn(),
+    complete: vi.fn(),
+    reply: signal<[string]>(),
+    event: signal<[string, string]>(),
+    command: signal<[string]>(),
+  }
+  const adapter = createQtDocsHost(channel)
+  try {
+    adapter.attach({ runtime, commands })
+    channel.command.emit(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'bind',
+        method: 'editor.bindMcp',
+        params: { bindingId: 'host-grant' },
+      }),
+    )
+    await vi.waitFor(() => expect(channel.complete).toHaveBeenCalled())
+    const reply = JSON.parse(channel.complete.mock.calls[0][0])
+    expect(reply.result).toMatchObject({ bindingId: 'host-grant', documentId: expect.any(String) })
+    commands.releaseAll()
+    expect(channel.request.mock.calls.map(([value]) => JSON.parse(value))).toContainEqual({
+      jsonrpc: '2.0',
+      method: 'editor.mcpRevoked',
+      params: { bindingId: 'host-grant' },
+    })
+    await expect(
+      commands.handle({
+        requestId: 'late',
+        callerId: 'external',
+        bindingId: 'host-grant',
+        command: 'read_document',
+        payload: {},
+      }),
+    ).rejects.toThrow(/not bound/)
+  } finally {
+    commands.dispose()
+    runtime.dispose()
+    adapter.dispose()
+    editor.destroy()
+  }
 })
 
 it('forwards resource CLI cancellation and waits for its actual file outcome', async () => {

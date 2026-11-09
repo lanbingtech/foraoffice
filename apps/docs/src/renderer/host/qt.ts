@@ -13,6 +13,7 @@ import type {
   DocsHostedDocument,
 } from '../../shared/document-host'
 import { executeDocsSdkCall } from '../sdk/calls'
+import type { DocsRuntime, DocsRuntimeScope } from '../runtime/docs-runtime'
 
 export interface QtSignal<Args extends unknown[]> {
   connect(listener: (...args: Args) => void): void
@@ -29,10 +30,12 @@ export interface DocsQtChannel {
 }
 
 interface EditorEndpoint {
+  runtime?: Pick<DocsRuntime, 'capture'>
   inspection?: DocsInspection
   annotations?: DocsAnnotations
   documents?: DocsDocumentCommands
   commands: {
+    bindScope?(bindingId: string, scope: DocsRuntimeScope, onRelease?: () => void): void
     handle(message: McpCommandMessage): Promise<unknown>
     releaseScope(bindingId: string): void
     disconnect(callerId: string): void
@@ -132,7 +135,40 @@ export function createQtDocsHost(channel: DocsQtChannel) {
         callerId: string
       }
     }
-    if (message.method === 'sdk.request') {
+    if (message.method === 'editor.bindMcp') {
+      try {
+        if (!editor?.runtime || !editor.commands.bindScope)
+          throw new Error('The live document runtime is not ready')
+        const scope = editor.runtime.capture()
+        const { bindingId } = message.params
+        try {
+          editor.commands.bindScope(bindingId, scope, () => {
+            if (!disposed) notify('editor.mcpRevoked', { bindingId })
+          })
+        } catch (error) {
+          scope.close()
+          throw error
+        }
+        channel.complete(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            result: { bindingId, documentId: scope.documentId },
+          }),
+        )
+      } catch (error) {
+        channel.complete(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: message.id,
+            error: {
+              code: -32000,
+              message: error instanceof Error ? error.message : String(error),
+            },
+          }),
+        )
+      }
+    } else if (message.method === 'sdk.request') {
       const params = message.params as unknown as {
         operation: string
         args: Record<string, unknown>
