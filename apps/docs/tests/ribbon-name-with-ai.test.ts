@@ -78,7 +78,7 @@ describe('File ▸ the manual naming trigger', () => {
     const button = nameButton()
     expect(button).not.toBeNull()
     expect(button!.textContent).toBe(t('ribbonNameWithAi'))
-    expect(button!.disabled).toBe(false)
+    expect(button!.getAttribute('aria-disabled')).toBe('false')
   })
 
   it('asks the model when pressed', () => {
@@ -111,7 +111,7 @@ describe('File ▸ the manual naming trigger', () => {
       )
     })
     // the File menu is open already, so this only re-reads the button
-    expect(nameButton()?.disabled).toBe(true)
+    expect(nameButton()?.getAttribute('aria-disabled')).toBe('true')
     act(() => {
       nameButton()!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })

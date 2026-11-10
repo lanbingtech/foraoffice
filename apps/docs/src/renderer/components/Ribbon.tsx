@@ -1,4 +1,6 @@
 import { getDocsHost } from '../host/docs-host'
+import { FileMenu } from './FileMenu'
+import type { DocsFileMenuCommand, DocsFileMenuItem } from '../sdk/file-menu'
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { Lang } from '@genoffice/i18n'
@@ -291,6 +293,11 @@ interface RibbonProps {
   onFind?: () => void
   onReplace?: () => void
   onOpen: () => void
+  embedded?: boolean
+  fileMenuItems?: readonly DocsFileMenuItem[] | null
+  fileMenuToken?: string | null
+  canExecuteFileCommand?: (command: DocsFileMenuCommand) => boolean
+  onFileMenuAction?: (id: string, documentToken: string | null) => void
   onSave: () => void
   onSaveAs: () => void
   onConvert: (format: ConvertFormat) => void
@@ -831,6 +838,11 @@ function RibbonInner({
   styles,
   docDefaults,
   onOpen,
+  embedded = false,
+  fileMenuItems,
+  fileMenuToken = null,
+  canExecuteFileCommand,
+  onFileMenuAction,
   onSave,
   onSaveAs,
   onConvert,
@@ -2313,57 +2325,86 @@ function RibbonInner({
         className={`ribbon-tabs ${IN_TAB ? '' : IS_MAC ? 'ribbon-tabs-mac' : 'ribbon-tabs-win'}`}
         onDoubleClick={collapse.onTabsDoubleClick}
       >
-        {!IS_MAC && (
-          <div className="file-tab-wrap">
-            <button
-              className={`ribbon-tab ribbon-tab-file ${dropdown === 'file' ? 'open' : ''}`}
-              onClick={() => setDropdown((v) => (v === 'file' ? null : 'file'))}
-            >
-              {t('ribbonTabFile')}
-            </button>
-            {dropdown === 'file' && (
-              <div data-rb-panel="" className="file-menu">
-                <button
-                  onClick={() => {
-                    setDropdown(null)
-                    onOpen()
-                  }}
-                >
-                  {t('ribbonOpen')} <span className="file-menu-key">Ctrl+O</span>
-                </button>
-                <button
-                  disabled={!hasDoc}
-                  onClick={() => {
-                    setDropdown(null)
-                    onSave()
-                  }}
-                >
-                  {t('ribbonSave')} <span className="file-menu-key">Ctrl+S</span>
-                </button>
-                <button
-                  disabled={!hasDoc}
-                  onClick={() => {
-                    setDropdown(null)
-                    onSaveAs()
-                  }}
-                >
-                  {t('ribbonSaveAs')} <span className="file-menu-key">Ctrl+Shift+S</span>
-                </button>
-                <button
-                  className="qa-name-with-ai"
-                  disabled={!hasDoc}
-                  onClick={() => {
-                    setDropdown(null)
-                    onNameWithAi()
-                  }}
-                >
-                  {t('ribbonNameWithAi')}
-                </button>
-                <div className="file-menu-sep" />
-                {convertItems}
-              </div>
-            )}
-          </div>
+        {(!IS_MAC || embedded) && (
+          <FileMenu
+            label={t('ribbonTabFile')}
+            open={dropdown === 'file'}
+            onOpenChange={(open) => setDropdown(open ? 'file' : null)}
+            items={
+              fileMenuItems ?? [
+                {
+                  type: 'group',
+                  id: 'files',
+                  items: [
+                    { type: 'command', id: 'open', command: 'open' },
+                    { type: 'command', id: 'save', command: 'save' },
+                    { type: 'command', id: 'saveAs', command: 'saveAs' },
+                    {
+                      type: 'action',
+                      id: 'name-with-ai',
+                      actionId: 'name-with-ai',
+                      label: t('ribbonNameWithAi'),
+                      enabled: hasDoc,
+                    },
+                  ],
+                },
+                {
+                  type: 'group',
+                  id: 'exports',
+                  items: [
+                    { type: 'command', id: 'exportPdf', command: 'exportPdf' },
+                    { type: 'command', id: 'exportHtml', command: 'exportHtml' },
+                    { type: 'command', id: 'exportMarkdown', command: 'exportMarkdown' },
+                    { type: 'command', id: 'exportImages', command: 'exportImages' },
+                  ],
+                },
+              ]
+            }
+            commandLabel={(command) =>
+              t(
+                (
+                  {
+                    new: 'appNew',
+                    open: 'ribbonOpen',
+                    save: 'ribbonSave',
+                    saveAs: 'ribbonSaveAs',
+                    exportPdf: 'ribbonConvertPdf',
+                    exportHtml: 'ribbonConvertHtml',
+                    exportMarkdown: 'ribbonConvertMarkdown',
+                    exportImages: 'ribbonConvertImages',
+                  } as const
+                )[command],
+              )
+            }
+            canExecute={
+              canExecuteFileCommand ??
+              ((command) => command === 'open' || command === 'new' || hasDoc)
+            }
+            itemClassName={(id) =>
+              fileMenuItems == null && id === 'name-with-ai' ? 'qa-name-with-ai' : undefined
+            }
+            onInvoke={(id) => {
+              if (fileMenuItems != null) {
+                onFileMenuAction?.(id, fileMenuToken)
+                return
+              }
+              if (id === 'open') onOpen()
+              else if (id === 'save') onSave()
+              else if (id === 'saveAs') onSaveAs()
+              else if (id === 'name-with-ai') onNameWithAi()
+              else
+                onConvert(
+                  (
+                    {
+                      exportPdf: 'pdf',
+                      exportHtml: 'html',
+                      exportMarkdown: 'md',
+                      exportImages: 'images',
+                    } as const
+                  )[id as 'exportPdf'],
+                )
+            }}
+          />
         )}
         {quickActions}
         {TABS.filter((tabName) => tabName !== 'file').map((tabName) => (

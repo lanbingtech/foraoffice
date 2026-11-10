@@ -61,6 +61,98 @@ QString literal(const QString& value) {
 class SdkTests final : public QObject {
     Q_OBJECT
 private slots:
+    void fileMenuUsesPublicSdkAndExistingManagedServices() {
+        QTemporaryDir workspace;
+        foraoffice::DocsQtOptions options;
+        options.packageRoot = qEnvironmentVariable("FORAOFFICE_QT_TEST_PACKAGE");
+        options.nodeExecutable = qEnvironmentVariable("FORAOFFICE_QT_TEST_NODE");
+        options.stateDirectory = workspace.filePath(".state");
+        options.defaultSaveDirectory = workspace.path();
+        options.readRoots = options.writeRoots = {workspace.path()};
+        options.language = "en";
+        options.documentHost = {{"enabled", true}, {"autoSave", QJsonObject{{"enabled", false}}}};
+        foraoffice::DocsQtEditor editor(options);
+        editor.resize(1100, 850);
+        for (const auto& method : {QStringLiteral("initialDocument"), QStringLiteral("newDocument"), QStringLiteral("openDocument")})
+            editor.setServiceHandler(method, [](const QJsonArray&, foraoffice::DocsQtEditor::Completion done) {
+                done({{"result", QJsonObject{{"id", "host:menu"}, {"name", "Menu.docx"}}}});
+            });
+        editor.setServiceHandler("confirmDocumentReplace", [](const QJsonArray&, foraoffice::DocsQtEditor::Completion done) { done({{"result", true}}); });
+        editor.setServiceHandler("recentDocuments", [](const QJsonArray&, foraoffice::DocsQtEditor::Completion done) { done({{"result", QJsonArray{}}}); });
+        int saves = 0, exports = 0;
+        QString lastKind;
+        QByteArray saved;
+        editor.setServiceHandler("saveDocument", [&](const QJsonArray& args, foraoffice::DocsQtEditor::Completion done) {
+            const auto request = args.at(0).toObject();
+            saved = QByteArray::fromBase64(request.value("data").toObject().value("base64").toString().toLatin1());
+            saves++; lastKind = request.value("kind").toString();
+            done({{"result", QJsonObject{{"ok", true}, {"committed", true}, {"pending", false}, {"adopt", false}}}});
+        });
+        editor.setServiceHandler("exportHtml", [&](const QJsonArray& args, foraoffice::DocsQtEditor::Completion done) {
+            QVERIFY(args.at(1).toString().contains("Menu content"));
+            exports++;
+            done({{"result", QJsonObject{{"ok", true}, {"path", "host:export"}}}});
+        });
+        QSignalSpy ready(&editor, &foraoffice::DocsQtEditor::ready);
+        QSignalSpy failed(&editor, &foraoffice::DocsQtEditor::failed);
+        QSignalSpy states(&editor, &foraoffice::DocsQtEditor::documentStateChanged);
+        QSignalSpy actions(&editor, &foraoffice::DocsQtEditor::menuActionTriggered);
+        editor.show();
+        QTRY_VERIFY_WITH_TIMEOUT(!ready.isEmpty() || !failed.isEmpty(), 90000);
+        QVERIFY2(!ready.isEmpty(), failed.isEmpty() ? "Editor did not become ready" : qPrintable(failed.front()[0].toString()));
+        QTRY_VERIFY_WITH_TIMEOUT(!states.isEmpty(), 10000);
+        QVERIFY(script(editor, "(async()=>{const c=window.docsEditor.runtime.connect({id:'menu'});c.context();try{return await c.execute({id:'edit',name:'insert_content',input:{html:'<p>Menu content</p>'}})}finally{c.close()}})()").value("ok").toBool());
+        const auto before = call(editor, "snapshot").value("result");
+        const auto state = call(editor, "documents.state").value("result").toObject();
+        const auto token = state.value("documentToken");
+        QJsonArray items{
+            QJsonObject{{"type", "group"}, {"id", "storage"}, {"items", QJsonArray{
+                QJsonObject{{"type", "command"}, {"id", "save"}, {"command", "save"}, {"label", "Menu Save"}},
+                QJsonObject{{"type", "command"}, {"id", "save-as"}, {"command", "saveAs"}, {"label", "Menu Copy"}}}}},
+            QJsonObject{{"type", "submenu"}, {"id", "export"}, {"label", "Export"}, {"items", QJsonArray{
+                QJsonObject{{"type", "command"}, {"id", "html"}, {"command", "exportHtml"}, {"label", "HTML"}}}}},
+            QJsonObject{{"type", "action"}, {"id", "publish"}, {"actionId", "business.publish"}, {"label", "Publish"}},
+            QJsonObject{{"type", "action"}, {"id", "hidden"}, {"actionId", "hidden"}, {"label", "Hidden"}, {"visible", false}}
+        };
+        QVERIFY(!call(editor, "ui.fileMenu.set", {{"documentToken", token}, {"items", items}}).contains("error"));
+        QCOMPARE(call(editor, "snapshot").value("result"), before);
+        QCOMPARE(call(editor, "documents.state").value("result").toObject(), state);
+        const auto click = [&](const QString& label) {
+            return script(editor, QStringLiteral("(async()=>{if(!document.querySelector('.file-menu'))document.querySelector('.ribbon-tab-file').click();await new Promise(requestAnimationFrame);const b=[...document.querySelectorAll('.file-menu button')].find(b=>b.textContent.trim().startsWith(%1));if(!b)throw Error('Missing menu item');b.click();await new Promise(requestAnimationFrame);return true})()").arg(literal(label)));
+        };
+        QVERIFY(click("Publish").value("ok").toBool());
+        QTRY_COMPARE_WITH_TIMEOUT(actions.size(), 1, 10000);
+        QCOMPARE(actions.front()[0].toString(), QStringLiteral("business.publish"));
+        QCOMPARE(actions.front()[1].toJsonObject().value("documentToken"), token);
+        QCOMPARE(saves, 0);
+        auto updated = items.at(2).toObject(); updated.insert("label", "Published"); updated.insert("enabled", false); items[2] = updated;
+        QVERIFY(!call(editor, "ui.fileMenu.set", {{"documentToken", token}, {"items", items}}).contains("error"));
+        QVERIFY(click("Published").value("ok").toBool());
+        QCOMPARE(actions.size(), 1);
+        QCOMPARE(call(editor, "snapshot").value("result"), before);
+        QCOMPARE(call(editor, "documents.state").value("result").toObject(), state);
+        QVERIFY(click("Menu Save").value("ok").toBool());
+        QTRY_COMPARE_WITH_TIMEOUT(saves, 1, 15000);
+        QCOMPARE(lastKind, QStringLiteral("save"));
+        QVERIFY(saved.startsWith("PK"));
+        QTRY_VERIFY_WITH_TIMEOUT(!call(editor, "documents.state").value("result").toObject().value("dirty").toBool(), 10000);
+        QVERIFY(click("Menu Copy").value("ok").toBool());
+        QTRY_COMPARE_WITH_TIMEOUT(saves, 2, 15000);
+        QCOMPARE(lastKind, QStringLiteral("saveAs"));
+        QVERIFY(click("Export").value("ok").toBool());
+        QVERIFY(click("HTML").value("ok").toBool());
+        QTRY_COMPARE_WITH_TIMEOUT(exports, 1, 10000);
+        QCOMPARE(call(editor, "documents.state").value("result").toObject().value("documentToken"), token);
+        QVERIFY(call(editor, "documents.open").value("result").toBool());
+        const auto reopened = call(editor, "documents.state").value("result").toObject();
+        QCOMPARE(reopened.value("id"), state.value("id"));
+        QVERIFY(reopened.value("documentToken") != token);
+        QVERIFY(call(editor, "ui.fileMenu.set", {{"documentToken", token}, {"items", items}}).contains("error"));
+        QVERIFY(!call(editor, "ui.fileMenu.reset").contains("error"));
+        QVERIFY(script(editor, "(()=>{window.docsEditor.dispose();return true})()").value("ok").toBool());
+        QVERIFY(call(editor, "ui.fileMenu.reset").contains("error"));
+        editor.close();
+    }
     void publicSdkWorksInARealManagedQtEditor() {
         QTemporaryDir workspace;
         QTemporaryDir outside;

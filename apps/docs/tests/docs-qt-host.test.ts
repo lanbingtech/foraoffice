@@ -3,6 +3,9 @@ import { createQtDocsHost, type DocsQtChannel, type QtSignal } from '../src/rend
 import { Editor } from '@tiptap/core'
 import { createDocsRuntime } from '../src/renderer/runtime/docs-runtime'
 import { createDocsCommandRouter } from '../src/renderer/runtime/command-router'
+import { createDocsFileMenu } from '../src/renderer/sdk/file-menu'
+import type { DocsInspection } from '../src/renderer/sdk/inspection'
+import type { DocsAnnotations } from '../src/renderer/sdk/annotations'
 
 function signal<Args extends unknown[]>(): QtSignal<Args> & { emit(...args: Args): void } {
   const listeners = new Set<(...args: Args) => void>()
@@ -18,6 +21,83 @@ function signal<Args extends unknown[]>(): QtSignal<Args> & { emit(...args: Args
     },
   }
 }
+
+it('transports menu snapshots, document sessions and stable host actions through the public SDK and unsubscribes on disposal', async () => {
+  let generation = 1
+  const menu = createDocsFileMenu({
+    current: () => ({
+      generation,
+      document: { id: 'host:doc', name: 'Draft', path: null, dirty: false, readOnly: false },
+    }),
+    canExecute: () => true,
+    execute: vi.fn(),
+  })
+  const channel = {
+    request: vi.fn(),
+    complete: vi.fn(),
+    reply: signal<[string]>(),
+    event: signal<[string, string]>(),
+    command: signal<[string]>(),
+  }
+  const adapter = createQtDocsHost(channel)
+  adapter.attach({
+    commands: { handle: vi.fn(), releaseScope: vi.fn(), disconnect: vi.fn() },
+    inspection: {} as DocsInspection,
+    annotations: {} as DocsAnnotations,
+    documents: {
+      new: vi.fn(),
+      open: vi.fn(),
+      save: vi.fn(),
+      state: menu.documentState,
+      subscribe: menu.onDocumentStateChanged,
+    },
+    ui: { fileMenu: menu },
+  })
+  const send = async (id: string, operation: string, args: unknown) => {
+    channel.command.emit(
+      JSON.stringify({ jsonrpc: '2.0', id, method: 'sdk.request', params: { operation, args } }),
+    )
+    await vi.waitFor(() =>
+      expect(channel.complete.mock.calls.some(([value]) => JSON.parse(value).id === id)).toBe(true),
+    )
+    return channel.complete.mock.calls
+      .map(([value]) => JSON.parse(value))
+      .find((value) => value.id === id)
+  }
+  const documentToken = menu.documentState()!.documentToken
+  const items = [{ type: 'action', id: 'publish', actionId: 'host.publish', label: 'Publish' }]
+  expect(await send('set', 'ui.fileMenu.set', { documentToken, items })).toMatchObject({
+    result: { ok: true },
+  })
+  await menu.activate('publish', documentToken)
+  const notifications = () => channel.request.mock.calls.map(([value]) => JSON.parse(value))
+  expect(notifications()).toContainEqual(
+    expect.objectContaining({
+      method: 'sdk.menuAction',
+      params: expect.objectContaining({ actionId: 'host.publish', documentToken }),
+    }),
+  )
+  generation++
+  menu.refresh()
+  expect(notifications()).toContainEqual(
+    expect.objectContaining({
+      method: 'sdk.documentStateChanged',
+      params: {
+        state: expect.objectContaining({ documentToken: menu.documentState()!.documentToken }),
+      },
+    }),
+  )
+  expect(await send('stale', 'ui.fileMenu.set', { documentToken, items })).toHaveProperty('error')
+  expect(await send('reset', 'ui.fileMenu.reset', {})).toMatchObject({ result: { ok: true } })
+  adapter.dispose()
+  const count = channel.request.mock.calls.length
+  generation++
+  menu.refresh()
+  menu.set({ documentToken: menu.documentState()!.documentToken, items: items as never })
+  await menu.activate('publish', menu.documentState()!.documentToken)
+  expect(channel.request).toHaveBeenCalledTimes(count)
+  menu.dispose()
+})
 
 it('uses native Qt RPC for file bytes and events, without an Electron global or model service', async () => {
   const reply = signal<[string]>()

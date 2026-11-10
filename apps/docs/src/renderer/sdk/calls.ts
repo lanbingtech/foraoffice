@@ -2,6 +2,7 @@ import { z } from 'zod'
 import type { DocsInspection } from './inspection'
 import type { DocsAnnotations } from './annotations'
 import type { DocsDocumentCommands } from '../../shared/document-host'
+import { parseDocsFileMenu, type DocsEditorUi } from './file-menu'
 
 const reference = z.object({
   documentId: z.string(),
@@ -44,11 +45,21 @@ export async function executeDocsSdkCall(
     inspection: DocsInspection
     annotations: DocsAnnotations
     documents: DocsDocumentCommands
+    ui?: DocsEditorUi
   },
   operation: string,
   input: unknown,
 ): Promise<unknown> {
   switch (operation) {
+    case 'ui.fileMenu.set':
+      if (!api.ui) throw new Error('The editor UI SDK is not ready')
+      api.ui.fileMenu.set(parseDocsFileMenu(input))
+      return { ok: true }
+    case 'ui.fileMenu.reset':
+      if (!api.ui) throw new Error('The editor UI SDK is not ready')
+      z.object({}).strict().parse(input)
+      api.ui.fileMenu.reset()
+      return { ok: true }
     case 'snapshot':
       return api.inspection.snapshot()
     case 'find': {

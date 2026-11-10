@@ -19,7 +19,10 @@ import {
   useReducer,
   useRef,
   useState,
+  useSyncExternalStore,
 } from 'react'
+import { createDocsFileMenu, type DocsEditorUi } from './sdk/file-menu'
+import { hasActiveDocumentDraft } from './runtime/draft-landing'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, SetStateAction } from 'react'
 import { flushSync } from 'react-dom'
 import { EditorContent, useEditor } from '@tiptap/react'
@@ -787,6 +790,7 @@ function shadowPlanDiff(
 }
 
 export interface DocsAppRuntime {
+  ui: DocsEditorUi
   documents: DocsDocumentCommands
   runtime: ReturnType<typeof createDocsRuntime>
   commands: ReturnType<typeof createDocsCommandRouter>
@@ -797,7 +801,12 @@ export interface DocsAppRuntime {
 export function App({
   onRuntime,
   agentUi,
-}: { onRuntime?: (value: DocsAppRuntime | null) => void; agentUi?: DocsAgentUi } = {}) {
+  embedded = false,
+}: {
+  onRuntime?: (value: DocsAppRuntime | null) => void
+  agentUi?: DocsAgentUi
+  embedded?: boolean
+} = {}) {
   const AgentPanel = agentUi?.Panel
   const nativeAgentEnabled = !!agentUi
   const externalActionRef = useRef<
@@ -7708,6 +7717,84 @@ export function App({
     () => () => docsCommands.releaseAll(),
     [runtimeIdentity, editor, hasRuntimeDocument, tornDown, docsCommands],
   )
+  const fileMenuBindings = useRef<Parameters<typeof createDocsFileMenu>[0]>({
+    current: () => ({ generation: 0, document: null }),
+    canExecute: () => false,
+    execute: () => undefined,
+  })
+  fileMenuBindings.current.current = () => {
+    const current = fileCtxRef.current.doc
+    return {
+      generation: currentDocGeneration(),
+      document: current
+        ? {
+            id: current.hosted?.id ?? current.filePath ?? '',
+            name: current.hosted?.name ?? current.fileName,
+            path: current.filePath,
+            dirty: isDocDirty(fileCtxRef.current),
+            readOnly: !editor || readMode || isProtected,
+          }
+        : null,
+    }
+  }
+  fileMenuBindings.current.canExecute = (command) => {
+    const operation = command.startsWith('export') ? 'export' : command
+    if (
+      getDocsDocumentHost()?.capabilities?.[
+        operation as import('../shared/document-host').DocsDocumentOperation
+      ] === false
+    )
+      return false
+    if (command === 'new' || command === 'open') return !!editor && !docLoading
+    if (!fileCtxRef.current.doc || !editor || docLoading) return false
+    if (hasActiveDocumentDraft(editor)) return false
+    if (command.startsWith('export')) return true
+    return !fileCtxRef.current.doc.hosted?.readOnly
+  }
+  fileMenuBindings.current.execute = (command) => {
+    switch (command) {
+      case 'new':
+        return newFile()
+      case 'open':
+        return openFile()
+      case 'save':
+        return save(false)
+      case 'saveAs':
+        return save(true)
+      case 'exportPdf':
+        return exportPdf()
+      case 'exportHtml':
+        return exportHtml()
+      case 'exportMarkdown':
+        return exportMarkdown()
+      case 'exportImages':
+        return exportImages()
+    }
+  }
+  const docsFileMenu = useMemo(
+    () =>
+      createDocsFileMenu({
+        current: () => fileMenuBindings.current.current(),
+        canExecute: (command) => fileMenuBindings.current.canExecute(command),
+        execute: (command) => fileMenuBindings.current.execute(command),
+      }),
+    [],
+  )
+  const fileMenuItems = useSyncExternalStore(docsFileMenu.subscribe, docsFileMenu.snapshot)
+  useLayoutEffect(() => {
+    docsFileMenu.refresh()
+  })
+  useEffect(() => () => docsFileMenu.dispose(), [docsFileMenu])
+  const docsUi = useMemo<DocsEditorUi>(
+    () => ({
+      fileMenu: {
+        set: docsFileMenu.set,
+        reset: docsFileMenu.reset,
+        onAction: docsFileMenu.onAction,
+      },
+    }),
+    [docsFileMenu],
+  )
   const docsDocuments = useMemo<DocsDocumentCommands>(
     () => ({
       async new() {
@@ -7721,20 +7808,10 @@ export function App({
         return currentDocGeneration() !== before
       },
       save: (saveAs = false) => save(saveAs),
-      state() {
-        const current = fileCtxRef.current.doc
-        return current
-          ? {
-              id: current.hosted?.id ?? current.filePath ?? '',
-              name: current.hosted?.name ?? current.fileName,
-              path: current.filePath,
-              dirty: isDocDirty(fileCtxRef.current),
-              readOnly: current.hosted?.readOnly || !fileCtxRef.current.editor?.isEditable,
-            }
-          : null
-      },
+      state: docsFileMenu.documentState,
+      subscribe: docsFileMenu.onDocumentStateChanged,
     }),
-    [newFile, openFile, openRecent, save],
+    [newFile, openFile, openRecent, save, docsFileMenu],
   )
   const docsInspection = useMemo(() => createDocsInspection(() => runtimeDocumentRef.current), [])
   const docsAnnotations = useMemo(
@@ -7790,6 +7867,7 @@ export function App({
       inspection: docsInspection,
       annotations: docsAnnotations,
       documents: docsDocuments,
+      ui: docsUi,
     })
     return () => onRuntime?.(null)
   }, [
@@ -7799,6 +7877,7 @@ export function App({
     docsInspection,
     docsAnnotations,
     docsDocuments,
+    docsUi,
     onRuntime,
   ])
   useEffect(() => {
@@ -8545,6 +8624,13 @@ export function App({
 .editor-scroll .doc-page.measuring-columns { column-count: auto; width: ${colFlow.colWidthPx + twipsToPx(canvasSection?.marginLeft ?? section?.marginLeft ?? 0) + twipsToPx(canvasSection?.marginRight ?? section?.marginRight ?? 0)}px; }`}</style>
       )}
       <Ribbon
+        embedded={embedded}
+        fileMenuItems={fileMenuItems}
+        fileMenuToken={docsFileMenu.currentToken()}
+        canExecuteFileCommand={docsFileMenu.isEnabled}
+        onFileMenuAction={(id, token) => {
+          void docsFileMenu.activate(id, token).catch((error: unknown) => setStatus(String(error)))
+        }}
         actionsRef={ribbonActionsRef}
         quickActions={quickActions}
         mergeSource={mergeSource}

@@ -45,7 +45,17 @@ export interface DocsDocumentCommands {
   new: () => Promise<boolean>
   open(id?: string): Promise<boolean>
   save(saveAs?: boolean): Promise<boolean>
-  state(): (DocsHostedIdentity & { path: string | null; dirty: boolean }) | null
+  state(): DocsDocumentState | null
+  /** Immediately reports current state, then metadata/dirty/session changes. Dispose to unsubscribe. */
+  subscribe(listener: (state: DocsDocumentState | null) => void): () => void
+}
+
+export interface DocsDocumentState extends DocsHostedIdentity {
+  /** Opaque editor session identity; changes on reopening or adopting another document. */
+  documentToken: string
+  path: string | null
+  dirty: boolean
+  readOnly: boolean
 }
 
 export function assertDocumentOperation(

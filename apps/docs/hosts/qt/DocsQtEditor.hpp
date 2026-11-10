@@ -87,6 +87,10 @@ signals:
     void ready();
     void failed(QString message);
     void documentCreated(QJsonObject outcome);
+    /** Custom file-menu actions only. Built-in commands execute inside the editor. */
+    void menuActionTriggered(QString actionId, QJsonObject context);
+    /** Current SDK document state, or JSON null with no active document. Emitted after ready. */
+    void documentStateChanged(QJsonValue state);
     /** Status and document identity only; obtain credentials through startMcp/mcpState. */
     void mcpStateChanged(QJsonObject state);
 protected:

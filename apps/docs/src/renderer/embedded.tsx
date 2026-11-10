@@ -11,6 +11,7 @@ import type { DocsCommands } from './runtime/command-router'
 import type { DocsInspection } from './sdk/inspection'
 import type { DocsAnnotations } from './sdk/annotations'
 import type { DocsDocumentCommands } from '../shared/document-host'
+import type { DocsEditorUi } from './sdk/file-menu'
 import type { DocTheme, UiTheme } from '../shared/ipc'
 
 export { createExternalDocsHost } from './host/docs-host'
@@ -31,7 +32,15 @@ export type {
   DocsHostedSaveOutcome,
   DocsDocumentOperation,
 } from '../shared/document-host'
-export type { DocsDocumentCommands } from '../shared/document-host'
+export type { DocsDocumentCommands, DocsDocumentState } from '../shared/document-host'
+export type {
+  DocsEditorUi,
+  DocsFileMenu,
+  DocsFileMenuItem,
+  DocsFileMenuCommand,
+  DocsFileMenuConfiguration,
+  DocsFileMenuAction,
+} from './sdk/file-menu'
 export type { DocsImageSource } from './ai/image-source'
 export type {
   DocsInspection,
@@ -63,6 +72,7 @@ export interface DocsEditorHandle {
   readonly inspection: DocsInspection
   readonly annotations: DocsAnnotations
   readonly documents: DocsDocumentCommands
+  readonly ui: DocsEditorUi
   dispose(): void
 }
 
@@ -83,7 +93,7 @@ export async function mountDocsEditor(
   let root: Root | undefined
   let live: Pick<
     DocsEditorHandle,
-    'runtime' | 'commands' | 'inspection' | 'annotations' | 'documents'
+    'runtime' | 'commands' | 'inspection' | 'annotations' | 'documents' | 'ui'
   > | null = null
   let disposed = false
   let loaded = false
@@ -97,6 +107,7 @@ export async function mountDocsEditor(
     open: async (id) => activeDocuments().open(id),
     save: async (saveAs) => activeDocuments().save(saveAs),
     state: () => activeDocuments().state(),
+    subscribe: (listener) => activeDocuments().subscribe(listener),
   }
   const lifetime = new AbortController()
   let resolveReady!: () => void
@@ -183,6 +194,7 @@ export async function mountDocsEditor(
     root.render(
       <LocaleProvider initial={lang}>
         <App
+          embedded
           onRuntime={(value) => {
             live = value
             if (value && !disposed && !loaded) {
@@ -215,6 +227,10 @@ export async function mountDocsEditor(
       get documents() {
         activeDocuments()
         return documents
+      },
+      get ui() {
+        if (!live || disposed) throw new Error('The editor UI is disposed or not ready')
+        return live.ui
       },
       dispose,
     }

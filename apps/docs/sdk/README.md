@@ -165,6 +165,112 @@ Native calls use JSON-RPC result/error replies and have a 30-second reply timeou
 Trusted Qt hosts can `grantFile(path, read, write, completion)` and `revokeFile`;
 those permission-changing calls are not renderer/Agent services.
 
+## Host file menu
+
+`editor.ui.fileMenu.set({ documentToken, items })` atomically replaces the internal
+File menu. Its button stays immediately before the toolbar Save button, including
+embedded macOS editors. `reset()` restores the default menu. An empty `items`
+array intentionally leaves the menu empty. No editor remount or DOM/CSS injection
+is involved. Menu changes do not modify content, history, dirty state, automatic
+saving or keyboard shortcuts.
+
+Obtain the token from `editor.documents.state()?.documentToken ?? null`.
+`editor.documents.subscribe(listener)` immediately reports current state and
+subsequently reports changes to identity, name, path, dirty or read-only state.
+It returns an unsubscribe function. A token identifies an editor document session,
+not a storage ID or content revision: reopening the same object or adopting a
+different object invalidates the old token and clears its menu. Ordinary edits,
+renaming within an identity and Save As with `adopt: false` retain the token.
+Use `null` when there is no document. Stale menu updates are rejected; re-evaluate
+the menu for the current session rather than blindly retrying old updates.
+
+```ts
+const stopActions = editor.ui.fileMenu.onAction((event) => {
+  // Host business code dispatches event.actionId against the captured
+  // event.document and event.documentToken, not whichever document is now open.
+  host.handleAction(event)
+})
+const stopState = editor.documents.subscribe((state) => {
+  editor.ui.fileMenu.set({
+    documentToken: state?.documentToken ?? null,
+    items: [
+      {
+        type: 'group',
+        id: 'storage',
+        items: [
+          { type: 'command', id: 'new', command: 'new' },
+          { type: 'command', id: 'open', command: 'open' },
+          { type: 'command', id: 'save', command: 'save' },
+          { type: 'command', id: 'save-as', command: 'saveAs' },
+        ],
+      },
+      {
+        type: 'action',
+        id: 'publish',
+        actionId: 'host.publish',
+        label: 'Publish…',
+        enabled: !!state && !state.readOnly,
+      },
+    ],
+  })
+})
+// On host integration teardown: stopState(); stopActions(); editor.dispose().
+```
+
+Each node has a unique `id` (across the whole tree), optional `visible` and
+`enabled` booleans (both default true), and the following type-specific fields:
+
+| type      | Fields                      | Behavior                                                                    |
+| --------- | --------------------------- | --------------------------------------------------------------------------- |
+| `command` | `command`, optional `label` | Executes an existing editor command; omitted label uses editor translations |
+| `action`  | `actionId`, `label`         | Emits a host action; never executes an editor command as a fallback         |
+| `group`   | `items`, optional `label`   | Groups entries; empty/hidden groups are omitted                             |
+| `submenu` | `items`, `label`            | Opens a nested menu; empty/hidden submenus are omitted                      |
+
+Commands are `new`, `open`, `save`, `saveAs`, `exportPdf`, `exportHtml`,
+`exportMarkdown` and `exportImages`. New/open retain the existing replacement
+confirmation and document-host callbacks. Save/Save As use the existing queue,
+serialization and hosted `saveDocument`; exports use the existing output services.
+Command policies are rechecked on activation, so `enabled: true` cannot grant
+permission. Hiding/disabling a menu item is presentation, not a replacement for
+document capability or service policy. Built-ins do not emit host actions.
+
+Use custom actions for rename, publish, version history and application-owned
+close. The menu contract does not add those business operations to the editor.
+Changing a menu item's label does not rename the document. In Qt, call the
+widget's existing `close()` to retain its unsaved-change check. Async host work
+must keep its captured target; clearing a menu cannot undo a business operation
+already started by the host.
+
+Updates use complete snapshots with stable IDs; change `label`, `visible` or
+`enabled` and submit again with the current token. Hidden/disabled ancestors also
+prevent activation of descendants. Labels are plain text; executable content,
+unknown commands and ambiguous nodes are rejected. Trees support at most 256
+nodes and eight levels; IDs/action IDs are 1–128 characters and labels 1–256.
+`onAction` returns an unsubscribe function and supplies
+`{ itemId, actionId, documentToken, document }`. This instance-level dispatcher
+survives document changes, while document-specific trees and tokens do not.
+Editor disposal clears state and all action/state subscriptions; retained handles
+reject further calls.
+
+Qt uses the same operations through `callSdk("ui.fileMenu.set", config, done)`
+and `callSdk("ui.fileMenu.reset", {}, done)`. Connect `menuActionTriggered` for
+custom actions and `documentStateChanged` for state updates (JSON null with no
+document); the first state notification follows `ready`. Slots and completions
+run on the GUI thread. The existing QWebChannel JSON-RPC transport is reused.
+
+`hosts/qt/examples/file-menu.cpp` is a complete, compilable integration example
+covering new/open/save/save-as/rename/publish/history/export/close. Its business
+actions log their captured target for the embedding application to implement.
+Build with `-DFORAOFFICE_DOCS_QT_BUILD_EXAMPLES=ON`, then run
+`docs-qt-file-menu-example --package <sdk> --workspace <documents> --state <private-state>`.
+No native menu bar is required. Browser controller/view/bridge tests and the
+real native `docs-qt-public-sdk` test cover the contract and service reuse.
+
+The menu button and submenus follow the
+[WAI-ARIA menu-button](https://www.w3.org/WAI/ARIA/apg/patterns/menu-button/) and
+[menu keyboard](https://www.w3.org/WAI/ARIA/apg/patterns/menubar/) patterns.
+
 ## Standard MCP
 
 The Node entry `@foraoffice/docs-sdk/mcp` uses standard MCP over stdio. The owning
