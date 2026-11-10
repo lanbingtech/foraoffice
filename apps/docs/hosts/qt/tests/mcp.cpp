@@ -122,6 +122,24 @@ private slots:
         QVERIFY(sdk(*editor, "documents.state").value("result").toObject().value("dirty").toBool());
         const auto read = rpc(connection, "tools/call", {{"name", "read_document"}}, session);
         QVERIFY(QJsonDocument(read.body).toJson().contains("Unsaved Agent edit"));
+        // Embedded images must be readable through the public MCP transport, not only displayed.
+        const QString png = QStringLiteral("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=");
+        const auto picture = rpc(connection, "tools/call", {{"name", "insert_picture"}, {"arguments", QJsonObject{{"url", "data:image/png;base64," + png}, {"afterBlockIndex", 0}}}}, session);
+        QVERIFY2(!picture.body.value("result").toObject().value("isError").toBool(), qPrintable(QString::fromUtf8(QJsonDocument(picture.body).toJson())));
+        rpc(connection, "tools/call", {{"name", "get_document_context"}}, session);
+        const auto media = rpc(connection, "tools/call", {{"name", "read_document_media"}, {"arguments", QJsonObject{{"blockIndex", 1}}}}, session);
+        const auto mediaResult = media.body.value("result").toObject();
+        QVERIFY2(!mediaResult.value("isError").toBool(), qPrintable(QString::fromUtf8(QJsonDocument(media.body).toJson())));
+        bool imageReturned = false;
+        for (const auto& item : mediaResult.value("content").toArray()) {
+            const auto content = item.toObject();
+            if (content.value("type") == "image") {
+                QCOMPARE(content.value("mimeType").toString(), QStringLiteral("image/png"));
+                QCOMPARE(content.value("data").toString(), png);
+                imageReturned = true;
+            }
+        }
+        QVERIFY(imageReturned);
         cancelNew = true;
         QVERIFY(!sdk(*editor, "documents.new").value("result").toBool());
         QCOMPARE(state(*editor).value("status").toString(), QStringLiteral("running"));
