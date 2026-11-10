@@ -27,6 +27,9 @@ try {
     get documents() {
       return editor.documents
     },
+    get ui() {
+      return editor.ui
+    },
     dispose,
   }
   host.attach(editor)

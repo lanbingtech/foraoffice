@@ -9,6 +9,7 @@ import JSZip from 'jszip'
 import { createRequire } from 'node:module'
 import type { PdfiumModule } from '../packages/pdf2docx/src'
 import type { DocsEditorHandle } from '../apps/docs/src/renderer/embedded'
+import type { DocsFileMenuAction } from '../apps/docs/src/renderer/sdk/file-menu'
 import { withPdfDocument } from '../packages/pdf2docx/src/extract/pdfium'
 import { renderPageByIndexPng } from '../packages/pdf2docx/src/extract'
 
@@ -17,7 +18,15 @@ const image =
 type FixtureWindow = Window & {
   editor: DocsEditorHandle
   sdkReady: boolean
-  fixture: { saved: number[]; fallback: string[]; readonly: boolean; cancel: boolean }
+  fixture: {
+    saved: number[]
+    fallback: string[]
+    readonly: boolean
+    cancel: boolean
+    menuActions: DocsFileMenuAction[]
+    documentStates: boolean[]
+    saveKinds: boolean[]
+  }
 }
 
 test('the real Qt public SDK preserves DOCX resources and identical printed content with view annotations', async () => {
@@ -89,7 +98,7 @@ test('a browser host owns pathless storage while native inspection and advisory 
           getAuthorName:'SDK fixture',getAutoSaveDefault:{on:false,updatedAt:0},
           getAiPanelPrefs:{side:'left',fontSize:'default',spellcheck:false,openInNewDocs:false,showAiSidebar:false},
           spellLanguages:{active:[],available:[]},docPasswordIntentRevision:0};
-        window.fixture={saved:[],fallback:[],readonly:false,cancel:false};
+        window.fixture={saved:[],fallback:[],readonly:false,cancel:false,menuActions:[],documentStates:[],saveKinds:[]};
         const services=new Proxy({}, {get(_,name){
           if(name==='then')return undefined;
           if(name.startsWith('on'))return ()=>()=>{};
@@ -100,9 +109,9 @@ test('a browser host owns pathless storage while native inspection and advisory 
         const host=createExternalDocsHost('browser',services);
         const doc=()=>({id:'browser:object',name:'Browser.docx',readOnly:window.fixture.readonly,
           ...(window.fixture.saved.length?{data:Uint8Array.from(window.fixture.saved).buffer}:{})});
-        host.documents={autoSave:{enabled:false},initialDocument:async()=>location.search.includes('empty')?null:doc(),
+        host.documents={autoSave:{enabled:true,intervalMs:600000,onBlur:true},initialDocument:async()=>location.search.includes('empty')?null:doc(),
           newDocument:async()=>window.fixture.cancel?null:doc(),openDocument:async()=>doc(),
-          saveDocument:async r=>{window.fixture.saved=Array.from(new Uint8Array(r.data));
+          saveDocument:async r=>{window.fixture.saved=Array.from(new Uint8Array(r.data));window.fixture.saveKinds.push(r.auto);
             return {ok:true,committed:true,pending:false,document:{id:'browser:object',name:'Browser.docx'}};}};
         host.checkers={fixture:s=>{const at=s.text.indexOf('[');return at<0?[]:[{from:s.positions[at],to:s.positions[at]+1,message:'Fixture diagnostic'}];}};
         window.editor=await mountDocsEditor(document.getElementById('root'),{host});
@@ -176,6 +185,87 @@ test('a browser host owns pathless storage while native inspection and advisory 
     const body = page.locator('.ProseMirror').first()
     await body.click()
     await page.keyboard.insertText('same same same [invalid')
+    const bodyInstance = await body.elementHandle()
+    const beforeMenu = await page.evaluate(() => {
+      const target = window as unknown as FixtureWindow
+      const { editor } = target
+      const state = editor.documents.state()!
+      editor.ui.fileMenu.onAction((event) => target.fixture.menuActions.push(event))
+      editor.ui.fileMenu.set({
+        documentToken: state.documentToken,
+        items: [
+          { type: 'command', id: 'save', command: 'save' },
+          {
+            type: 'submenu',
+            id: 'workflow',
+            label: 'Workflow',
+            items: [{ type: 'action', id: 'publish', actionId: 'host.publish', label: 'Publish' }],
+          },
+        ],
+      })
+      return { snapshot: editor.inspection.snapshot(), state }
+    })
+    const fileButton = page.getByRole('button', { name: 'File', exact: true })
+    const fileBox = await fileButton.boundingBox()
+    const saveBox = await page.locator('.qa-btn').first().boundingBox()
+    expect(fileBox!.x + fileBox!.width).toBeLessThanOrEqual(saveBox!.x + 1)
+    await fileButton.click()
+    await page.getByRole('menuitem', { name: 'Workflow' }).click()
+    await page.getByRole('menuitem', { name: 'Publish', exact: true }).click()
+    expect(
+      await page.evaluate(() => (window as unknown as FixtureWindow).fixture.menuActions),
+    ).toEqual([
+      expect.objectContaining({
+        actionId: 'host.publish',
+        documentToken: beforeMenu.state.documentToken,
+      }),
+    ])
+    await page.evaluate(() => {
+      const { editor } = window as unknown as FixtureWindow
+      editor.ui.fileMenu.set({
+        documentToken: editor.documents.state()!.documentToken,
+        items: [
+          { type: 'command', id: 'save', command: 'save', visible: false },
+          {
+            type: 'action',
+            id: 'publish',
+            actionId: 'host.publish',
+            label: 'Published',
+            enabled: false,
+          },
+        ],
+      })
+    })
+    await fileButton.click()
+    await expect(page.getByRole('menuitem', { name: 'Published' })).toBeDisabled()
+    await expect(page.getByRole('menuitem', { name: /^Save/ })).toHaveCount(0)
+    expect(
+      await page.evaluate(() => {
+        const { editor } = window as unknown as FixtureWindow
+        return { snapshot: editor.inspection.snapshot(), state: editor.documents.state() }
+      }),
+    ).toEqual(beforeMenu)
+    expect(await body.evaluate((element, original) => element === original, bodyInstance)).toBe(
+      true,
+    )
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')))
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as unknown as FixtureWindow).editor.documents.state()?.dirty),
+      )
+      .toBe(false)
+    expect(
+      await page.evaluate(() => (window as unknown as FixtureWindow).fixture.saveKinds),
+    ).toContain(true)
+    await body.click()
+    await page.keyboard.insertText(' ')
+    await page.keyboard.press('Control+s')
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as unknown as FixtureWindow).editor.documents.state()?.dirty),
+      )
+      .toBe(false)
+    await page.evaluate(() => (window as unknown as FixtureWindow).editor.ui.fileMenu.reset())
     const results = await page.evaluate(async () => {
       const editor = (window as unknown as FixtureWindow).editor
       const found = editor.inspection.find('(same)', { mode: 'regex' })
@@ -210,11 +300,25 @@ test('a browser host owns pathless storage while native inspection and advisory 
       target.fixture.readonly = true
       await target.editor.documents.open()
     })
+    expect(
+      await page.evaluate((token) => {
+        const { editor } = window as unknown as FixtureWindow
+        try {
+          editor.ui.fileMenu.set({ documentToken: token, items: [] })
+          return false
+        } catch {
+          return true
+        }
+      }, beforeMenu.state.documentToken),
+    ).toBe(true)
     await expect(body).toHaveAttribute('contenteditable', 'false')
     expect(
       await page.evaluate(
         () => (window as unknown as FixtureWindow).editor.documents.state()?.dirty,
       ),
+    ).toBe(false)
+    expect(
+      await page.evaluate(() => (window as unknown as FixtureWindow).fixture.saveKinds.at(-1)),
     ).toBe(false)
     await page.evaluate(() =>
       (window as unknown as FixtureWindow).editor.annotations.setRules('readonly', [
@@ -222,6 +326,23 @@ test('a browser host owns pathless storage while native inspection and advisory 
       ]),
     )
     await expect(page.locator('.sdk-range-decoration').first()).toBeVisible()
+    await page.evaluate(async () => {
+      const target = window as unknown as FixtureWindow
+      target.editor.documents.subscribe((state) =>
+        target.fixture.documentStates.push(!!state?.readOnly),
+      )
+      target.fixture.readonly = false
+      await target.editor.documents.open()
+    })
+    await expect(body).toHaveAttribute('contenteditable', 'true')
+    expect(
+      await page.evaluate(() => (window as unknown as FixtureWindow).fixture.documentStates.at(-1)),
+    ).toBe(false)
+    expect(
+      await page.evaluate(() =>
+        (window as unknown as FixtureWindow).fixture.documentStates.slice(1),
+      ),
+    ).not.toContain(true)
     expect(errors).toEqual([])
     expect(
       await page.evaluate(() =>

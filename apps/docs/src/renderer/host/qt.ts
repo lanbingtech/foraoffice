@@ -7,6 +7,7 @@ import { ResourceAccessError } from '@genoffice/agent-core/resource-tools'
 import type { AttachmentMeta } from '../../shared/ipc'
 import type { DocsInspection } from '../sdk/inspection'
 import type { DocsAnnotations } from '../sdk/annotations'
+import type { DocsEditorUi } from '../sdk/file-menu'
 import type {
   DocsDocumentCommands,
   DocsDocumentHost,
@@ -34,6 +35,7 @@ interface EditorEndpoint {
   inspection?: DocsInspection
   annotations?: DocsAnnotations
   documents?: DocsDocumentCommands
+  ui?: DocsEditorUi
   commands: {
     bindScope?(bindingId: string, scope: DocsRuntimeScope, onRelease?: () => void): void
     handle(message: McpCommandMessage): Promise<unknown>
@@ -78,6 +80,7 @@ const notifications = new Set([
 export function createQtDocsHost(channel: DocsQtChannel) {
   let disposed = false
   let editor: EditorEndpoint | undefined
+  let editorDisposers: Array<() => void> = []
   const pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void }>()
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
   let attachments: AttachmentMeta[] = []
@@ -182,6 +185,7 @@ export function createQtDocsHost(channel: DocsQtChannel) {
               inspection: editor.inspection,
               annotations: editor.annotations,
               documents: editor.documents,
+              ui: editor.ui,
             },
             params.operation,
             params.args,
@@ -409,12 +413,28 @@ export function createQtDocsHost(channel: DocsQtChannel) {
     },
     attach(endpoint: EditorEndpoint) {
       if (disposed) throw new Error('The Qt editor host was disposed')
+      for (const off of editorDisposers) off()
+      editorDisposers = []
       editor = endpoint
       notify('editor.ready', {})
+      if (endpoint.ui)
+        editorDisposers.push(
+          endpoint.ui.fileMenu.onAction((event) => {
+            if (!disposed) notify('sdk.menuAction', event)
+          }),
+        )
+      if (endpoint.documents)
+        editorDisposers.push(
+          endpoint.documents.subscribe((state) => {
+            if (!disposed) notify('sdk.documentStateChanged', { state })
+          }),
+        )
     },
     dispose() {
       if (disposed) return
       disposed = true
+      for (const off of editorDisposers) off()
+      editorDisposers = []
       editor = undefined
       notify('editor.disposed', {})
       channel.reply.disconnect(reply)
