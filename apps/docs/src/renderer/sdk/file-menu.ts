@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { DocsDocumentState } from '../../shared/document-host'
+import type { DocsRibbon } from './ribbon'
 
 export const DOCS_FILE_MENU_COMMANDS = [
   'new',
@@ -46,6 +47,7 @@ export interface DocsFileMenu {
 }
 export interface DocsEditorUi {
   readonly fileMenu: DocsFileMenu
+  readonly ribbon: DocsRibbon
 }
 
 const id = z.string().min(1).max(128)

@@ -41,6 +41,18 @@ export type {
   DocsFileMenuConfiguration,
   DocsFileMenuAction,
 } from './sdk/file-menu'
+export { DOCS_RIBBON_BUILTIN_TABS } from './sdk/ribbon'
+export type {
+  DocsRibbon,
+  DocsRibbonAction,
+  DocsRibbonBuiltinTab,
+  DocsRibbonConfiguration,
+  DocsRibbonControl,
+  DocsRibbonGroup,
+  DocsRibbonGroupExtension,
+  DocsRibbonMenuItem,
+  DocsRibbonTab,
+} from './sdk/ribbon'
 export type { DocsImageSource } from './ai/image-source'
 export type {
   DocsInspection,

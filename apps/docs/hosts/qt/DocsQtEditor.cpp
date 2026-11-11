@@ -496,6 +496,9 @@ void DocsQtEditor::fromRenderer(const QString& source) {
     else if (method == "services.notify") serviceNotify(params.value("method").toString(), params.value("args").toArray());
     else if (method == "editor.ready") { ready_ = true; status_->hide(); emit ready(); }
     else if (method == "editor.disposed") { ready_ = false; editorRequests_.clear(); stopBackend(); }
+    else if (method == "sdk.ribbonAction") {
+        if (ready_ && !stopping_) emit ribbonActionTriggered(params.value("actionId").toString(), params);
+    }
     else if (method == "sdk.menuAction") {
         if (ready_ && !stopping_) emit menuActionTriggered(params.value("actionId").toString(), params);
     }

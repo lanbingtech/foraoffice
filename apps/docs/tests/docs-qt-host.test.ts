@@ -4,6 +4,7 @@ import { Editor } from '@tiptap/core'
 import { createDocsRuntime } from '../src/renderer/runtime/docs-runtime'
 import { createDocsCommandRouter } from '../src/renderer/runtime/command-router'
 import { createDocsFileMenu } from '../src/renderer/sdk/file-menu'
+import { createDocsRibbon } from '../src/renderer/sdk/ribbon'
 import type { DocsInspection } from '../src/renderer/sdk/inspection'
 import type { DocsAnnotations } from '../src/renderer/sdk/annotations'
 
@@ -51,7 +52,7 @@ it('transports menu snapshots, document sessions and stable host actions through
       state: menu.documentState,
       subscribe: menu.onDocumentStateChanged,
     },
-    ui: { fileMenu: menu },
+    ui: { fileMenu: menu, ribbon: createDocsRibbon(menu.documentState) },
   })
   const send = async (id: string, operation: string, args: unknown) => {
     channel.command.emit(
@@ -96,6 +97,84 @@ it('transports menu snapshots, document sessions and stable host actions through
   menu.set({ documentToken: menu.documentState()!.documentToken, items: items as never })
   await menu.activate('publish', menu.documentState()!.documentToken)
   expect(channel.request).toHaveBeenCalledTimes(count)
+  menu.dispose()
+})
+
+it('transports neutral ribbon contributions and action context through the same public Qt SDK', async () => {
+  const menu = createDocsFileMenu({
+    current: () => ({ generation: 1, document: null }),
+    canExecute: () => false,
+    execute: vi.fn(),
+  })
+  const ribbon = createDocsRibbon(menu.documentState)
+  const channel = {
+    request: vi.fn(),
+    complete: vi.fn(),
+    reply: signal<[string]>(),
+    event: signal<[string, string]>(),
+    command: signal<[string]>(),
+  }
+  const adapter = createQtDocsHost(channel)
+  adapter.attach({
+    commands: { handle: vi.fn(), releaseScope: vi.fn(), disconnect: vi.fn() },
+    inspection: {} as DocsInspection,
+    annotations: {} as DocsAnnotations,
+    documents: {
+      new: vi.fn(),
+      open: vi.fn(),
+      save: vi.fn(),
+      state: menu.documentState,
+      subscribe: menu.onDocumentStateChanged,
+    },
+    ui: { fileMenu: menu, ribbon },
+  })
+  const send = async (id: string, operation: string, args: unknown) => {
+    channel.command.emit(
+      JSON.stringify({ jsonrpc: '2.0', id, method: 'sdk.request', params: { operation, args } }),
+    )
+    await vi.waitFor(() =>
+      expect(channel.complete.mock.calls.some(([value]) => JSON.parse(value).id === id)).toBe(true),
+    )
+    return channel.complete.mock.calls
+      .map(([value]) => JSON.parse(value))
+      .find((value) => value.id === id)
+  }
+  expect(
+    await send('set', 'ui.ribbon.set', {
+      documentToken: null,
+      quickAccess: [
+        { type: 'button', id: 'inspect', label: 'Inspect', actionId: 'extension.inspect' },
+      ],
+    }),
+  ).toMatchObject({ result: { ok: true } })
+  ribbon.activate('inspect', ribbon.snapshot()!)
+  expect(channel.request.mock.calls.map(([value]) => JSON.parse(value))).toContainEqual(
+    expect.objectContaining({
+      method: 'sdk.ribbonAction',
+      params: expect.objectContaining({
+        actionId: 'extension.inspect',
+        location: 'quickAccess',
+        document: null,
+      }),
+    }),
+  )
+  expect(
+    await send('bad', 'ui.ribbon.set', {
+      documentToken: null,
+      tabs: [{ id: 'home', label: 'Override', groups: [] }],
+    }),
+  ).toHaveProperty('error')
+  expect(await send('reset', 'ui.ribbon.reset', {})).toMatchObject({ result: { ok: true } })
+  expect(ribbon.snapshot()).toBeNull()
+  adapter.dispose()
+  ribbon.set({
+    documentToken: null,
+    quickAccess: [{ type: 'button', id: 'inspect', label: 'Inspect', actionId: 'inspect' }],
+  })
+  const count = channel.request.mock.calls.length
+  ribbon.activate('inspect', ribbon.snapshot()!)
+  expect(channel.request).toHaveBeenCalledTimes(count)
+  ribbon.dispose()
   menu.dispose()
 })
 

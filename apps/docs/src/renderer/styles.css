@@ -645,6 +645,19 @@ html.genoffice-popover-open .ribbon-tabs {
   right: 100%;
 }
 
+/* The shared menu renderer positions every level within the viewport. Fixed
+   panels escape ribbon/list scrolling; long menus scroll without clipping
+   their independently positioned submenus. */
+.native-action-menu .file-menu {
+  position: fixed;
+  inset: auto;
+  width: max-content;
+  min-width: min(210px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow: auto;
+}
+
 .ribbon-tabs-spacer {
   flex: 1;
 }
