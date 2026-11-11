@@ -342,6 +342,32 @@ test('a browser host owns pathless storage while native inspection and advisory 
                 label: 'Home action',
                 actionId: 'extension.home',
               },
+              {
+                type: 'button',
+                id: 'home-parity-image',
+                label: 'Convert',
+                actionId: 'extension.parity',
+                icon: `data:image/png;base64,${icon}`,
+              },
+              {
+                type: 'button',
+                id: 'home-parity-fallback',
+                label: 'Convert',
+                actionId: 'extension.parity',
+              },
+              {
+                type: 'menu',
+                id: 'home-parity-menu',
+                label: 'Convert',
+                items: [
+                  {
+                    type: 'action',
+                    id: 'home-parity-action',
+                    label: 'Run',
+                    actionId: 'extension.parity',
+                  },
+                ],
+              },
             ],
           },
           {
@@ -412,6 +438,52 @@ test('a browser host owns pathless storage while native inspection and advisory 
     await expect(page.getByRole('menu', { name: 'File', exact: true })).toBeVisible()
     await page.keyboard.press('Escape')
     await expect(page.getByRole('button', { name: 'Home', exact: true })).toBeVisible()
+    const measureHomeParity = () =>
+      page.evaluate(() => {
+        const measure = (button: Element) => {
+          const style = getComputedStyle(button)
+          const box = button.getBoundingClientRect()
+          const glyph = button.querySelector('svg,img')!.getBoundingClientRect()
+          return {
+            height: box.height,
+            top: box.top,
+            glyphWidth: glyph.width,
+            glyphHeight: glyph.height,
+            font: style.font,
+            padding: style.padding,
+            gap: style.gap,
+            plateHeight: button.querySelector('.rb-big-icon')!.getBoundingClientRect().height,
+          }
+        }
+        const native = Array.from(
+          document.querySelectorAll('.ribbon-group:not([data-ribbon-extension]) .rb-big'),
+        ).find((button) => button.textContent?.trim() === 'Convert')!
+        return {
+          native: measure(native),
+          styles: measure(document.querySelector('.rb-styles-gallery')!),
+          extensions: Array.from(
+            document.querySelectorAll(
+              '[data-ribbon-extension="extension-home"] button[aria-label="Convert"]',
+            ),
+          ).map(measure),
+        }
+      })
+    for (const theme of ['light', 'dark']) {
+      await page.evaluate(
+        (theme) => document.documentElement.setAttribute('data-theme', theme),
+        theme,
+      )
+      for (const compact of [false, true]) {
+        if (compact) await page.keyboard.press('Control+Alt+k')
+        const parity = await measureHomeParity()
+        expect(parity.native.glyphWidth).toBe(22)
+        expect(parity.styles).toEqual(parity.native)
+        expect(parity.extensions).toHaveLength(3)
+        for (const extension of parity.extensions) expect(extension).toEqual(parity.native)
+      }
+      await page.keyboard.press('Control+Alt+k')
+    }
+    await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'))
     await page.getByRole('button', { name: 'Home action', exact: true }).click()
     await page.getByRole('button', { name: 'Extension tools', exact: true }).click()
     const panelButton = page.getByRole('button', { name: 'Inspect', exact: true })
@@ -511,7 +583,9 @@ test('a browser host owns pathless storage while native inspection and advisory 
     await expect(extensionPopup).toBeHidden()
     await extensionTrigger.focus()
     await page.keyboard.press('ArrowDown')
+    await expect(page.getByRole('menuitem', { name: 'View action', exact: true })).toBeFocused()
     await page.keyboard.press('ArrowDown')
+    await expect(page.getByRole('menuitem', { name: 'Nested actions', exact: true })).toBeFocused()
     await page.keyboard.press('ArrowRight')
     await expect(page.getByRole('menuitem', { name: 'Nested action', exact: true })).toBeFocused()
     await page.keyboard.press('Enter')

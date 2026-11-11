@@ -1,6 +1,6 @@
 import { getDocsHost } from '../host/docs-host'
 import { FileMenu } from './FileMenu'
-import { RIBBON_ICON_SIZE } from './ribbon-metrics'
+import { HOME_RIBBON_ICON_SIZE, RIBBON_ICON_SIZE } from './ribbon-metrics'
 import { RibbonExtensionGroups, RibbonQuickAccess, ribbonItemVisible } from './RibbonExtensions'
 import type { DocsRibbonConfiguration } from '../sdk/ribbon'
 import type { DocsFileMenuCommand, DocsFileMenuItem } from '../sdk/file-menu'
@@ -3699,7 +3699,7 @@ function RibbonInner({
                     onClick={() => setDropdown((v) => (v === 'convert' ? null : 'convert'))}
                   >
                     <span className="rb-big-icon">
-                      <IconConvert size={22} />
+                      <IconConvert size={HOME_RIBBON_ICON_SIZE} />
                       <IconCaret />
                     </span>
                     <span>{t('ribbonConvert')}</span>
@@ -4577,7 +4577,7 @@ function RibbonInner({
                   onClick={() => setDropdown((v) => (v === 'styleGallery' ? null : 'styleGallery'))}
                 >
                   <span className="rb-big-icon rb-styles-gallery-icon">
-                    <IconStyles size={22} />
+                    <IconStyles size={HOME_RIBBON_ICON_SIZE} />
                     <span className="rb-caret-inline">
                       <IconCaret />
                     </span>
@@ -4814,6 +4814,7 @@ function RibbonInner({
         )}
         <RibbonExtensionGroups
           groups={(ribbonConfiguration?.groups ?? []).filter((group) => group.tabId === tab)}
+          iconSize={tab === 'home' ? HOME_RIBBON_ICON_SIZE : RIBBON_ICON_SIZE}
           {...extensionInteraction}
         />
       </div>

@@ -17,15 +17,17 @@ function Control({
   item,
   quick = false,
   disabled = false,
+  iconSize = RIBBON_ICON_SIZE,
   ...interaction
 }: Interaction & {
   item: DocsRibbonControl
   quick?: boolean
   disabled?: boolean
+  iconSize?: number
 }) {
   if (!ribbonItemVisible(item)) return null
   const buttonClass = quick ? `qa-btn${item.type === 'menu' ? ' qa-btn-menu' : ''}` : 'rb-big'
-  const size = quick ? QUICK_ACCESS_ICON_SIZE : RIBBON_ICON_SIZE
+  const size = quick ? QUICK_ACCESS_ICON_SIZE : iconSize
   const icon = item.icon ? (
     <img src={item.icon} alt="" width={size} height={size} draggable={false} />
   ) : (
@@ -85,10 +87,12 @@ function Control({
 export function RibbonExtensionGroups({
   groups,
   disabled = false,
+  iconSize = RIBBON_ICON_SIZE,
   ...interaction
 }: Interaction & {
   groups: readonly DocsRibbonGroup[]
   disabled?: boolean
+  iconSize?: number
 }) {
   return (
     <>
@@ -109,6 +113,7 @@ export function RibbonExtensionGroups({
                     key={item.id}
                     item={item}
                     disabled={disabled || group.enabled === false}
+                    iconSize={iconSize}
                     {...interaction}
                   />
                 ))}
