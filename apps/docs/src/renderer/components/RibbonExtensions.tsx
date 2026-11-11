@@ -1,5 +1,7 @@
 import { Fragment } from 'react'
 import { ActionMenu } from './ActionMenu'
+import { IconCaret, IconShapes } from './icons'
+import { QUICK_ACCESS_ICON_SIZE, RIBBON_ICON_SIZE } from './ribbon-metrics'
 import type { DocsRibbonControl, DocsRibbonGroup, DocsRibbonMenuItem } from '../sdk/ribbon'
 
 interface Interaction {
@@ -22,23 +24,26 @@ function Control({
   disabled?: boolean
 }) {
   if (!ribbonItemVisible(item)) return null
-  const buttonClass = quick ? 'qa-btn' : 'rb-big'
+  const buttonClass = quick ? `qa-btn${item.type === 'menu' ? ' qa-btn-menu' : ''}` : 'rb-big'
+  const size = quick ? QUICK_ACCESS_ICON_SIZE : RIBBON_ICON_SIZE
   const icon = item.icon ? (
-    <img src={item.icon} alt="" draggable={false} />
+    <img src={item.icon} alt="" width={size} height={size} draggable={false} />
   ) : (
-    <span aria-hidden="true">{item.label.slice(0, 1)}</span>
+    <IconShapes size={size} />
   )
-  const content = (
+  const caret = item.type === 'menu' ? <IconCaret /> : null
+  const content = quick ? (
     <>
-      <span className={quick ? 'ribbon-extension-icon' : 'rb-big-icon'}>
+      {icon}
+      {caret}
+    </>
+  ) : (
+    <>
+      <span className="rb-big-icon">
         {icon}
-        {item.type === 'menu' && (
-          <span className="ribbon-extension-caret" aria-hidden="true">
-            ▾
-          </span>
-        )}
+        {caret}
       </span>
-      {!quick && <span>{item.label}</span>}
+      <span>{item.label}</span>
     </>
   )
   const unavailable = disabled || item.enabled === false

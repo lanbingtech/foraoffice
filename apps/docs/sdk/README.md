@@ -204,8 +204,10 @@ has a unique `id`, a plain-text `label`, and optional `visible`/`enabled`
 booleans. Controls also accept `tooltip` and an optional PNG/JPEG/GIF/WebP
 base64 data URL `icon` (up to 131072 characters). Remote URLs, SVG/HTML, custom
 CSS, executable callbacks in configuration, and unknown properties are rejected.
-Omitting an icon uses the first character of the label; quick-access controls
-retain their accessible label and tooltip. Host labels are supplied in the
+Icons use the native ribbon's shared 28px canvas and the native quick-access
+area's shared 16px canvas. Captions, spacing, density and dropdown chevrons use
+the same native styles and glyphs. Omitting an icon uses a native generic glyph;
+quick-access controls retain their accessible label and tooltip. Host labels are supplied in the
 desired language; they are not added to the editor's translation dictionaries.
 
 Ordinary extension buttons can also supply `pressed?: boolean`. Omit it for a

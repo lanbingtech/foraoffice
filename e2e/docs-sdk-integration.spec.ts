@@ -375,6 +375,13 @@ test('a browser host owns pathless storage while native inspection and advisory 
                   },
                 ],
               },
+              {
+                type: 'button',
+                id: 'native-parity',
+                label: 'Read Mode',
+                actionId: 'extension.parity',
+                icon: `data:image/png;base64,${icon}`,
+              },
             ],
           },
         ],
@@ -436,6 +443,43 @@ test('a browser host owns pathless storage while native inspection and advisory 
       'true',
     )
     await page.getByRole('button', { name: 'View', exact: true }).click()
+    const measureNativeParity = () =>
+      page.evaluate(() => {
+        const measure = (button: HTMLButtonElement) => {
+          const style = getComputedStyle(button)
+          const box = button.getBoundingClientRect()
+          const plate = button.querySelector('.rb-big-icon')!.getBoundingClientRect()
+          const glyph = button.querySelector('svg,img')!.getBoundingClientRect()
+          return {
+            width: box.width,
+            height: box.height,
+            top: box.top,
+            font: style.font,
+            lineHeight: style.lineHeight,
+            padding: style.padding,
+            gap: style.gap,
+            plateHeight: plate.height,
+            glyphWidth: glyph.width,
+            glyphHeight: glyph.height,
+          }
+        }
+        return {
+          native: measure(
+            Array.from(
+              document.querySelectorAll<HTMLButtonElement>(
+                '.ribbon-body > .ribbon-group:not([data-ribbon-extension]) .rb-big',
+              ),
+            ).find((button) => button.textContent?.trim() === 'Read Mode')!,
+          ),
+          extension: measure(
+            document.querySelector<HTMLButtonElement>(
+              '[data-ribbon-extension="extension-view"] button[aria-label="Read Mode"]',
+            )!,
+          ),
+        }
+      })
+    const fullParity = await measureNativeParity()
+    expect(fullParity.extension).toEqual(fullParity.native)
     const extensionTrigger = page.getByRole('button', { name: 'View actions', exact: true })
     await extensionTrigger.click()
     const extensionPopup = page.getByRole('menu', { name: 'View actions', exact: true })
@@ -455,6 +499,8 @@ test('a browser host owns pathless storage while native inspection and advisory 
     await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'))
     await page.keyboard.press('Control+Alt+k')
     await expect(page.locator('.ribbon')).toHaveClass(/ribbon-compact/)
+    const compactParity = await measureNativeParity()
+    expect(compactParity.extension).toEqual(compactParity.native)
     await expect(extensionTrigger).toBeVisible()
     await expect(extensionPopup).toBeVisible()
     await page.keyboard.press('Control+Alt+k')
@@ -462,6 +508,7 @@ test('a browser host owns pathless storage while native inspection and advisory 
     const popup = await extensionPopup.boundingBox()
     expect(popup!.y).toBeGreaterThanOrEqual(band!.y)
     await page.getByRole('menuitem', { name: 'View action', exact: true }).click()
+    await expect(extensionPopup).toBeHidden()
     await extensionTrigger.focus()
     await page.keyboard.press('ArrowDown')
     await page.keyboard.press('ArrowDown')

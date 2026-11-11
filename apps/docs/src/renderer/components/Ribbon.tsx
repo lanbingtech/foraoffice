@@ -1,5 +1,6 @@
 import { getDocsHost } from '../host/docs-host'
 import { FileMenu } from './FileMenu'
+import { RIBBON_ICON_SIZE } from './ribbon-metrics'
 import { RibbonExtensionGroups, RibbonQuickAccess, ribbonItemVisible } from './RibbonExtensions'
 import type { DocsRibbonConfiguration } from '../sdk/ribbon'
 import type { DocsFileMenuCommand, DocsFileMenuItem } from '../sdk/file-menu'
@@ -2807,7 +2808,7 @@ function RibbonInner({
                       onClick={() => setPictureDialog('cutout')}
                     >
                       <span className="rb-big-icon">
-                        <IconRemoveBg size={28} />
+                        <IconRemoveBg size={RIBBON_ICON_SIZE} />
                       </span>
                       <span>{t('ribbonRemoveBg')}</span>
                     </button>
@@ -2818,7 +2819,7 @@ function RibbonInner({
                       onClick={() => setPictureDialog('crop')}
                     >
                       <span className="rb-big-icon">
-                        <IconCrop size={28} />
+                        <IconCrop size={RIBBON_ICON_SIZE} />
                       </span>
                       <span>{t('ribbonCrop')}</span>
                     </button>
@@ -2829,7 +2830,7 @@ function RibbonInner({
                       onClick={() => void replacePicture()}
                     >
                       <span className="rb-big-icon">
-                        <IconReplacePicture size={28} />
+                        <IconReplacePicture size={RIBBON_ICON_SIZE} />
                       </span>
                       <span>{t('ribbonReplacePicture')}</span>
                     </button>
@@ -3726,7 +3727,7 @@ function RibbonInner({
                     onClick={() => pasteAs()}
                   >
                     <span className="rb-big-icon">
-                      <IconPaste size={28} />
+                      <IconPaste size={RIBBON_ICON_SIZE} />
                     </span>
                   </button>
                   <button

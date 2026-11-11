@@ -1,4 +1,5 @@
 import { getDocsHost } from '../host/docs-host'
+import { RIBBON_ICON_SIZE } from './ribbon-metrics'
 import { useRef, useState } from 'react'
 import type { Editor, JSONContent } from '@tiptap/core'
 import type { Node as PmNode } from '@tiptap/pm/model'
@@ -91,7 +92,7 @@ export { MailingsTab } from './ribbon-mailings-tab'
 export { ReferencesTab } from './ribbon-references-tab'
 
 /** icon size for the big icon-over-label ribbon buttons (slides ribbon parity) */
-export const BIG = 28
+export const BIG = RIBBON_ICON_SIZE
 
 /* ---------- shared helpers ---------- */
 

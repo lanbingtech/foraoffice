@@ -23,6 +23,7 @@ import {
 } from 'react'
 import { createDocsFileMenu, type DocsEditorUi } from './sdk/file-menu'
 import { createDocsRibbon } from './sdk/ribbon'
+import { QUICK_ACCESS_ICON_SIZE } from './components/ribbon-metrics'
 import { useDocsAutoSave } from './auto-save'
 import { hasActiveDocumentDraft } from './runtime/draft-landing'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, SetStateAction } from 'react'
@@ -8197,7 +8198,7 @@ export function App({
           disabled={!hasDoc || !hasUnsavedChanges}
           onClick={() => void save(false)}
         >
-          <IconSave size={16} />
+          <IconSave size={QUICK_ACCESS_ICON_SIZE} />
         </button>
         <button
           className="qa-btn"
@@ -8206,7 +8207,7 @@ export function App({
           disabled={!hasDoc || !histState.canUndo}
           onClick={() => editor?.chain().focus().undo().run()}
         >
-          <IconUndo size={16} />
+          <IconUndo size={QUICK_ACCESS_ICON_SIZE} />
         </button>
         <button
           className="qa-btn"
@@ -8215,7 +8216,7 @@ export function App({
           disabled={!hasDoc || !histState.canRedo}
           onClick={() => editor?.chain().focus().redo().run()}
         >
-          <IconRedo size={16} />
+          <IconRedo size={QUICK_ACCESS_ICON_SIZE} />
         </button>
         <label className={`autosave-toggle ${autoSave ? 'on' : ''}`} data-tip={t('appAutoSaveTip')}>
           <span className="autosave-knob" />

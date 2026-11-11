@@ -417,9 +417,22 @@ button {
   color: var(--text-primary);
 }
 
-.qa-btn svg {
+.qa-btn svg,
+.qa-btn img {
   display: block;
   margin: 0 auto;
+}
+
+.qa-btn-menu {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+}
+
+.qa-btn img,
+.rb-big-icon > img {
+  object-fit: contain;
 }
 
 .qa-btn:hover:not(:disabled) {
@@ -1079,7 +1092,8 @@ html.genoffice-popover-open .ribbon-tabs {
   flex-shrink: 0;
 }
 
-.rb-big-icon .rb-caret-svg {
+.rb-big-icon .rb-caret-svg,
+.qa-btn-menu .rb-caret-svg {
   display: block;
   margin-left: 3px;
   color: var(--text-dim);

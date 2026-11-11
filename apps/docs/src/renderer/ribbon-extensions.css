@@ -4,29 +4,6 @@
   flex-shrink: 0;
 }
 
-.ribbon-extension-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-[data-ribbon-extension] .rb-big-icon > img {
-  width: 26px;
-  height: 26px;
-  object-fit: contain;
-}
-
-.ribbon-extension-icon > img {
-  width: 16px;
-  height: 16px;
-  object-fit: contain;
-}
-
-.ribbon-extension-caret {
-  font-size: 9px;
-  margin-inline-start: 3px;
-}
-
 .rb-big[aria-pressed='true'] .rb-big-icon,
 .rb-big[aria-pressed='true']:hover .rb-big-icon,
 .qa-btn[aria-pressed='true'],
