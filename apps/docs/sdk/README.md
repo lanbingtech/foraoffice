@@ -181,6 +181,12 @@ array intentionally leaves the menu empty. No editor remount or DOM/CSS injectio
 is involved. Menu changes do not modify content, history, dirty state, automatic
 saving or keyboard shortcuts.
 
+The File button and menu items share themed keyboard focus indicators. Pointer
+activation keeps normal mouse styling, including after a native dialog returns.
+Keyboard navigation and focus return follow the
+[WAI-ARIA menu-button pattern](https://www.w3.org/WAI/ARIA/apg/patterns/menu-button/).
+These interactions are owned by the SDK and require no host CSS overrides.
+
 Obtain the token from `editor.documents.state()?.documentToken ?? null`.
 `editor.documents.subscribe(listener)` immediately reports current state and
 subsequently reports changes to identity, name, path, dirty or read-only state.

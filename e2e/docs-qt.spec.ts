@@ -24,6 +24,7 @@ declare global {
 }
 
 test('the packaged Qt host manually edits and shares the same live Word runtime with standard MCP', async () => {
+  test.setTimeout(180_000)
   if (
     process.env.FORAOFFICE_CODEX_WSL_BINARY ||
     process.env.FORAOFFICE_CODEX_NODE_ENTRY ||
@@ -160,6 +161,67 @@ test('the packaged Qt host manually edits and shares the same live Word runtime 
     expect(fileBox!.x - ribbonBox!.x).toBe(10)
     expect(saveBox!.x - fileBox!.x - fileBox!.width).toBe(8)
     await ribbonTabs.screenshot({ path: test.info().outputPath('qt-embedded-ribbon.png') })
+    const fileButton = page.getByRole('button', { name: 'File', exact: true })
+    const initialState = await page.evaluate(() => window.docsEditor!.documents.state())
+    for (const theme of ['light', 'dark']) {
+      await page.evaluate(
+        (theme) => document.documentElement.setAttribute('data-theme', theme),
+        theme,
+      )
+      for (const keyboard of [false, true]) {
+        await body.click()
+        if (keyboard) {
+          await fileButton.focus()
+          await page.keyboard.press('ArrowDown')
+        } else {
+          await fileButton.click()
+        }
+        const first = page.getByRole('menuitem').first()
+        await expect(first).toBeFocused()
+        await expect(first).toHaveCSS('outline-style', keyboard ? 'solid' : 'none')
+        const keyboardColor = await first.evaluate((item) => getComputedStyle(item).outlineColor)
+        if (keyboard) {
+          await page.keyboard.press('ArrowDown')
+          await page.keyboard.press('ArrowDown')
+          await expect(page.getByRole('menuitem', { name: /^Save As/ })).toBeFocused()
+        }
+        const invoked = keyboard
+          ? page.keyboard.press('Enter')
+          : page.getByRole('menuitem', { name: /^Save As/ }).click()
+        fileDialogOpen = true
+        await promisify(execFile)(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-STA',
+            '-File',
+            resolve(__dirname, 'native-file-dialog.ps1'),
+            '-TargetProcessId',
+            String(child.pid),
+            '-Cancel',
+            '-RequireDialog',
+          ],
+          { timeout: 20_000 },
+        )
+        await invoked
+        fileDialogOpen = false
+        await expect(fileButton).toBeFocused()
+        await expect(fileButton).toHaveCSS('outline-style', keyboard ? 'solid' : 'none')
+        if (keyboard) {
+          await expect(fileButton).toHaveCSS('outline-color', keyboardColor)
+          await expect(fileButton).toHaveCSS('outline-offset', '2px')
+        }
+        expect(await page.evaluate(() => window.docsEditor!.documents.state())).toEqual(
+          initialState,
+        )
+        await page.screenshot({
+          path: test
+            .info()
+            .outputPath(`qt-file-focus-${theme}-${keyboard ? 'keyboard' : 'pointer'}.png`),
+        })
+      }
+    }
     expect(await page.evaluate(() => 'desktop' in window)).toBe(false)
     await expect(page.locator('.ai-dock')).toHaveCount(0)
     await body.click()

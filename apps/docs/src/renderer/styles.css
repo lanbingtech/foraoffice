@@ -609,10 +609,30 @@ html.genoffice-popover-open .ribbon-tabs {
   position: relative;
 }
 
+.ribbon-tab-file:focus {
+  outline: none;
+}
+
+.ribbon-tab-file:focus-visible,
 .file-menu button:focus-visible {
-  background: var(--hover);
   outline: 2px solid var(--accent);
   outline-offset: -2px;
+}
+
+.ribbon-tab-file:focus-visible {
+  outline-offset: 2px;
+}
+
+.file-menu button:focus-visible {
+  background: var(--hover);
+}
+
+.file-tab-wrap[data-pointer-focus] button:focus {
+  outline: none;
+}
+
+.file-tab-wrap[data-pointer-focus] .file-menu button:focus:not(:hover) {
+  background: none;
 }
 
 .file-submenu {
