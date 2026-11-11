@@ -62,8 +62,9 @@ function Control({
   return (
     <button
       type="button"
-      className={buttonClass}
+      className={`${buttonClass}${item.pressed === true ? ' active' : ''}`}
       aria-label={item.label}
+      aria-pressed={item.pressed}
       data-tip={item.tooltip ?? item.label}
       disabled={unavailable}
       onClick={() => {

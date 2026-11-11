@@ -83,6 +83,51 @@ it('emits neutral actions with their location and captured document, without mut
   expect(state).toEqual(documentState())
 })
 
+it('accepts host-controlled pressed states in every ribbon location without changing them on activation', () => {
+  const ribbon = createDocsRibbon(documentState)
+  const input = configuration()
+  input.tabs![0].groups[0].items[0] = {
+    type: 'button',
+    id: 'inspect',
+    label: 'Inspect',
+    actionId: 'inspect',
+    pressed: false,
+  }
+  input.groups![0].items = [
+    { type: 'button', id: 'panel', label: 'Panel', actionId: 'panel', pressed: true },
+  ]
+  input.quickAccess![0] = {
+    type: 'button',
+    id: 'quick',
+    label: 'Quick',
+    actionId: 'quick',
+    pressed: true,
+  }
+  ribbon.set(input)
+  const rendered = ribbon.snapshot()!
+  ribbon.activate('inspect', rendered)
+  ribbon.activate('panel', rendered)
+  ribbon.activate('quick', rendered)
+  expect(ribbon.snapshot()).toEqual(input)
+  input.quickAccess![0] = { ...input.quickAccess![0], pressed: false }
+  ribbon.set(input)
+  expect(ribbon.snapshot()!.quickAccess![0]).toMatchObject({ pressed: false })
+  expect(() => ribbon.activate('quick', rendered)).toThrow(/stale/)
+  for (const pressed of ['true', null, 1])
+    expect(() =>
+      parseDocsRibbon({
+        documentToken: null,
+        quickAccess: [{ type: 'button', id: 'bad', label: 'Bad', actionId: 'bad', pressed }],
+      }),
+    ).toThrow()
+  expect(() =>
+    parseDocsRibbon({
+      documentToken: null,
+      quickAccess: [{ type: 'menu', id: 'menu', label: 'Menu', items: [], pressed: true }],
+    }),
+  ).toThrow()
+})
+
 it('clears contributions on document replacement and rejects stale updates and rendered actions', () => {
   let state = documentState()
   const ribbon = createDocsRibbon(() => state)

@@ -5,7 +5,7 @@ import {
   RibbonExtensionGroups,
   RibbonQuickAccess,
 } from '../src/renderer/components/RibbonExtensions'
-import type { DocsRibbonGroup } from '../src/renderer/sdk/ribbon'
+import type { DocsRibbonControl, DocsRibbonGroup } from '../src/renderer/sdk/ribbon'
 
 let root: Root | undefined
 beforeEach(() => vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true))
@@ -122,3 +122,55 @@ it('omits empty/hidden groups and controls and enforces disabled groups and quic
   expect(container.querySelector('button')!.disabled).toBe(true)
   expect(container.querySelector('button')!.getAttribute('aria-label')).toBe('Inspect')
 })
+
+it.each([false, true])(
+  'reflects host pressed state without replacing the button or toggling optimistically (quick=%s)',
+  (quick) => {
+    const container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    const invoke = vi.fn()
+    let item: DocsRibbonControl = {
+      type: 'button',
+      id: 'panel',
+      label: 'Panel',
+      actionId: 'panel',
+      pressed: false,
+    }
+    const render = () => {
+      const interaction = { openMenuId: null, onOpenMenu: vi.fn(), onInvoke: invoke }
+      root!.render(
+        quick
+          ? createElement(RibbonQuickAccess, { items: [item], ...interaction })
+          : createElement(RibbonExtensionGroups, {
+              groups: [{ id: 'tools', label: 'Tools', items: [item] }],
+              ...interaction,
+            }),
+      )
+    }
+    act(render)
+    const button = container.querySelector('button')!
+    expect(button.getAttribute('aria-pressed')).toBe('false')
+    act(() => button.click())
+    expect(invoke).toHaveBeenCalledWith('panel')
+    expect(button.getAttribute('aria-pressed')).toBe('false')
+    item = { ...item, pressed: true }
+    act(render)
+    expect(container.querySelector('button')).toBe(button)
+    expect(button.getAttribute('aria-pressed')).toBe('true')
+    expect(button.classList.contains('active')).toBe(true)
+    item = { ...item, enabled: false }
+    act(render)
+    expect(button.disabled).toBe(true)
+    expect(button.getAttribute('aria-pressed')).toBe('true')
+    act(() => button.click())
+    expect(invoke).toHaveBeenCalledTimes(1)
+    item = { ...item, pressed: false }
+    act(render)
+    expect(button.getAttribute('aria-pressed')).toBe('false')
+    expect(button.classList.contains('active')).toBe(false)
+    item = { type: 'button', id: 'panel', label: 'Panel', actionId: 'panel' }
+    act(render)
+    expect(button.hasAttribute('aria-pressed')).toBe(false)
+  },
+)

@@ -10,7 +10,10 @@ import { createRequire } from 'node:module'
 import type { PdfiumModule } from '../packages/pdf2docx/src'
 import type { DocsEditorHandle } from '../apps/docs/src/renderer/embedded'
 import type { DocsFileMenuAction } from '../apps/docs/src/renderer/sdk/file-menu'
-import type { DocsRibbonAction } from '../apps/docs/src/renderer/sdk/ribbon'
+import type {
+  DocsRibbonAction,
+  DocsRibbonConfiguration,
+} from '../apps/docs/src/renderer/sdk/ribbon'
 import { withPdfDocument } from '../packages/pdf2docx/src/extract/pdfium'
 import { renderPageByIndexPng } from '../packages/pdf2docx/src/extract'
 
@@ -19,6 +22,7 @@ const image =
 type FixtureWindow = Window & {
   editor: DocsEditorHandle
   sdkReady: boolean
+  setExtensionPanelOpen(open: boolean): void
   fixture: {
     saved: number[]
     fallback: string[]
@@ -303,8 +307,7 @@ test('a browser host owns pathless storage while native inspection and advisory 
     await expect(page.getByRole('menu', { name: 'File', exact: true })).toBeVisible()
     await page.evaluate((icon) => {
       const { editor, fixture } = window as unknown as FixtureWindow
-      editor.ui.ribbon.onAction((event) => fixture.ribbonActions.push(event))
-      editor.ui.ribbon.set({
+      const configuration: DocsRibbonConfiguration = {
         documentToken: editor.documents.state()!.documentToken,
         tabs: [
           {
@@ -320,6 +323,7 @@ test('a browser host owns pathless storage while native inspection and advisory 
                     id: 'inspect',
                     label: 'Inspect',
                     actionId: 'extension.inspect',
+                    pressed: false,
                   },
                 ],
               },
@@ -380,10 +384,22 @@ test('a browser host owns pathless storage while native inspection and advisory 
             id: 'quick-action',
             label: 'Quick action',
             actionId: 'extension.quick',
+            pressed: true,
             icon: `data:image/png;base64,${icon}`,
           },
         ],
+      }
+      const setPanelOpen = (open: boolean) => {
+        const button = configuration.tabs![0].groups[0].items[0]
+        if (button.type === 'button') button.pressed = open
+        editor.ui.ribbon.set(configuration)
+      }
+      ;(window as unknown as FixtureWindow).setExtensionPanelOpen = setPanelOpen
+      editor.ui.ribbon.onAction((event) => {
+        fixture.ribbonActions.push(event)
+        if (event.actionId === 'extension.inspect') setPanelOpen(true)
       })
+      editor.ui.ribbon.set(configuration)
     }, image)
     // Updating external controls must leave an unrelated native menu open.
     await expect(page.getByRole('menu', { name: 'File', exact: true })).toBeVisible()
@@ -391,8 +407,34 @@ test('a browser host owns pathless storage while native inspection and advisory 
     await expect(page.getByRole('button', { name: 'Home', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Home action', exact: true }).click()
     await page.getByRole('button', { name: 'Extension tools', exact: true }).click()
-    await page.getByRole('button', { name: 'Inspect', exact: true }).click()
-    await page.getByRole('button', { name: 'Quick action', exact: true }).click()
+    const panelButton = page.getByRole('button', { name: 'Inspect', exact: true })
+    await expect(panelButton).toHaveAttribute('aria-pressed', 'false')
+    const releasedColor = await panelButton
+      .locator('.rb-big-icon')
+      .evaluate((plate) => getComputedStyle(plate).backgroundColor)
+    await panelButton.click()
+    await expect(panelButton).toHaveAttribute('aria-pressed', 'true')
+    await expect(panelButton).toHaveClass(/active/)
+    expect(
+      await panelButton
+        .locator('.rb-big-icon')
+        .evaluate((plate) => getComputedStyle(plate).backgroundColor),
+    ).not.toBe(releasedColor)
+    await page.evaluate(() => (window as unknown as FixtureWindow).setExtensionPanelOpen(false))
+    await expect(panelButton).toHaveAttribute('aria-pressed', 'false')
+    await expect(panelButton).not.toHaveClass(/active/)
+    const quickButton = page.getByRole('button', { name: 'Quick action', exact: true })
+    const pressedQuickColor = await quickButton.evaluate(
+      (button) => getComputedStyle(button).backgroundColor,
+    )
+    await quickButton.click()
+    expect(await quickButton.evaluate((button) => getComputedStyle(button).backgroundColor)).toBe(
+      pressedQuickColor,
+    )
+    await expect(page.getByRole('button', { name: 'Quick action', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
     await page.getByRole('button', { name: 'View', exact: true }).click()
     const extensionTrigger = page.getByRole('button', { name: 'View actions', exact: true })
     await extensionTrigger.click()

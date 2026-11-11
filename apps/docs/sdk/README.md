@@ -208,6 +208,23 @@ Omitting an icon uses the first character of the label; quick-access controls
 retain their accessible label and tooltip. Host labels are supplied in the
 desired language; they are not added to the editor's translation dictionaries.
 
+Ordinary extension buttons can also supply `pressed?: boolean`. Omit it for a
+normal action button; `false` and `true` render a toggle button in its released
+and pressed states, with native selected styling and `aria-pressed`. This works
+in custom tabs, appended native-tab groups and quick access, including compact
+and light/dark modes. The host owns the state: after opening a panel, submit the
+complete configuration with `pressed: true`; after closing it from any entry
+point, submit `pressed: false` with the same control ID and current document
+token. Clicking only emits the existing action; it does not change `pressed`
+automatically. A failed/pending host action therefore does not falsely select
+the button. Keep its label stable between states. Menu buttons retain their
+existing `aria-expanded` behavior and do not accept `pressed`.
+
+```ts
+{ type: 'button', id: 'tools-panel', label: 'Tools panel',
+  actionId: 'extension.toggle-panel', pressed: panelOpen }
+```
+
 ```ts
 const stopActions = editor.ui.ribbon.onAction((event) => {
   // Dispatch against event.document/event.documentToken, not a later active file.

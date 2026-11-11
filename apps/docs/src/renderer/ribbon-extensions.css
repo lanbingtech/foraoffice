@@ -27,6 +27,13 @@
   margin-inline-start: 3px;
 }
 
+.rb-big[aria-pressed='true'] .rb-big-icon,
+.rb-big[aria-pressed='true']:hover .rb-big-icon,
+.qa-btn[aria-pressed='true'],
+.qa-btn[aria-pressed='true']:hover {
+  background: var(--active-bg);
+}
+
 [data-ribbon-extension] button:focus-visible,
 .ribbon-extension-menu > button:focus-visible,
 .qa-btn:focus-visible {

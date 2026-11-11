@@ -143,10 +143,17 @@ it('transports neutral ribbon contributions and action context through the same 
     await send('set', 'ui.ribbon.set', {
       documentToken: null,
       quickAccess: [
-        { type: 'button', id: 'inspect', label: 'Inspect', actionId: 'extension.inspect' },
+        {
+          type: 'button',
+          id: 'inspect',
+          label: 'Inspect',
+          actionId: 'extension.inspect',
+          pressed: true,
+        },
       ],
     }),
   ).toMatchObject({ result: { ok: true } })
+  expect(ribbon.snapshot()!.quickAccess![0]).toMatchObject({ pressed: true })
   ribbon.activate('inspect', ribbon.snapshot()!)
   expect(channel.request.mock.calls.map(([value]) => JSON.parse(value))).toContainEqual(
     expect.objectContaining({

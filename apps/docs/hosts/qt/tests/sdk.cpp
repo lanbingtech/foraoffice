@@ -87,7 +87,7 @@ private slots:
         const auto state = call(editor, "documents.state").value("result").toObject();
         const auto token = state.value("documentToken");
         const auto button = [](const QString& id, const QString& label) {
-            return QJsonObject{{"type", "button"}, {"id", id}, {"label", label}, {"actionId", "extension." + id}};
+            return QJsonObject{{"type", "button"}, {"id", id}, {"label", label}, {"actionId", "extension." + id}, {"pressed", true}};
         };
         const QJsonObject configuration{
             {"documentToken", token},
@@ -103,8 +103,10 @@ private slots:
             return script(editor, QStringLiteral("(async()=>{await new Promise(requestAnimationFrame);const b=[...document.querySelectorAll('button')].find(b=>b.getAttribute('aria-label')===%1||b.textContent.trim()===%1);if(!b)throw Error('Missing control');b.click();await new Promise(requestAnimationFrame);return true})()").arg(literal(label)));
         };
         QVERIFY(click("Quick action").value("ok").toBool());
+        QVERIFY(script(editor, "(()=>document.querySelector('button[aria-label=\"Quick action\"]').getAttribute('aria-pressed')==='true')()").value("result").toBool());
         QVERIFY(click("Extension tools").value("ok").toBool());
         QVERIFY(click("Inspect").value("ok").toBool());
+        QVERIFY(script(editor, "(()=>document.querySelector('button[aria-label=\"Inspect\"]').getAttribute('aria-pressed')==='true')()").value("result").toBool());
         QVERIFY(click("Home").value("ok").toBool());
         QVERIFY(click("More tools").value("ok").toBool());
         QVERIFY(click("Run action").value("ok").toBool());
@@ -112,6 +114,12 @@ private slots:
         QCOMPARE(actions.at(0)[0].toString(), QStringLiteral("extension.quick"));
         QCOMPARE(actions.at(1)[1].toJsonObject().value("tabId").toString(), QStringLiteral("extension.tools"));
         QCOMPARE(actions.at(2)[1].toJsonObject().value("documentToken"), token);
+        auto released = configuration;
+        auto quick = button("quick", "Quick action"); quick.insert("pressed", false);
+        released.insert("quickAccess", QJsonArray{quick});
+        QVERIFY(!call(editor, "ui.ribbon.set", released).contains("error"));
+        QVERIFY(script(editor, "(async()=>{await new Promise(requestAnimationFrame);return document.querySelector('button[aria-label=\"Quick action\"]').getAttribute('aria-pressed')==='false'})()").value("result").toBool());
+        QCOMPARE(actions.size(), 3);
         QCOMPARE(call(editor, "snapshot").value("result"), before);
         QCOMPARE(call(editor, "documents.state").value("result").toObject(), state);
         QVERIFY(call(editor, "documents.open").value("result").toBool());

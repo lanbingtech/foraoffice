@@ -35,7 +35,10 @@ export type DocsRibbonControl = Presentation & {
   /** Raster data URL; never loaded from a remote host or evaluated as markup. */
   icon?: string
   tooltip?: string
-} & ({ type: 'button'; actionId: string } | { type: 'menu'; items: DocsRibbonMenuItem[] })
+} & (
+    | { type: 'button'; actionId: string; pressed?: boolean }
+    | { type: 'menu'; items: DocsRibbonMenuItem[] }
+  )
 export interface DocsRibbonGroup extends Presentation {
   items: DocsRibbonControl[]
 }
@@ -87,7 +90,14 @@ const controlPresentation = {
   tooltip: z.string().max(1024).optional(),
 }
 const control = z.discriminatedUnion('type', [
-  z.object({ ...controlPresentation, type: z.literal('button'), actionId: id }).strict(),
+  z
+    .object({
+      ...controlPresentation,
+      type: z.literal('button'),
+      actionId: id,
+      pressed: z.boolean().optional(),
+    })
+    .strict(),
   z.object({ ...controlPresentation, type: z.literal('menu'), items: z.array(menuItem) }).strict(),
 ])
 const group = z.object({ ...presentation, items: z.array(control) }).strict()
