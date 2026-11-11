@@ -648,11 +648,14 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       .strict()
       .parse(params)
     await access.grantFile(grant.path, grant)
+    await resources!.grantFile(grant.path, grant)
     return { ok: true }
   }
   if (method === 'files.revoke') {
     if (!access || closing) throw new Error('File access is not initialized')
-    await access.revokeFile(z.object({ path: z.string() }).strict().parse(params).path)
+    const { path } = z.object({ path: z.string() }).strict().parse(params)
+    await access.revokeFile(path)
+    await resources!.revokeFile(path)
     return { ok: true }
   }
   if (method === 'document.hintPath') {
