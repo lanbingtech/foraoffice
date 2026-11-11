@@ -150,6 +150,16 @@ test('the packaged Qt host manually edits and shares the same live Word runtime 
     })
     const body = page.locator('.ProseMirror').first()
     await expect(body).toHaveText('Qt source text', { timeout: 45_000 })
+    const ribbonTabs = page.locator('.ribbon-tabs')
+    await expect(ribbonTabs).toHaveCSS('padding-left', '10px')
+    await expect(ribbonTabs).toHaveCSS('padding-right', '10px')
+    await expect(ribbonTabs).toHaveCSS('-webkit-app-region', 'no-drag')
+    const fileBox = await page.getByRole('button', { name: 'File', exact: true }).boundingBox()
+    const saveBox = await page.locator('.qa-btn').first().boundingBox()
+    const ribbonBox = await ribbonTabs.boundingBox()
+    expect(fileBox!.x - ribbonBox!.x).toBe(10)
+    expect(saveBox!.x - fileBox!.x - fileBox!.width).toBe(8)
+    await ribbonTabs.screenshot({ path: test.info().outputPath('qt-embedded-ribbon.png') })
     expect(await page.evaluate(() => 'desktop' in window)).toBe(false)
     await expect(page.locator('.ai-dock')).toHaveCount(0)
     await body.click()
@@ -285,7 +295,7 @@ test('the packaged Qt host manually edits and shares the same live Word runtime 
       ] as const) {
         const output = join(documents, `Qt exported.${format}`)
         await page.getByRole('button', { name: 'File', exact: true }).click()
-        await page.getByRole('button', { name: label, exact: true }).click()
+        await page.getByRole('menuitem', { name: label, exact: true }).click()
         fileDialogOpen = true
         await promisify(execFile)(
           'powershell.exe',

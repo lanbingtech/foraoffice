@@ -2322,7 +2322,7 @@ function RibbonInner({
       onMouseDown={keepDocumentFocus}
     >
       <div
-        className={`ribbon-tabs ${IN_TAB ? '' : IS_MAC ? 'ribbon-tabs-mac' : 'ribbon-tabs-win'}`}
+        className={`ribbon-tabs ${embedded ? 'ribbon-tabs-embedded' : IN_TAB ? '' : IS_MAC ? 'ribbon-tabs-mac' : 'ribbon-tabs-win'}`}
         onDoubleClick={collapse.onTabsDoubleClick}
       >
         {(!IS_MAC || embedded) && (

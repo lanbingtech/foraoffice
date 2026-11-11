@@ -475,6 +475,10 @@ html.genoffice-popover-open .ribbon-tabs {
   padding-right: 150px; /* room for windows caption buttons overlay */
 }
 
+.ribbon-tabs-embedded {
+  -webkit-app-region: no-drag;
+}
+
 .ribbon-file {
   max-width: 30%;
   font-size: 12px;

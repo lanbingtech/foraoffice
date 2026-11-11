@@ -51,6 +51,13 @@ Await both the mount promise and `editor.ready` before using `editor.runtime` or
 `editor.commands`. Call `editor.dispose()` when removing the view. One mounted
 host/editor is supported per renderer window.
 
+Mounted editors use the native ribbon's normal 10px side insets on macOS,
+Windows and Linux, with File immediately before Save. They do not reserve space
+for window buttons or turn the ribbon into a window drag region; the embedding
+host owns those decorations. This is automatic for every `mountDocsEditor`
+host kind and does not require URL parameters or CSS overrides. Standalone
+Electron windows retain their platform-specific window-button spacing.
+
 The optional `harness.submit(action)` callback forwards a user action to the
 embedding application's external conversation. It is not needed for ordinary
 tool execution. The application owns any conversation, model request or task
