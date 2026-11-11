@@ -172,6 +172,39 @@ test('a browser host owns pathless storage while native inspection and advisory 
         process.env.FORAOFFICE_BROWSER_CHANNEL ??
         (process.platform === 'win32' ? 'chrome' : undefined),
     })
+    for (const platform of ['MacIntel', 'Win32', 'Linux x86_64']) {
+      const layoutPage = await browser.newPage({ viewport: { width: 1360, height: 900 } })
+      try {
+        await layoutPage.addInitScript((platform) => {
+          Object.defineProperty(navigator, 'platform', { get: () => platform })
+        }, platform)
+        await layoutPage.goto(`http://127.0.0.1:${address.port}/`)
+        await layoutPage.waitForFunction(() => (window as unknown as FixtureWindow).sdkReady)
+        for (const theme of ['light', 'dark']) {
+          await layoutPage.evaluate(
+            (theme) => document.documentElement.setAttribute('data-theme', theme),
+            theme,
+          )
+          const tabs = layoutPage.locator('.ribbon-tabs')
+          await expect(tabs).toHaveCSS('padding-left', '10px')
+          await expect(tabs).toHaveCSS('padding-right', '10px')
+          await expect(tabs).toHaveCSS('-webkit-app-region', 'no-drag')
+          const file = await layoutPage
+            .getByRole('button', { name: 'File', exact: true })
+            .boundingBox()
+          const save = await layoutPage.locator('.qa-btn').first().boundingBox()
+          const row = await tabs.boundingBox()
+          expect(file!.x - row!.x, `${platform} ${theme} File inset`).toBe(10)
+          // Native File styling has a 6px margin plus the row's 2px gap.
+          expect(save!.x - file!.x - file!.width, `${platform} ${theme} File/Save gap`).toBe(8)
+          await layoutPage.screenshot({
+            path: test.info().outputPath(`embedded-${platform.split(' ')[0]}-${theme}.png`),
+          })
+        }
+      } finally {
+        await layoutPage.close()
+      }
+    }
     const page = await browser.newPage()
     page.on('pageerror', (error) => errors.push(error.message))
     await page.goto(`http://127.0.0.1:${address.port}/?empty`)
