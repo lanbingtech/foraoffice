@@ -103,8 +103,23 @@ Save As requires an explicit boolean `adopt`; `true` also requires the adopted
 `document` identity. `adopt: false` exports a copy while preserving the active object and dirty state.
 The editor retains its existing save queue and handling of edits during saves.
 `capabilities` can disable new/open/save/saveAs/export/create at their execution
-boundary. Managed automatic saving is off unless the host enables `autoSave`;
-the host can set its interval and whether blur triggers it. Hosted `readOnly`
+boundary. Managed automatic saving initially defaults to off. `autoSave.enabled`
+sets the initial editor-session switch; users can turn it on or off in the native
+toolbar. Set `autoSave.allowToggle: false` to explicitly lock the switch to the
+host's `enabled` value. Existing hosts that used `enabled: false` as an enforced
+ban should also set `allowToggle: false`. `intervalMs` and `onBlur` retain their
+existing timing behavior (30 seconds and on blur by default).
+
+The displayed switch, timer/blur saves and close checks use the same effective
+state. Automatic saving is off and the switch is disabled if the hosted document
+is read-only, saving is forbidden by `capabilities.save`, or no `saveDocument`
+handler exists. Turning the switch off stops future automatic saves; it does not
+cancel a save already sent to the host. Manual saves retain their own policy.
+Managed user choices last for the mounted editor, survive document changes, and
+reset to the host's initial configuration on remount. They neither mutate host
+configuration nor overwrite standalone/browser-local AutoSave preferences.
+
+Hosted `readOnly`
 restricts editing and saving while permitting inspection and view annotations.
 The host owns managed recovery; the local recovery timer does not persist a
 managed object behind its back. Independent file CLI tools retain their file

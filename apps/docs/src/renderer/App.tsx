@@ -23,6 +23,7 @@ import {
 } from 'react'
 import { createDocsFileMenu, type DocsEditorUi } from './sdk/file-menu'
 import { createDocsRibbon } from './sdk/ribbon'
+import { useDocsAutoSave } from './auto-save'
 import { hasActiveDocumentDraft } from './runtime/draft-landing'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, SetStateAction } from 'react'
 import { flushSync } from 'react-dom'
@@ -37,7 +38,6 @@ import {
   aiPanelInitiallyOpen,
   rememberAiPanelOpen,
   createZoomWheelClassifier,
-  useAutoSavePref,
   useAiSidebarEnabled,
 } from '@genoffice/ui/editor'
 import { commentAnchors, commentIdsAt, wordRangeAtCaret } from './editor/comments'
@@ -1212,10 +1212,11 @@ export function App({
     otherName: string
     entries: CompareEntry[]
   } | null>(null)
-  const [storedAutoSave, setAutoSave] = useAutoSavePref('aidocs.autoSave', getDocsHost())
-  const autoSave = getDocsDocumentHost()
-    ? getDocsDocumentHost()?.autoSave?.enabled === true
-    : storedAutoSave
+  const {
+    autoSave,
+    setAutoSave,
+    canToggle: canToggleAutoSave,
+  } = useDocsAutoSave(doc?.hosted?.readOnly)
   // tab closed but this renderer kept alive (shell freeze workaround): go inert
   const [tornDown, setTornDown] = useState(false)
   const [aiPreset, setAiPreset] = useState<{
@@ -6179,9 +6180,7 @@ export function App({
     const offCheck = getDocsHost().onCloseCheck?.(() => {
       getDocsHost().reportCloseCheck({
         dirty: !!doc && (anyDirtyRef.current || dirtyRef.current),
-        autoSave:
-          (getDocsDocumentHost()?.autoSave?.enabled ?? autoSave) &&
-          !!(doc?.filePath || doc?.hosted),
+        autoSave: autoSave && !!(doc?.filePath || doc?.hosted),
         filePath: doc?.filePath ?? null,
       })
     })
@@ -6209,13 +6208,7 @@ export function App({
   // autosave: every 30s and on window blur, silently persist pending changes
   useEffect(() => {
     const policy = getDocsDocumentHost()?.autoSave
-    if (
-      tornDown ||
-      !(policy?.enabled ?? autoSave) ||
-      !doc ||
-      (!doc.filePath && !doc.hosted) ||
-      doc.hosted?.readOnly
-    )
+    if (tornDown || !autoSave || !doc || (!doc.filePath && !doc.hosted) || doc.hosted?.readOnly)
       return
     const tick = () => {
       if (!isDocDirty(fileCtxRef.current)) return
@@ -8230,7 +8223,8 @@ export function App({
           <input
             type="checkbox"
             checked={autoSave}
-            disabled={!!getDocsDocumentHost()}
+            disabled={!canToggleAutoSave}
+            aria-label={t('appAutoSave')}
             onChange={(e) => setAutoSave(e.target.checked)}
           />
         </label>
@@ -8238,7 +8232,17 @@ export function App({
       </>
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hasDoc, hasUnsavedChanges, autoSave, editor, save, lang, histState],
+    [
+      hasDoc,
+      hasUnsavedChanges,
+      autoSave,
+      canToggleAutoSave,
+      setAutoSave,
+      editor,
+      save,
+      lang,
+      histState,
+    ],
   )
 
   // ---- Multiple Pages: the grid is a function of zoom × pane width ----

@@ -275,6 +275,9 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!ready.isEmpty() || !failed.isEmpty(), 90000);
         QVERIFY2(!ready.isEmpty(), failed.isEmpty() ? "Editor did not become ready" : qPrintable(failed.front()[0].toString()));
         QCOMPARE(call(editor, "documents.state").value("result").toObject().value("id").toString(), QStringLiteral("host:document"));
+        QVERIFY(script(editor, "(()=>{const input=document.querySelector('.autosave-toggle input');return !!input&&!input.disabled&&!input.checked})()").value("result").toBool());
+        QVERIFY(script(editor, "(async()=>{document.querySelector('.autosave-toggle').click();await new Promise(requestAnimationFrame);return document.querySelector('.autosave-toggle input').checked})()").value("result").toBool());
+        QVERIFY(script(editor, "(async()=>{document.querySelector('.autosave-toggle').click();await new Promise(requestAnimationFrame);return !document.querySelector('.autosave-toggle input').checked})()").value("result").toBool());
         const auto edit = script(editor, "(async()=>{const c=window.docsEditor.runtime.connect({id:'fixture'});c.context();"
             "try{return await c.execute({id:'insert',name:'insert_content',input:{html:'<p>same <b>sa</b>me same [invalid</p>'}})}finally{c.close()}})()");
         QVERIFY2(edit.value("ok").toBool(), qPrintable(QString::fromUtf8(QJsonDocument(edit).toJson())));

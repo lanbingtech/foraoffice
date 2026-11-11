@@ -28,6 +28,7 @@ type FixtureWindow = Window & {
     ribbonActions: DocsRibbonAction[]
     documentStates: boolean[]
     saveKinds: boolean[]
+    closeState?: { autoSave: boolean }
   }
 }
 
@@ -101,9 +102,12 @@ test('a browser host owns pathless storage while native inspection and advisory 
           getAiPanelPrefs:{side:'left',fontSize:'default',spellcheck:false,openInNewDocs:false,showAiSidebar:false},
           spellLanguages:{active:[],available:[]},docPasswordIntentRevision:0};
         window.fixture={saved:[],fallback:[],readonly:false,cancel:false,menuActions:[],ribbonActions:[],documentStates:[],saveKinds:[]};
+        const events=new Map();
+        window.checkClose=()=>{for(const listener of events.get('onCloseCheck')??[])listener();return window.fixture.closeState;};
         const services=new Proxy({}, {get(_,name){
           if(name==='then')return undefined;
-          if(name.startsWith('on'))return ()=>()=>{};
+          if(name.startsWith('on'))return listener=>{const entries=events.get(name)??new Set();entries.add(listener);events.set(name,entries);return ()=>entries.delete(listener);};
+          if(name==='reportCloseCheck')return state=>{window.fixture.closeState=state;};
           if(name==='confirmDocumentReplace')return async()=>true;
           if(name==='readImageSource')return async()=>({base64:'${image}',mime:'image/png',name:'fixture.png'});
           return async(...args)=>{if(name.startsWith('saveDocx'))window.fixture.fallback.push(name);return defaults[name];};
@@ -251,8 +255,30 @@ test('a browser host owns pathless storage while native inspection and advisory 
       await page.evaluate(() => (window as unknown as FixtureWindow).editor.documents.new()),
     ).toBe(true)
     const body = page.locator('.ProseMirror').first()
+    const autoSaveInput = page.locator('.autosave-toggle input')
+    await expect(autoSaveInput).toBeEnabled()
+    await expect(autoSaveInput).toBeChecked()
+    await page.locator('.autosave-toggle').click()
+    await expect(autoSaveInput).not.toBeChecked()
     await body.click()
     await page.keyboard.insertText('same same same [invalid')
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')))
+    await page.waitForTimeout(350)
+    expect(
+      await page.evaluate(() => (window as unknown as FixtureWindow).fixture.saveKinds),
+    ).toEqual([])
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { checkClose(): { autoSave: boolean } }).checkClose().autoSave,
+      ),
+    ).toBe(false)
+    await page.locator('.autosave-toggle').click()
+    await expect(autoSaveInput).toBeChecked()
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { checkClose(): { autoSave: boolean } }).checkClose().autoSave,
+      ),
+    ).toBe(true)
     const bodyInstance = await body.elementHandle()
     const beforeMenu = await page.evaluate(() => {
       const target = window as unknown as FixtureWindow
@@ -550,6 +576,13 @@ test('a browser host owns pathless storage while native inspection and advisory 
       }, beforeMenu.state.documentToken),
     ).toBe(true)
     await expect(body).toHaveAttribute('contenteditable', 'false')
+    await expect(autoSaveInput).toBeDisabled()
+    await expect(autoSaveInput).not.toBeChecked()
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { checkClose(): { autoSave: boolean } }).checkClose().autoSave,
+      ),
+    ).toBe(false)
     expect(
       await page.evaluate(
         () => (window as unknown as FixtureWindow).editor.documents.state()?.dirty,

@@ -26,7 +26,13 @@ export interface DocsHostedSaveOutcome extends DocsSaveOutcome {
 }
 export interface DocsDocumentHost {
   capabilities?: Partial<Record<DocsDocumentOperation, boolean>>
-  autoSave?: { enabled: boolean; intervalMs?: number; onBlur?: boolean }
+  autoSave?: {
+    /** Initial editor-session state; default false. Users can toggle it unless explicitly locked. */
+    enabled: boolean
+    allowToggle?: boolean
+    intervalMs?: number
+    onBlur?: boolean
+  }
   initialDocument?(): Promise<DocsHostedDocument | null>
   newDocument?(): Promise<DocsHostedDocument | null>
   openDocument?(id?: string): Promise<DocsHostedDocument | null>
