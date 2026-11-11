@@ -2,6 +2,7 @@ param(
   [Parameter(Mandatory = $true)][int]$TargetProcessId,
   [string]$TargetFilePath,
   [switch]$Cancel,
+  [switch]$RequireDialog,
   [switch]$SaveFile,
   [switch]$CloseWindow,
   [ValidateSet('Save', 'Discard', 'Cancel')][string]$Decision,
@@ -97,7 +98,7 @@ while ($null -eq $dialog -and [DateTime]::UtcNow -lt $deadline) {
   if ($null -eq $dialog) { Start-Sleep -Milliseconds 100 }
 }
 if ($null -eq $dialog) {
-  if ($Cancel) { exit 0 }
+  if ($Cancel -and -not $RequireDialog) { exit 0 }
   $windows = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
     [System.Windows.Automation.TreeScope]::Children, $owner)
   $description = @($windows | ForEach-Object { "class=$($_.Current.ClassName) name=$($_.Current.Name) offscreen=$($_.Current.IsOffscreen)" }) -join '; '

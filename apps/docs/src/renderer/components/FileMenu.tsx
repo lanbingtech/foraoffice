@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import type { DocsFileMenuCommand, DocsFileMenuItem } from '../sdk/file-menu'
 
@@ -30,6 +30,17 @@ export function FileMenu({
   const [path, setPath] = useState<string[]>([])
   const focusMenu = useRef<string | null>(null)
   const focusLast = useRef(false)
+  const [pointerFocus, setPointerFocus] = useState(false)
+  // Scripted focus can inherit an input's focus-visible state, and native
+  // dialogs can restore it. Keep pointer styling until actual keyboard input.
+  useEffect(() => {
+    if (!pointerFocus) return
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (!['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) setPointerFocus(false)
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => document.removeEventListener('keydown', onKeyDown, true)
+  }, [pointerFocus])
   const buttons = (menu: Element) =>
     [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].filter(
       (button) => button.closest('[role="menu"]') === menu,
@@ -193,7 +204,11 @@ export function FileMenu({
     }
   }
   return (
-    <div className="file-tab-wrap">
+    <div
+      className="file-tab-wrap"
+      data-pointer-focus={pointerFocus || undefined}
+      onPointerDownCapture={() => setPointerFocus(true)}
+    >
       <button
         ref={trigger}
         type="button"
