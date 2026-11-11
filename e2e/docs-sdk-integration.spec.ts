@@ -10,6 +10,7 @@ import { createRequire } from 'node:module'
 import type { PdfiumModule } from '../packages/pdf2docx/src'
 import type { DocsEditorHandle } from '../apps/docs/src/renderer/embedded'
 import type { DocsFileMenuAction } from '../apps/docs/src/renderer/sdk/file-menu'
+import type { DocsEditorAction } from '../apps/docs/src/shared/editor-action'
 import type {
   DocsRibbonAction,
   DocsRibbonConfiguration,
@@ -30,6 +31,7 @@ type FixtureWindow = Window & {
     cancel: boolean
     menuActions: DocsFileMenuAction[]
     ribbonActions: DocsRibbonAction[]
+    agentActions: DocsEditorAction[]
     documentStates: boolean[]
     saveKinds: boolean[]
     closeState?: { autoSave: boolean }
@@ -105,7 +107,7 @@ test('a browser host owns pathless storage while native inspection and advisory 
           getAuthorName:'SDK fixture',getAutoSaveDefault:{on:false,updatedAt:0},
           getAiPanelPrefs:{side:'left',fontSize:'default',spellcheck:false,openInNewDocs:false,showAiSidebar:false},
           spellLanguages:{active:[],available:[]},docPasswordIntentRevision:0};
-        window.fixture={saved:[],fallback:[],readonly:false,cancel:false,menuActions:[],ribbonActions:[],documentStates:[],saveKinds:[]};
+        window.fixture={saved:[],fallback:[],readonly:false,cancel:false,menuActions:[],ribbonActions:[],agentActions:[],documentStates:[],saveKinds:[]};
         const events=new Map();
         window.checkClose=()=>{for(const listener of events.get('onCloseCheck')??[])listener();return window.fixture.closeState;};
         const services=new Proxy({}, {get(_,name){
@@ -116,7 +118,7 @@ test('a browser host owns pathless storage while native inspection and advisory 
           if(name==='readImageSource')return async()=>({base64:'${image}',mime:'image/png',name:'fixture.png'});
           return async(...args)=>{if(name.startsWith('saveDocx'))window.fixture.fallback.push(name);return defaults[name];};
         }});
-        const host=createExternalDocsHost('browser',services);
+        const host=createExternalDocsHost('browser',services,{submit:async action=>{window.fixture.agentActions.push(action);}});
         const doc=()=>({id:'browser:object',name:'Browser.docx',readOnly:window.fixture.readonly,
           ...(window.fixture.saved.length?{data:Uint8Array.from(window.fixture.saved).buffer}:{})});
         host.documents={autoSave:{enabled:true,intervalMs:600000,onBlur:true},initialDocument:async()=>location.search.includes('empty')?null:doc(),
@@ -283,6 +285,72 @@ test('a browser host owns pathless storage while native inspection and advisory 
         () => (window as unknown as { checkClose(): { autoSave: boolean } }).checkClose().autoSave,
       ),
     ).toBe(true)
+    const instructionInput = page.locator('.ai-ask-pop-input')
+    const openSelectionPrompt = async () => {
+      await body.click()
+      await page.keyboard.press('Control+Home')
+      await page.keyboard.press('Control+Shift+ArrowRight')
+      await expect(page.locator('.ai-ask-trigger')).toBeVisible()
+      await page.locator('.ai-ask-trigger').click()
+      await expect(instructionInput).toBeFocused()
+      await expect(page.locator('.ai-ask-pop-sub')).toHaveText('same')
+      await expect(page.locator('.doc-inactive-selection')).toBeVisible()
+    }
+    for (const cancel of ['close', 'escape', 'outside']) {
+      await openSelectionPrompt()
+      await instructionInput.fill('Do not submit this')
+      if (cancel === 'close') await page.locator('.ai-ask-pop-close').click()
+      else if (cancel === 'escape') await page.keyboard.press('Escape')
+      else await page.getByRole('button', { name: 'View', exact: true }).click()
+      await expect(instructionInput).toHaveCount(0)
+      if (cancel !== 'outside') await expect(body).toBeFocused()
+      await expect(page.locator('.doc-inactive-selection')).toHaveCount(0)
+      expect(
+        await page.evaluate(() => (window as unknown as FixtureWindow).fixture.agentActions),
+      ).toEqual([])
+    }
+    await page.getByRole('button', { name: 'Home', exact: true }).click()
+    for (const confirm of ['button', 'enter']) {
+      await openSelectionPrompt()
+      await expect(page.locator('.ai-ask-confirm')).toBeDisabled()
+      await instructionInput.fill('Polish this passage without changing its meaning')
+      if (confirm === 'button') await page.locator('.ai-ask-confirm').click()
+      else await page.keyboard.press('Enter')
+      await expect(instructionInput).toHaveCount(0)
+      await expect
+        .poll(() =>
+          page.evaluate(() => (window as unknown as FixtureWindow).fixture.agentActions.length),
+        )
+        .toBe(confirm === 'button' ? 1 : 2)
+      const action = await page.evaluate(() =>
+        (window as unknown as FixtureWindow).fixture.agentActions.at(-1)!,
+      )
+      expect(action).toMatchObject({
+        kind: 'edit',
+        instruction: 'Polish this passage without changing its meaning',
+      })
+      await body.click()
+      await page.keyboard.press('Control+End')
+      await page.keyboard.press('Control+Shift+ArrowLeft')
+      const binding = await page.evaluate(async (action) => {
+        const { editor } = window as unknown as FixtureWindow
+        const bound = await editor.commands.handle({
+          requestId: crypto.randomUUID(),
+          callerId: 'external-agent',
+          bindingId: action.bindingId,
+          command: 'read_document',
+          payload: {},
+        })
+        const live = editor.runtime.connect({ id: 'live-selection' })
+        try {
+          return { bound, live: live.context() }
+        } finally {
+          live.close()
+        }
+      }, action)
+      expect(binding.bound).toMatchObject({ documentId: action.documentId, text: action.context })
+      expect((binding.bound as { text: string }).text).not.toBe(binding.live.text)
+    }
     const bodyInstance = await body.elementHandle()
     const beforeMenu = await page.evaluate(() => {
       const target = window as unknown as FixtureWindow
@@ -722,11 +790,37 @@ test('a browser host owns pathless storage while native inspection and advisory 
     expect(await archive.file('word/document.xml')!.async('string')).not.toContain(
       'sdk-range-decoration',
     )
+    await body.click()
+    await page.keyboard.press('Control+Home')
+    await page.keyboard.press('Control+Shift+ArrowRight')
+    await page.locator('.ai-ask-trigger').click()
+    await instructionInput.fill('An unfinished request belongs to this document')
     await page.evaluate(async () => {
       const target = window as unknown as FixtureWindow
       target.fixture.readonly = true
       await target.editor.documents.open()
     })
+    await expect(instructionInput).toHaveCount(0)
+    expect(
+      await page.evaluate(() => (window as unknown as FixtureWindow).fixture.agentActions.length),
+    ).toBe(2)
+    expect(
+      await page.evaluate(async () => {
+        const { editor, fixture } = window as unknown as FixtureWindow
+        try {
+          await editor.commands.handle({
+            requestId: crypto.randomUUID(),
+            callerId: 'external-agent',
+            bindingId: fixture.agentActions[0].bindingId,
+            command: 'read_document',
+            payload: {},
+          })
+          return false
+        } catch {
+          return true
+        }
+      }),
+    ).toBe(true)
     expect(
       await page.evaluate((token) => {
         const { editor } = window as unknown as FixtureWindow

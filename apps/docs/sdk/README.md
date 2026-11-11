@@ -63,6 +63,17 @@ embedding application's external conversation. It is not needed for ordinary
 tool execution. The application owns any conversation, model request or task
 orchestration.
 
+The selection's Ask AI entry always opens the editor's instruction popover,
+including when an external Harness is installed. Confirming with Send now or
+Enter calls the existing `harness.submit(action)` with `kind: 'edit'`, the user's
+`instruction`, `documentId`, `bindingId` and projected `context`. The binding
+captures the document generation and selection at submission; later cursor
+movement does not retarget it. The editor owns the input, selection highlight
+and cancel/focus behavior; the host owns execution. Closing, Escape and outside
+clicks cancel without submitting or queuing an external task. Replacing the
+document closes an unfinished instruction. Native Agent mode retains its local
+edit queue. No host-specific callback or configuration is required.
+
 ## Invoke the live document
 
 Direct consumers use `editor.runtime.connect({ id })`, call `context()`, then

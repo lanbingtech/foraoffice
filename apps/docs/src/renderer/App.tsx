@@ -8820,9 +8820,8 @@ export function App({
             )}
             {doc && (
               <AiAskPopover
-                onOpenHarness={
-                  !nativeAgentEnabled ? () => requestAgentAction('ask', '') : undefined
-                }
+                key={aiPanelKey}
+                queueEnabled={nativeAgentEnabled}
                 editor={editor}
                 queueFull={editQueue.length >= EDIT_QUEUE_MAX}
                 getItem={getQueueItem}
