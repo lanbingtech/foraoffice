@@ -61,6 +61,67 @@ QString literal(const QString& value) {
 class SdkTests final : public QObject {
     Q_OBJECT
 private slots:
+    void ribbonContributionsUseThePublicSdkAndNativeActionSignal() {
+        QTemporaryDir workspace;
+        foraoffice::DocsQtOptions options;
+        options.packageRoot = qEnvironmentVariable("FORAOFFICE_QT_TEST_PACKAGE");
+        options.nodeExecutable = qEnvironmentVariable("FORAOFFICE_QT_TEST_NODE");
+        options.stateDirectory = workspace.filePath(".state");
+        options.defaultSaveDirectory = workspace.path();
+        options.readRoots = options.writeRoots = {workspace.path()};
+        options.language = "en";
+        options.documentHost = {{"enabled", true}, {"autoSave", QJsonObject{{"enabled", false}}}};
+        foraoffice::DocsQtEditor editor(options);
+        editor.resize(1100, 850);
+        for (const auto& method : {QStringLiteral("initialDocument"), QStringLiteral("openDocument")})
+            editor.setServiceHandler(method, [](const QJsonArray&, foraoffice::DocsQtEditor::Completion done) {
+                done({{"result", QJsonObject{{"id", "host:ribbon"}, {"name", "Document.docx"}}}});
+            });
+        editor.setServiceHandler("confirmDocumentReplace", [](const QJsonArray&, foraoffice::DocsQtEditor::Completion done) { done({{"result", true}}); });
+        editor.setServiceHandler("recentDocuments", [](const QJsonArray&, foraoffice::DocsQtEditor::Completion done) { done({{"result", QJsonArray{}}}); });
+        QSignalSpy ready(&editor, &foraoffice::DocsQtEditor::ready);
+        QSignalSpy actions(&editor, &foraoffice::DocsQtEditor::ribbonActionTriggered);
+        editor.show();
+        QTRY_COMPARE_WITH_TIMEOUT(ready.size(), 1, 30000);
+        const auto before = call(editor, "snapshot").value("result");
+        const auto state = call(editor, "documents.state").value("result").toObject();
+        const auto token = state.value("documentToken");
+        const auto button = [](const QString& id, const QString& label) {
+            return QJsonObject{{"type", "button"}, {"id", id}, {"label", label}, {"actionId", "extension." + id}};
+        };
+        const QJsonObject configuration{
+            {"documentToken", token},
+            {"tabs", QJsonArray{QJsonObject{{"id", "extension.tools"}, {"label", "Extension tools"}, {"groups", QJsonArray{
+                QJsonObject{{"id", "tools"}, {"label", "Tools"}, {"items", QJsonArray{button("inspect", "Inspect")}}}}}}}},
+            {"groups", QJsonArray{QJsonObject{{"tabId", "home"}, {"id", "home-tools"}, {"label", "Home tools"}, {"items", QJsonArray{
+                QJsonObject{{"type", "menu"}, {"id", "more"}, {"label", "More tools"}, {"items", QJsonArray{
+                    QJsonObject{{"type", "action"}, {"id", "run"}, {"label", "Run action"}, {"actionId", "extension.run"}}}}}}}}}},
+            {"quickAccess", QJsonArray{button("quick", "Quick action")}}
+        };
+        QVERIFY(!call(editor, "ui.ribbon.set", configuration).contains("error"));
+        const auto click = [&](const QString& label) {
+            return script(editor, QStringLiteral("(async()=>{await new Promise(requestAnimationFrame);const b=[...document.querySelectorAll('button')].find(b=>b.getAttribute('aria-label')===%1||b.textContent.trim()===%1);if(!b)throw Error('Missing control');b.click();await new Promise(requestAnimationFrame);return true})()").arg(literal(label)));
+        };
+        QVERIFY(click("Quick action").value("ok").toBool());
+        QVERIFY(click("Extension tools").value("ok").toBool());
+        QVERIFY(click("Inspect").value("ok").toBool());
+        QVERIFY(click("Home").value("ok").toBool());
+        QVERIFY(click("More tools").value("ok").toBool());
+        QVERIFY(click("Run action").value("ok").toBool());
+        QTRY_COMPARE_WITH_TIMEOUT(actions.size(), 3, 10000);
+        QCOMPARE(actions.at(0)[0].toString(), QStringLiteral("extension.quick"));
+        QCOMPARE(actions.at(1)[1].toJsonObject().value("tabId").toString(), QStringLiteral("extension.tools"));
+        QCOMPARE(actions.at(2)[1].toJsonObject().value("documentToken"), token);
+        QCOMPARE(call(editor, "snapshot").value("result"), before);
+        QCOMPARE(call(editor, "documents.state").value("result").toObject(), state);
+        QVERIFY(call(editor, "documents.open").value("result").toBool());
+        QVERIFY(call(editor, "ui.ribbon.set", configuration).contains("error"));
+        QVERIFY(script(editor, "(()=>!document.querySelector('[data-ribbon-tab]')&&![...document.querySelectorAll('.qa-btn')].some(b=>b.getAttribute('aria-label')==='Quick action'))()").value("result").toBool());
+        QVERIFY(!call(editor, "ui.ribbon.reset").contains("error"));
+        QVERIFY(script(editor, "(()=>{window.docsEditor.dispose();return true})()").value("ok").toBool());
+        QVERIFY(call(editor, "ui.ribbon.reset").contains("error"));
+        editor.close();
+    }
     void fileMenuUsesPublicSdkAndExistingManagedServices() {
         QTemporaryDir workspace;
         foraoffice::DocsQtOptions options;

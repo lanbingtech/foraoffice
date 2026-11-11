@@ -1,0 +1,35 @@
+.ribbon-extension-menu {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.ribbon-extension-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+[data-ribbon-extension] .rb-big-icon > img {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+}
+
+.ribbon-extension-icon > img {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+}
+
+.ribbon-extension-caret {
+  font-size: 9px;
+  margin-inline-start: 3px;
+}
+
+[data-ribbon-extension] button:focus-visible,
+.ribbon-extension-menu > button:focus-visible,
+.qa-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}

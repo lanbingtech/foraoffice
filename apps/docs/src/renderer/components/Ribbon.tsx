@@ -1,5 +1,7 @@
 import { getDocsHost } from '../host/docs-host'
 import { FileMenu } from './FileMenu'
+import { RibbonExtensionGroups, RibbonQuickAccess, ribbonItemVisible } from './RibbonExtensions'
+import type { DocsRibbonConfiguration } from '../sdk/ribbon'
 import type { DocsFileMenuCommand, DocsFileMenuItem } from '../sdk/file-menu'
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -261,6 +263,8 @@ interface RibbonProps {
   quickActions?: React.ReactNode
   /** Right side of the tab row (file name, etc.) */
   trailingActions?: React.ReactNode
+  ribbonConfiguration?: DocsRibbonConfiguration | null
+  onRibbonAction?: (id: string, rendered: DocsRibbonConfiguration) => void
   editor: Editor
   /** shallow-stable snapshot of every editor-state read shown in the ribbon (memo invalidation key) */
   formatState: RibbonFormatState
@@ -819,6 +823,8 @@ function RibbonInner({
   actionsRef,
   quickActions,
   trailingActions,
+  ribbonConfiguration,
+  onRibbonAction,
   editor,
   formatState: fs,
   hasDoc,
@@ -995,6 +1001,37 @@ function RibbonInner({
   // a press inside a combo wrap (caret, list) blurs the input; that blur must not close the list
   const comboPressRef = useRef(false)
   const lastRegularTab = useRef<(typeof TABS)[number]>('home')
+  const extensionTabs = useMemo(
+    () =>
+      (ribbonConfiguration?.tabs ?? []).filter(
+        (candidate) =>
+          candidate.visible !== false &&
+          candidate.groups.some(
+            (group) => group.visible !== false && group.items.some(ribbonItemVisible),
+          ),
+      ),
+    [ribbonConfiguration],
+  )
+  const extensionTab = extensionTabs.find((candidate) => `extension:${candidate.id}` === tab)
+  useEffect(() => {
+    setDropdown((current) => (current?.startsWith('extension-menu:') ? null : current))
+    const valid = (value: string) =>
+      !value.startsWith('extension:') ||
+      extensionTabs.some(
+        (candidate) => `extension:${candidate.id}` === value && candidate.enabled !== false,
+      )
+    setTab((current) => (valid(current) ? current : 'home'))
+    if (!valid(lastRegularTab.current)) lastRegularTab.current = 'home'
+  }, [ribbonConfiguration, extensionTabs])
+  const extensionInteraction = {
+    openMenuId: dropdown?.startsWith('extension-menu:')
+      ? dropdown.slice('extension-menu:'.length)
+      : null,
+    onOpenMenu: (id: string | null) => setDropdown(id === null ? null : `extension-menu:${id}`),
+    onInvoke: (id: string) => {
+      if (ribbonConfiguration) onRibbonAction?.(id, ribbonConfiguration)
+    },
+  }
   const wasInTable = useRef(false)
   const wasInImage = useRef(false)
   const wasInHf = useRef(false)
@@ -2407,6 +2444,10 @@ function RibbonInner({
           />
         )}
         {quickActions}
+        <RibbonQuickAccess
+          items={ribbonConfiguration?.quickAccess ?? []}
+          {...extensionInteraction}
+        />
         {TABS.filter((tabName) => tabName !== 'file').map((tabName) => (
           <button
             key={tabName}
@@ -2420,6 +2461,24 @@ function RibbonInner({
             }}
           >
             {t(TAB_LABEL_KEYS[tabName])}
+          </button>
+        ))}
+        {extensionTabs.map((candidate) => (
+          <button
+            type="button"
+            key={candidate.id}
+            data-ribbon-tab={candidate.id}
+            className={`ribbon-tab ${collapse.tabClass(tab === `extension:${candidate.id}`)}`}
+            data-tip={collapse.tabTip(tab === `extension:${candidate.id}`)}
+            disabled={candidate.enabled === false}
+            onClick={() => {
+              collapse.onTabPress(tab === `extension:${candidate.id}`)
+              lastRegularTab.current = `extension:${candidate.id}`
+              setTab(`extension:${candidate.id}`)
+              setDropdown(null)
+            }}
+          >
+            {candidate.label}
           </button>
         ))}
         {/* contextual tabs render as plain tabs appended to the row, like current Word */}
@@ -2569,7 +2628,13 @@ function RibbonInner({
       </div>
 
       <div className="ribbon-body" data-ribbon-body="">
-        {tab === 'headerFooter' && hfEditing ? (
+        {extensionTab ? (
+          <RibbonExtensionGroups
+            groups={extensionTab.groups}
+            disabled={extensionTab.enabled === false}
+            {...extensionInteraction}
+          />
+        ) : tab === 'headerFooter' && hfEditing ? (
           <HeaderFooterTab
             info={hfEditing}
             dropdown={dropdown}
@@ -4746,6 +4811,10 @@ function RibbonInner({
             onPagePreview={onPagePreview}
           />
         )}
+        <RibbonExtensionGroups
+          groups={(ribbonConfiguration?.groups ?? []).filter((group) => group.tabId === tab)}
+          {...extensionInteraction}
+        />
       </div>
 
       {pictureDialog === 'cutout' && imageDataUrl && (

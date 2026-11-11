@@ -22,6 +22,7 @@ import {
   useSyncExternalStore,
 } from 'react'
 import { createDocsFileMenu, type DocsEditorUi } from './sdk/file-menu'
+import { createDocsRibbon } from './sdk/ribbon'
 import { hasActiveDocumentDraft } from './runtime/draft-landing'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, SetStateAction } from 'react'
 import { flushSync } from 'react-dom'
@@ -7781,19 +7782,28 @@ export function App({
     [],
   )
   const fileMenuItems = useSyncExternalStore(docsFileMenu.subscribe, docsFileMenu.snapshot)
+  const docsRibbon = useMemo(() => createDocsRibbon(docsFileMenu.documentState), [docsFileMenu])
+  const ribbonConfiguration = useSyncExternalStore(docsRibbon.subscribe, docsRibbon.snapshot)
   useLayoutEffect(() => {
     docsFileMenu.refresh()
+    docsRibbon.refresh()
   })
   useEffect(() => () => docsFileMenu.dispose(), [docsFileMenu])
+  useEffect(() => () => docsRibbon.dispose(), [docsRibbon])
   const docsUi = useMemo<DocsEditorUi>(
     () => ({
+      ribbon: {
+        set: docsRibbon.set,
+        reset: docsRibbon.reset,
+        onAction: docsRibbon.onAction,
+      },
       fileMenu: {
         set: docsFileMenu.set,
         reset: docsFileMenu.reset,
         onAction: docsFileMenu.onAction,
       },
     }),
-    [docsFileMenu],
+    [docsFileMenu, docsRibbon],
   )
   const docsDocuments = useMemo<DocsDocumentCommands>(
     () => ({
@@ -8625,6 +8635,14 @@ export function App({
       )}
       <Ribbon
         embedded={embedded}
+        ribbonConfiguration={ribbonConfiguration}
+        onRibbonAction={(id, rendered) => {
+          try {
+            docsRibbon.activate(id, rendered)
+          } catch (error) {
+            setStatus(String(error))
+          }
+        }}
         fileMenuItems={fileMenuItems}
         fileMenuToken={docsFileMenu.currentToken()}
         canExecuteFileCommand={docsFileMenu.isEnabled}

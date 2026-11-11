@@ -10,6 +10,7 @@ import { createRequire } from 'node:module'
 import type { PdfiumModule } from '../packages/pdf2docx/src'
 import type { DocsEditorHandle } from '../apps/docs/src/renderer/embedded'
 import type { DocsFileMenuAction } from '../apps/docs/src/renderer/sdk/file-menu'
+import type { DocsRibbonAction } from '../apps/docs/src/renderer/sdk/ribbon'
 import { withPdfDocument } from '../packages/pdf2docx/src/extract/pdfium'
 import { renderPageByIndexPng } from '../packages/pdf2docx/src/extract'
 
@@ -24,6 +25,7 @@ type FixtureWindow = Window & {
     readonly: boolean
     cancel: boolean
     menuActions: DocsFileMenuAction[]
+    ribbonActions: DocsRibbonAction[]
     documentStates: boolean[]
     saveKinds: boolean[]
   }
@@ -98,7 +100,7 @@ test('a browser host owns pathless storage while native inspection and advisory 
           getAuthorName:'SDK fixture',getAutoSaveDefault:{on:false,updatedAt:0},
           getAiPanelPrefs:{side:'left',fontSize:'default',spellcheck:false,openInNewDocs:false,showAiSidebar:false},
           spellLanguages:{active:[],available:[]},docPasswordIntentRevision:0};
-        window.fixture={saved:[],fallback:[],readonly:false,cancel:false,menuActions:[],documentStates:[],saveKinds:[]};
+        window.fixture={saved:[],fallback:[],readonly:false,cancel:false,menuActions:[],ribbonActions:[],documentStates:[],saveKinds:[]};
         const services=new Proxy({}, {get(_,name){
           if(name==='then')return undefined;
           if(name.startsWith('on'))return ()=>()=>{};
@@ -271,6 +273,162 @@ test('a browser host owns pathless storage while native inspection and advisory 
       })
       return { snapshot: editor.inspection.snapshot(), state }
     })
+    await page.getByRole('button', { name: 'File', exact: true }).click()
+    await expect(page.getByRole('menu', { name: 'File', exact: true })).toBeVisible()
+    await page.evaluate((icon) => {
+      const { editor, fixture } = window as unknown as FixtureWindow
+      editor.ui.ribbon.onAction((event) => fixture.ribbonActions.push(event))
+      editor.ui.ribbon.set({
+        documentToken: editor.documents.state()!.documentToken,
+        tabs: [
+          {
+            id: 'extension.tools',
+            label: 'Extension tools',
+            groups: [
+              {
+                id: 'extension-group',
+                label: 'Extension',
+                items: [
+                  {
+                    type: 'button',
+                    id: 'inspect',
+                    label: 'Inspect',
+                    actionId: 'extension.inspect',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        groups: [
+          {
+            tabId: 'home',
+            id: 'extension-home',
+            label: 'Home tools',
+            items: [
+              {
+                type: 'button',
+                id: 'home-action',
+                label: 'Home action',
+                actionId: 'extension.home',
+              },
+            ],
+          },
+          {
+            tabId: 'view',
+            id: 'extension-view',
+            label: 'View tools',
+            items: [
+              {
+                type: 'menu',
+                id: 'view-menu',
+                label: 'View actions',
+                items: [
+                  {
+                    type: 'action',
+                    id: 'view-action',
+                    label: 'View action',
+                    actionId: 'extension.view',
+                  },
+                  {
+                    type: 'submenu',
+                    id: 'view-nested',
+                    label: 'Nested actions',
+                    items: [
+                      {
+                        type: 'action',
+                        id: 'nested-action',
+                        label: 'Nested action',
+                        actionId: 'extension.nested',
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        quickAccess: [
+          {
+            type: 'button',
+            id: 'quick-action',
+            label: 'Quick action',
+            actionId: 'extension.quick',
+            icon: `data:image/png;base64,${icon}`,
+          },
+        ],
+      })
+    }, image)
+    // Updating external controls must leave an unrelated native menu open.
+    await expect(page.getByRole('menu', { name: 'File', exact: true })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('button', { name: 'Home', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Home action', exact: true }).click()
+    await page.getByRole('button', { name: 'Extension tools', exact: true }).click()
+    await page.getByRole('button', { name: 'Inspect', exact: true }).click()
+    await page.getByRole('button', { name: 'Quick action', exact: true }).click()
+    await page.getByRole('button', { name: 'View', exact: true }).click()
+    const extensionTrigger = page.getByRole('button', { name: 'View actions', exact: true })
+    await extensionTrigger.click()
+    const extensionPopup = page.getByRole('menu', { name: 'View actions', exact: true })
+    await expect(extensionPopup).toBeVisible()
+    const menuColors: string[] = []
+    for (const theme of ['light', 'dark']) {
+      await page.evaluate(
+        (theme) => document.documentElement.setAttribute('data-theme', theme),
+        theme,
+      )
+      menuColors.push(
+        await extensionPopup.evaluate((menu) => getComputedStyle(menu).backgroundColor),
+      )
+      await page.screenshot({ path: test.info().outputPath(`ribbon-${theme}.png`) })
+    }
+    expect(menuColors[0]).not.toBe(menuColors[1])
+    await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'))
+    await page.keyboard.press('Control+Alt+k')
+    await expect(page.locator('.ribbon')).toHaveClass(/ribbon-compact/)
+    await expect(extensionTrigger).toBeVisible()
+    await expect(extensionPopup).toBeVisible()
+    await page.keyboard.press('Control+Alt+k')
+    const band = await page.locator('.ribbon-body').boundingBox()
+    const popup = await extensionPopup.boundingBox()
+    expect(popup!.y).toBeGreaterThanOrEqual(band!.y)
+    await page.getByRole('menuitem', { name: 'View action', exact: true }).click()
+    await extensionTrigger.focus()
+    await page.keyboard.press('ArrowDown')
+    await page.keyboard.press('ArrowDown')
+    await page.keyboard.press('ArrowRight')
+    await expect(page.getByRole('menuitem', { name: 'Nested action', exact: true })).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect(extensionTrigger).toBeFocused()
+    expect(
+      await page.evaluate(() =>
+        (window as unknown as FixtureWindow).fixture.ribbonActions.map((event) => [
+          event.actionId,
+          event.tabId,
+          event.location,
+        ]),
+      ),
+    ).toEqual([
+      ['extension.home', 'home', 'tab'],
+      ['extension.inspect', 'extension.tools', 'tab'],
+      ['extension.quick', null, 'quickAccess'],
+      ['extension.view', 'view', 'tab'],
+      ['extension.nested', 'view', 'tab'],
+    ])
+    expect(
+      await page.evaluate(() => {
+        const { editor } = window as unknown as FixtureWindow
+        return { snapshot: editor.inspection.snapshot(), state: editor.documents.state() }
+      }),
+    ).toEqual(beforeMenu)
+    // Removing the selected custom tab returns to Home without remounting the document.
+    await page.getByRole('button', { name: 'Extension tools', exact: true }).click()
+    await page.evaluate(() => (window as unknown as FixtureWindow).editor.ui.ribbon.reset())
+    await expect(page.getByRole('button', { name: 'Extension tools', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Home', exact: true })).toHaveClass(/active/)
+    await expect(page.getByRole('button', { name: 'Quick action', exact: true })).toHaveCount(0)
+
     const fileButton = page.getByRole('button', { name: 'File', exact: true })
     const fileBox = await fileButton.boundingBox()
     const saveBox = await page.locator('.qa-btn').first().boundingBox()

@@ -172,6 +172,112 @@ Native calls use JSON-RPC result/error replies and have a 30-second reply timeou
 Trusted Qt hosts can `grantFile(path, read, write, completion)` and `revokeFile`;
 those permission-changing calls are not renderer/Agent services.
 
+## Native ribbon contributions
+
+`editor.ui.ribbon` exposes the editor's own ribbon to every embedding host.
+It accepts declarative data and emits action IDs; it does not contain host
+business operations, execute scripts, or require an Agent/model service.
+
+- `tabs` appends new tabs, each containing labeled groups and controls.
+- `groups` appends groups to a native tab identified by `tabId`.
+- `quickAccess` appends controls after the native quick-access buttons.
+
+All three locations support `type: 'button'` with an `actionId`, and
+`type: 'menu'` with menu `items`. Menu nodes use `action`, `group` or `submenu`;
+actions have an `actionId`, while groups/submenus contain `items`. Every node
+has a unique `id`, a plain-text `label`, and optional `visible`/`enabled`
+booleans. Controls also accept `tooltip` and an optional PNG/JPEG/GIF/WebP
+base64 data URL `icon` (up to 131072 characters). Remote URLs, SVG/HTML, custom
+CSS, executable callbacks in configuration, and unknown properties are rejected.
+Omitting an icon uses the first character of the label; quick-access controls
+retain their accessible label and tooltip. Host labels are supplied in the
+desired language; they are not added to the editor's translation dictionaries.
+
+```ts
+const stopActions = editor.ui.ribbon.onAction((event) => {
+  // Dispatch against event.document/event.documentToken, not a later active file.
+  application.handleAction(event)
+})
+const stopState = editor.documents.subscribe((state) => {
+  editor.ui.ribbon.set({
+    documentToken: state?.documentToken ?? null,
+    tabs: [
+      {
+        id: 'extension.tools',
+        label: 'Tools',
+        groups: [
+          {
+            id: 'tools',
+            label: 'Tools',
+            items: [
+              { type: 'button', id: 'inspect', label: 'Inspect', actionId: 'extension.inspect' },
+            ],
+          },
+        ],
+      },
+    ],
+    groups: [
+      {
+        tabId: 'view',
+        id: 'view-tools',
+        label: 'Tools',
+        items: [
+          {
+            type: 'menu',
+            id: 'actions',
+            label: 'Actions',
+            items: [
+              { type: 'action', id: 'refresh', label: 'Refresh', actionId: 'extension.refresh' },
+            ],
+          },
+        ],
+      },
+    ],
+    quickAccess: [
+      { type: 'button', id: 'quick-inspect', label: 'Inspect', actionId: 'extension.inspect' },
+    ],
+  })
+})
+// On teardown: stopState(); stopActions(); editor.dispose().
+```
+
+The exported `DOCS_RIBBON_BUILTIN_TABS` lists stable, language-independent native
+tab IDs: `home`, `insert`, `draw`, `design`, `layout`, `references`, `mailings`,
+`review`, `view`, `tableDesign`, `tableLayout`, `pictureFormat`, `shapeFormat`
+and `headerFooter`. Contextual tabs retain their native visibility conditions.
+`file` is a menu, not a contribution target; use `ui.fileMenu` for it. Custom
+tabs cannot use reserved native IDs. Native controls and their ordering remain
+intact. Invisible or empty custom tabs/groups/menus are omitted. Removing,
+hiding or disabling the selected custom tab returns to Home. Controls inherit
+disabled ancestors. Buttons use native theme, density, tooltip and focus styles;
+menus share native keyboard navigation, nested-menu behavior and dismissal.
+
+`set(configuration)` atomically replaces only the extension snapshot;
+`reset()` removes all ribbon contributions. Both preserve document content,
+history, dirty state, save behavior and native shortcuts. Each snapshot has at
+most 512 nodes and eight levels of nesting; IDs/action IDs are 1–128 characters
+and labels 1–256. Updates use the same document-session token rules as the file
+menu: switching/reopening documents clears contributions and rejects stale
+updates/actions. Use `null` with no active document. Action subscriptions survive
+document replacement and return an unsubscribe function; disposal releases them.
+
+Actions supply `{ itemId, actionId, location, tabId, groupId, documentToken,
+document }`, where `location` is `tab` or `quickAccess`; quick-access actions have
+null tab/group IDs. They report document identity/state, not a captured text
+selection. Browser actions that need the current selection can synchronously
+capture `editor.runtime.capture()` and use that scope for subsequent operations.
+Host operations and SDK document commands keep their existing authorization and
+read-only policies; showing a button does not grant editing permission.
+
+Qt uses `callSdk("ui.ribbon.set", configuration, completion)` and
+`callSdk("ui.ribbon.reset", {}, completion)` with the same JSON shape. Subscribe
+to `ribbonActionTriggered(actionId, context)` for actions and
+`documentStateChanged(state)` to refresh contributions. This uses the existing
+QWebChannel JSON-RPC path; no injected JavaScript or native menu bar is needed.
+
+This SDK currently embeds Docs. Other ForaOffice editors do not yet expose this
+contract; their engine-specific objects are not part of the public interface.
+
 ## Host file menu
 
 `editor.ui.fileMenu.set({ documentToken, items })` atomically replaces the internal

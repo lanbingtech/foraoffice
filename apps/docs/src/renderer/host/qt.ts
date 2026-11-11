@@ -419,6 +419,9 @@ export function createQtDocsHost(channel: DocsQtChannel) {
       notify('editor.ready', {})
       if (endpoint.ui)
         editorDisposers.push(
+          endpoint.ui.ribbon.onAction((event) => {
+            if (!disposed) notify('sdk.ribbonAction', event)
+          }),
           endpoint.ui.fileMenu.onAction((event) => {
             if (!disposed) notify('sdk.menuAction', event)
           }),

@@ -3,6 +3,7 @@ import type { DocsInspection } from './inspection'
 import type { DocsAnnotations } from './annotations'
 import type { DocsDocumentCommands } from '../../shared/document-host'
 import { parseDocsFileMenu, type DocsEditorUi } from './file-menu'
+import { parseDocsRibbon } from './ribbon'
 
 const reference = z.object({
   documentId: z.string(),
@@ -51,6 +52,15 @@ export async function executeDocsSdkCall(
   input: unknown,
 ): Promise<unknown> {
   switch (operation) {
+    case 'ui.ribbon.set':
+      if (!api.ui) throw new Error('The editor UI SDK is not ready')
+      api.ui.ribbon.set(parseDocsRibbon(input))
+      return { ok: true }
+    case 'ui.ribbon.reset':
+      if (!api.ui) throw new Error('The editor UI SDK is not ready')
+      z.object({}).strict().parse(input)
+      api.ui.ribbon.reset()
+      return { ok: true }
     case 'ui.fileMenu.set':
       if (!api.ui) throw new Error('The editor UI SDK is not ready')
       api.ui.fileMenu.set(parseDocsFileMenu(input))
