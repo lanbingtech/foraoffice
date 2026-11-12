@@ -103,7 +103,7 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
     {
       name: 'replace_selection',
       description:
-        "Replace exactly the user's selected text (the <sel>…</sel> span in the context) with new inline content, leaving the rest of the block untouched. For rewording/translating/correcting a selected phrase or sentence inside a paragraph. The new text inherits the selection's formatting unless the fragment styles it. Requires a range selection inside one paragraph/heading/list item; for whole blocks or several blocks use replace_blocks.",
+        "Replace exactly the user's selected text (the <sel>…</sel> span in the context) with new inline content, leaving the rest of the block untouched. For rewording/translating/correcting a selected phrase or sentence inside a paragraph, including a table cell. The new text inherits the selection's formatting unless the fragment styles it. Requires a range selection inside one paragraph/heading/list item; ranges across paragraphs or cells are refused. Pending deletion revisions are preserved and cannot be rewritten. For whole blocks use replace_blocks.",
       inputSchema: {
         type: 'object',
         properties: {

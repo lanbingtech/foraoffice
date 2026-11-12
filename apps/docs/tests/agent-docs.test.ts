@@ -843,7 +843,7 @@ describe('partial selection: context markers and replace_selection', () => {
 })
 
 describe('partial selection: table cells and code blocks', () => {
-  it('a range inside a table cell keeps whole-block semantics (no markers, no partial note)', async () => {
+  it('a range inside a table cell carries exact markers and supports partial replacement', async () => {
     const editor = createEditor([
       heading('Chapter 1 Overview', 1),
       {
@@ -868,16 +868,16 @@ describe('partial selection: table cells and code blocks', () => {
     editor.commands.setTextSelection({ from: 25, to: 28 })
     expect(editor.state.doc.textBetween(25, 28)).toBe('ity')
     const context = buildDocContext(editor)
-    expect(context).toContain('Current selection: block 1\n')
-    expect(context).not.toContain('<sel>')
-    expect(context).not.toContain('Selected text (')
+    expect(context).toContain('Current selection: block 1 (part of the text only')
+    expect(context).toContain('<td>C<sel>ity</sel> GDP</td>')
+    expect(context).toContain('Selected text (3 characters): "ity"')
     const exec = await executeTool(
       editor,
       { id: 'c', name: 'replace_selection', input: { html: 'x' } },
       NUM_IDS,
     )
-    expect(exec.isError).toBe(true)
-    expect(exec.output).toContain('replace_blocks')
+    expect(exec.isError).not.toBe(true)
+    expect(editor.state.doc.child(1).textContent).toBe('Cx GDP')
   })
 
   it('a code block marks the selected span inside its <pre>', () => {

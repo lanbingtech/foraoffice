@@ -12,7 +12,6 @@ import { t } from '../i18n/locale'
 import { MIND_MAP_LIMITS, parseMindMapTree } from '@genoffice/agent-core/mind-map'
 import { executeOps, opNames } from './ops'
 import { clipExcerpt, repliesOf, resolveCommentAnchor } from './comment-ops'
-import { redactTextBetween } from './redact-view'
 import { insertPictureAtSelection } from '../editor/insert-picture'
 import {
   SECTION_BREAK_TYPES,
@@ -58,6 +57,8 @@ import {
   insertBlocksAfter,
   isBlankDocument,
   isTrackedDeleted,
+  liveInlineRanges,
+  liveTextBetween,
   parseHtmlFragment,
   resolveImageRefs,
   countInlineImages,
@@ -837,10 +838,17 @@ function executeSyncTool(
       const doc = editor.state.doc
       const $from = doc.resolve(range.from)
       const $to = doc.resolve(range.to)
-      if ($from.depth !== 1 || !$from.sameParent($to) || !$from.parent.isTextblock) {
+      if (!$from.sameParent($to) || !$from.parent.isTextblock) {
         return fail(
           t('aiSumReplaceSelection'),
-          'the selection spans several blocks or sits in protected content (table, image, field); replace_selection only edits text inside one paragraph/heading/list item — use replace_blocks for that range',
+          'the selection spans several paragraphs or cells, or sits in protected content (image, field); replace_selection only edits text inside one paragraph/heading/list item, including a table cell — use replace_blocks for whole blocks',
+        )
+      }
+      const liveRanges = liveInlineRanges(doc, range.from, range.to)
+      if (liveRanges.length === 0) {
+        return fail(
+          t('aiSumReplaceSelection'),
+          'the selection is a pending tracked deletion — it is already deleted; the user accepts/rejects revisions in the Review tab',
         )
       }
       let inline: ReturnType<typeof parseInlineFragment>
@@ -856,7 +864,8 @@ function executeSyncTool(
       const schema = editor.schema
       // a carried-over picture's own marks are not the model restyling the selection
       const fragmentStyled = inline.some((n) => n.type === 'text' && (n.marks ?? []).length > 0)
-      const anchor = $from.parent.childAfter($from.parentOffset).node
+      const $liveFrom = doc.resolve(liveRanges[0].from)
+      const anchor = $liveFrom.parent.childAfter($liveFrom.parentOffset).node
       const inherited = (anchor?.marks ?? []).filter(
         (m) =>
           !REVISION_MARK_TYPES.has(m.type.name) &&
@@ -871,7 +880,7 @@ function executeSyncTool(
       const blockIndex = $from.index(0)
       // the echo quotes what was replaced back to the model, so a selection
       // covering a withheld span would undo the withholding right here
-      const oldText = redactTextBetween(editor.getJSON(), range.from, range.to, ' ')
+      const oldText = liveTextBetween(editor, range.from, range.to)
       replaceInlineRange(editor, range.from, range.to, nodes, track)
       const newText = nodes.map((n) => n.textContent).join('')
       return {

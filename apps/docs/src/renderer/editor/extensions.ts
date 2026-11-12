@@ -3078,6 +3078,11 @@ export const DocTable = Node.create({
   },
   renderHTML({ node }) {
     const attrs: Record<string, string> = { class: 'doc-table' }
+    const revision = node.attrs.blockRevision as { kind?: string; author?: string } | null
+    if (revision?.kind === 'ins' || revision?.kind === 'del') {
+      attrs.class += ` doc-${revision.kind}`
+      attrs[`data-${revision.kind}-author`] = revision.author ?? ''
+    }
     if (node.attrs.docxIndex !== null) attrs['data-idx'] = String(node.attrs.docxIndex)
     if (propChangePending(node.attrs.tblPrChange) || propChangePending(node.attrs.tblGridChange))
       attrs['data-rev-fmt'] = '1'

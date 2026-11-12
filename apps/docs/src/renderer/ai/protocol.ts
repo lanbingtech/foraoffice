@@ -2,6 +2,7 @@ import type { Editor } from '@tiptap/core'
 import { REDACT_MARK } from './redact'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { TextSelection } from '@tiptap/pm/state'
+import { TableMap } from '@tiptap/pm/tables'
 import {
   TABLE_HEADER_FILL,
   type Block,
@@ -9,27 +10,34 @@ import {
   type TableCell,
   type TableModel,
 } from '@genoffice/docx-engine'
-import { pmTableToModel, tableModelToPmNode, type PmMark, type PmNode } from '../editor/convert'
+import {
+  inlineToRuns,
+  pmTableToModel,
+  tableModelToPmNode,
+  type PmMark,
+  type PmNode,
+} from '../editor/convert'
 import { wordTableCell, wordTableModel } from '../editor/new-table'
 import { equationBlockJson, inlineEquationNodeJson } from '../editor/equation'
 import { inheritFrom, inheritTableFormatting, sameBlockRole } from './inherit-formatting'
 import { TRACK_AUTHOR, TRACK_IGNORE, type RevisionRange } from '../editor/revisions'
 import { aiRevisionAuthor } from './revision-author'
 import { countWords, documentTextForWordCount, leafTextForWordCount } from '../word-count'
-import { blockRangePositions, isTrackedDeleted, liveText } from './doc-utils'
 import {
-  modelTextOf,
-  projectedNodeText,
-  redactNode,
-  redactTextBetween,
-  type RedactableNode,
-} from './redact-view'
+  blockRangePositions,
+  hasDeletionRevision,
+  isTrackedDeleted,
+  liveInlineRanges,
+  liveText,
+  liveTextBetween,
+} from './doc-utils'
+import { modelTextOf, projectedNodeText, redactNode, type RedactableNode } from './redact-view'
 import { opSignatures } from './ops'
 import { pageSetupContextLines, type AiSectionState } from './page-setup'
 import { listRevisionEntries } from './revision-ops'
 import type { StoryRevision } from '../editor/story-revisions'
 
-export { blockRangePositions, isTrackedDeleted, liveText }
+export { blockRangePositions, isTrackedDeleted, liveInlineRanges, liveText, liveTextBetween }
 
 /**
  * Agent protocol: the model runs a multi-turn tool-use loop — it reads the document skeleton
@@ -90,7 +98,7 @@ export const OPS_GUIDE = [
   'Discipline:',
   '- Read the "document block list" before issuing ops; anything like "paragraph N / a certain section" must be addressed with block indexes from the list — never guess;',
   '- Only give the fields the user explicitly asked to change;',
-  '- Protected blocks such as images cannot be modified with style ops (they are skipped); to change table content, use read_blocks to get the <table> and rewrite it wholesale with replace_blocks (the table keeps its column widths, borders, shading and cell formatting; cells whose text you leave unchanged keep their content untouched).',
+  '- Protected blocks such as images cannot be modified with style ops (they are skipped). Rewrite selected text inside one table cell paragraph with replace_selection; for whole-table changes, use read_blocks to get the <table> and rewrite it with replace_blocks (the table keeps its column widths, borders, shading and cell formatting; cells whose text you leave unchanged keep their content untouched).',
   '',
   'Known error cases (must avoid):',
   'BC-1 Giving fields the user did not ask for, wiping existing formatting by mistake;',
@@ -243,9 +251,21 @@ export function partialSelection(
   const { from, to } = blockRangePositions(editor, scope.startIndex, scope.endIndex)
   const first = doc.child(scope.startIndex)
   const last = doc.child(scope.endIndex)
-  // character precision exists only for top-level text blocks; a range that
-  // starts or ends inside a table / protected block keeps whole-block semantics
-  if (!first.isTextblock || !last.isTextblock) return null
+  if (!first.isTextblock || !last.isTextblock) {
+    // A cell paragraph is partial relative to its top-level table, even when
+    // every character of that paragraph is selected. Cell/node selections
+    // and ranges crossing paragraphs keep their whole-block semantics.
+    const $from = doc.resolve(Math.max(from, Math.min(scope.from, to)))
+    const $to = doc.resolve(Math.max(from, Math.min(scope.to, to)))
+    if (
+      first.type.name !== 'docTable' ||
+      scope.startIndex !== scope.endIndex ||
+      !$from.sameParent($to) ||
+      !$from.parent.isTextblock
+    )
+      return null
+    return { from: $from.pos, to: $to.pos }
+  }
   if (scope.from <= from + 1 && scope.to >= to - 1) return null
   return {
     from: Math.min(Math.max(scope.from, from), to),
@@ -396,6 +416,14 @@ function inlineToHtml(
   for (const node of content) {
     // del-marked runs are pending deletions, not current content (but they still occupy positions)
     const deleted = (node.marks ?? []).some((m: PmMark) => m.type === 'del')
+    if ((node.marks ?? []).some((m: PmMark) => m.type === REDACT_MARK)) {
+      const end = pos + (node.type === 'text' ? (node.text ?? '').length : 1)
+      if (pending && pending.from > pos && pending.from < end) boundary(pending.from)
+      else boundary(pos)
+      if (!deleted) html += escapeHtml(projectedNodeText(node))
+      pos = end
+      continue
+    }
     if (node.type === 'text') {
       const text = node.text ?? ''
       const marks = node.marks ?? []
@@ -467,42 +495,55 @@ function isQuoteParagraph(node: PmNode): boolean {
   return node.attrs?.borders === QUOTE_BLOCK_PRESET.borders && Number(node.attrs?.indentLeft) > 0
 }
 
-/** table block -> restricted <table> HTML so the model can read and rewrite it */
-function tableToHtml(table: TableModel): string {
-  const headerRow = isHeaderRowTable(table)
-  const rows = table.rows.map((row, r) => {
-    const tag = headerRow && r === 0 ? 'th' : 'td'
-    const cells = row
-      .map((cell) => `<${tag}>${cell.paras.map(escapeHtml).join('<br>')}</${tag}>`)
-      .join('')
-    return `<tr>${cells}</tr>`
-  })
-  return `<table>${rows.join('')}</table>`
-}
-
 function isHeaderRowTable(table: TableModel): boolean {
   return table.rows.length > 1 && table.rows[0].every((c) => c.bold || c.fill !== undefined)
 }
 
 /**
- * Export variant: cells keep their inline pictures (the table model is text
- * only). The grid comes from the model so merged cells keep their columns;
- * each non-continuation entry maps to the row's next physical cell node.
+ * The model supplies the merged-cell grid; physical nodes supply live inline
+ * content and exact selection positions. Export also keeps inline pictures.
  */
-function tableToHtmlWithImages(node: PmNode, image: ImageSrcMapper): string {
-  const model = pmTableToModel(node)
+function tableToHtml(
+  node: ProseMirrorNode,
+  start: number,
+  sel?: InlineSelection | null,
+  image?: ImageSrcMapper,
+): string {
+  const model = pmTableToModel(node.toJSON() as PmNode)
   const headerRow = isHeaderRowTable(model)
+  const grid = TableMap.get(node)
   const rows = model.rows.map((row, r) => {
     const tag = headerRow && r === 0 ? 'th' : 'td'
-    const physical = node.content?.[r]?.content ?? []
-    let next = 0
+    const physical = node.child(r)
+    if (hasDeletionRevision(physical)) return ''
+    let column = 0
     const cells = row
       .map((entry) => {
+        const cellOffset = grid.map[r * grid.width + column]
+        column += entry.colSpan ?? 1
         if (entry.vMerge === 'continue') return `<${tag}></${tag}>`
-        const cell = physical[next++]
-        const paras = (cell?.content ?? [])
-          .filter((n) => n.type === 'docParagraph' || n.type === 'docListItem')
-          .map((n) => inlineToHtml(n.content, undefined, image))
+        const cell = node.nodeAt(cellOffset)!
+        const contentStart = start + cellOffset + 2
+        const paras: string[] = []
+        if (!hasDeletionRevision(cell))
+          cell.forEach((paragraph, offset) => {
+            if (!paragraph.isTextblock || hasDeletionRevision(paragraph)) return
+            const inlineStart = contentStart + offset + 1
+            const from = sel ? Math.max(0, sel.from - inlineStart) : 0
+            const to = sel ? Math.min(paragraph.content.size, sel.to - inlineStart) : 0
+            const selection = from < to ? { from, to } : undefined
+            const json = paragraph.toJSON() as PmNode
+            paras.push(
+              sel || image
+                ? inlineToHtml(json.content, selection, image)
+                : escapeHtml(
+                    inlineToRuns(redactNode(json).content ?? [])
+                      .filter((run) => !run.del)
+                      .map((run) => run.text)
+                      .join(''),
+                  ),
+            )
+          })
         return `<${tag}>${paras.join('<br>')}</${tag}>`
       })
       .join('')
@@ -579,7 +620,8 @@ export function serializeRangeToHtml(
       }
     } else if (node.type === 'docTable') {
       flushList()
-      parts.push(image ? tableToHtmlWithImages(node, image) : tableToHtml(pmTableToModel(node)))
+      const position = blockRangePositions(editor, startIndex + i, startIndex + i).from
+      parts.push(tableToHtml(editor.state.doc.child(startIndex + i), position, sel, image))
     } else {
       flushList()
       const formula = node.attrs?.formulaDisplay as { tokens?: string[]; latex?: string } | null
@@ -951,9 +993,7 @@ export function buildDocContext(
     : ''
   // `textBetween` would read the words; the context quotes the selection back
   // to the model, so it has to be the projected read
-  const selectedText = partial
-    ? redactTextBetween(editor.getJSON() as RedactableNode, partial.from, partial.to)
-    : ''
+  const selectedText = partial ? liveTextBetween(editor, partial.from, partial.to) : ''
   const selectionLines = partial
     ? [
         `Content selected by the user (blocks ${scope.startIndex}-${scope.endIndex}; ONLY the span inside <sel>…</sel> is selected, the rest of these blocks is shown for context):`,
@@ -1552,19 +1592,23 @@ export function replaceInlineRange(
   track?: AiTrack,
 ): void {
   const tr = editor.state.tr
-  const blockPos = tr.doc.resolve(from).before(1)
+  const blockPos = tr.doc.resolve(from).before()
+  const ranges = liveInlineRanges(tr.doc, from, to)
   const inserted = nodes.reduce((size, n) => size + n.nodeSize, 0)
   if (track) {
     const date = revisionDate()
     const { ins, del } = editor.schema.marks
     tr.insert(to, nodes)
     if (inserted > 0) tr.addMark(to, to + inserted, ins.create({ author: track.author, date }))
-    tr.addMark(from, to, del.create({ author: track.author, date }))
+    for (const range of ranges)
+      tr.addMark(range.from, range.to, del.create({ author: track.author, date }))
     tr.setSelection(TextSelection.create(tr.doc, to, to + inserted))
     tr.setMeta(TRACK_IGNORE, true)
   } else {
-    tr.replaceWith(from, to, nodes)
-    tr.setSelection(TextSelection.create(tr.doc, from, from + inserted))
+    for (const range of [...ranges].reverse()) tr.delete(range.from, range.to)
+    const at = tr.mapping.map(to, -1)
+    tr.insert(at, nodes)
+    tr.setSelection(TextSelection.create(tr.doc, at, at + inserted))
     const block = tr.doc.nodeAt(blockPos)
     if (block) tr.setNodeMarkup(blockPos, undefined, { ...block.attrs, aiChanged: true })
     tr.setMeta(TRACK_AUTHOR, aiRevisionAuthor())

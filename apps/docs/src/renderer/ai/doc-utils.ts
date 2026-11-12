@@ -1,5 +1,6 @@
 import type { Editor } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
+import { redactTextBetween } from './redact-view'
 
 /** ProseMirror positions of a top-level child index range */
 export function blockRangePositions(
@@ -22,6 +23,50 @@ export function blockRangePositions(
 // ---- tracked deletions (pending revisions are not current content) ----
 
 const hasDelMark = (node: ProseMirrorNode) => node.marks.some((m) => m.type.name === 'del')
+
+/** Structural deletion revisions hide the whole block, row or cell. */
+export function hasDeletionRevision(node: ProseMirrorNode): boolean {
+  return ['blockRevision', 'rowRevision', 'cellRevision'].some(
+    (key) => node.attrs?.[key]?.kind === 'del',
+  )
+}
+
+/** Inline ranges that still belong to the current content, in document positions. */
+export function liveInlineRanges(
+  doc: ProseMirrorNode,
+  from: number,
+  to: number,
+): Array<{ from: number; to: number }> {
+  const ranges: Array<{ from: number; to: number }> = []
+  doc.nodesBetween(from, to, (node, pos) => {
+    if (hasDeletionRevision(node) || hasDelMark(node)) return false
+    if (!node.isInline || !node.isLeaf) return
+    const start = Math.max(from, pos)
+    const end = Math.min(to, pos + node.nodeSize)
+    if (start >= end) return
+    const previous = ranges[ranges.length - 1]
+    if (previous?.to === start) previous.to = end
+    else ranges.push({ from: start, to: end })
+  })
+  return ranges
+}
+
+/** Selection text uses the same live ranges as editing, with redactions projected. */
+export function liveTextBetween(editor: Editor, from: number, to: number): string {
+  const doc = editor.state.doc
+  const json = editor.getJSON()
+  let previous: number | undefined
+  return liveInlineRanges(doc, from, to)
+    .map((range) => {
+      const separator =
+        previous !== undefined && !doc.resolve(previous).sameParent(doc.resolve(range.from))
+          ? '\n'
+          : ''
+      previous = range.to
+      return separator + redactTextBetween(json, range.from, range.to)
+    })
+    .join('')
+}
 
 /**
  * Block text as it reads once pending tracked deletions are applied
@@ -46,7 +91,7 @@ export function liveText(
     leafText?: (leaf: ProseMirrorNode) => string
   } = {},
 ): string {
-  if ((node.attrs?.blockRevision as { kind?: string } | null)?.kind === 'del') return ''
+  if (hasDeletionRevision(node)) return ''
   const leafText =
     options.leafText ?? ((leaf: ProseMirrorNode) => leaf.type.spec.leafText?.(leaf) ?? '')
   let out = ''
@@ -54,7 +99,7 @@ export function liveText(
   // placed one between this node and its preceding sibling
   let firstTextblock = true
   const walk = (child: ProseMirrorNode): void => {
-    if (hasDelMark(child)) return
+    if (hasDelMark(child) || hasDeletionRevision(child)) return
     if (!forDisplay && hasRedactMark(child)) {
       out += redactMarkerFor(child)
       return
@@ -94,7 +139,7 @@ const redactMarkerFor = (node: ProseMirrorNode): string => {
  * carry no textContent, so a live formula must still count as live content.
  */
 export function isTrackedDeleted(node: ProseMirrorNode): boolean {
-  if ((node.attrs?.blockRevision as { kind?: string } | null)?.kind === 'del') return true
+  if (hasDeletionRevision(node)) return true
   let hasContent = false
   let hasLive = false
   node.descendants((child) => {
