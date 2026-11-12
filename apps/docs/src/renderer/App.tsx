@@ -5,7 +5,8 @@ import {
   getDocsDocumentHost,
   getDocsCheckers,
 } from './host/docs-host'
-import type { DocsEditorAction } from '../shared/editor-action'
+import type { DocsEditorAction, DocsAiOperation } from '../shared/editor-action'
+import { submitDocsEditorAction } from './runtime/editor-actions'
 import { scriptFontHtml } from './editor/script-fonts'
 import { carryDocSeen } from './ai/tools'
 import { DOC_CSS_COMMITTED_EVENT, WRAP_WIDTHS_COMMITTED_EVENT } from './editor/cjk-punct-shrink'
@@ -812,7 +813,12 @@ export function App({
   const AgentPanel = agentUi?.Panel
   const nativeAgentEnabled = !!agentUi
   const externalActionRef = useRef<
-    ((kind: DocsEditorAction['kind'], instruction: string) => Promise<void>) | null
+    | ((
+        kind: DocsEditorAction['kind'],
+        instruction: string,
+        operation?: DocsAiOperation,
+      ) => Promise<void>)
+    | null
   >(null)
   // subscribe to language switches for re-render; strings all go through module-level t, so memoized callbacks never capture stale closures
   const { lang } = useI18n()
@@ -1226,7 +1232,7 @@ export function App({
     autoRun?: boolean
   } | null>(null)
   const requestAgentAction = useCallback(
-    (kind: DocsEditorAction['kind'], instruction: string) => {
+    (kind: DocsEditorAction['kind'], instruction: string, operation?: DocsAiOperation) => {
       if (nativeAgentEnabled) {
         setShowAi(true)
         if (instruction) setAiPreset({ text: instruction, nonce: Date.now(), autoRun: true })
@@ -1234,7 +1240,7 @@ export function App({
       }
       const submit = externalActionRef.current
       const result = submit
-        ? submit(kind, instruction)
+        ? submit(kind, instruction, operation)
         : Promise.reject(new Error('The document runtime is not ready'))
       void result.catch((error: unknown) =>
         setStatus(
@@ -2726,7 +2732,7 @@ export function App({
    */
   const nameWithAi = useCallback(async () => {
     if (!nativeAgentEnabled) {
-      requestAgentAction('name_document', '')
+      requestAgentAction('name_document', '', { operationId: 'name_document', parameters: {} })
       return
     }
     const proposed = await suggestedSaveAsName(fileCtxRef.current, agentUi!.suggestFileName)
@@ -6167,7 +6173,10 @@ export function App({
     )
       return
     localStorage.setItem(AI_REWRITE_ACK_KEY, '1')
-    requestAgentAction('edit', t('ribbonEditorPrompt'))
+    requestAgentAction('edit', t('ribbonEditorPrompt'), {
+      operationId: 'proofread_document',
+      parameters: {},
+    })
   }, [requestAgentAction])
 
   // "has unsaved changes" check shared by the close guard and autosave; refreshed on every
@@ -7840,26 +7849,18 @@ export function App({
     },
     [docsAnnotations, docsInspection],
   )
-  externalActionRef.current = async (kind, instruction) => {
-    const harness = getDocsHarness()
-    if (!harness) throw new Error('No external Harness conversation is bound to this editor')
-    const scope = docsRuntime.capture()
-    const bindingId = crypto.randomUUID()
-    docsCommands.bindScope(bindingId, scope)
-    try {
-      await harness.submit({
-        id: crypto.randomUUID(),
-        bindingId,
-        documentId: scope.documentId,
-        kind,
-        instruction,
-        context: scope.text,
-      })
-    } catch (error) {
-      docsCommands.releaseScope(bindingId)
-      throw error
-    }
-  }
+  externalActionRef.current = (kind, instruction, operation) =>
+    submitDocsEditorAction(
+      {
+        runtime: docsRuntime,
+        commands: docsCommands,
+        current: () => runtimeDocumentRef.current,
+        harness: getDocsHarness,
+      },
+      kind,
+      instruction,
+      operation,
+    )
   useEffect(() => () => docsRuntime.dispose(), [docsRuntime])
   useEffect(() => () => docsCommands.dispose(), [docsCommands])
   const runtimeReady = !!editor && (!!doc || (bootComplete && !!getDocsDocumentHost())) && !tornDown
@@ -8008,9 +8009,9 @@ export function App({
     onZoomFit: zoomFit,
     onZoomDialog: () => setShowZoomDialog(true),
     onDarkPage: updateDarkPage,
-    onAiPreset: (text: string) => {
+    onAiPreset: (text: string, operation: DocsAiOperation) => {
       // Word's Editor / Translate start working as soon as they're clicked
-      requestAgentAction('edit', text)
+      requestAgentAction('edit', text, operation)
     },
     onHeader: (next: HeaderFooter) => commitHfAt(0, 'header', headerAreaView, next),
     onPageNumFormat: openPgNumModal,
@@ -9325,8 +9326,8 @@ export function App({
           onUnredact={clearRedaction}
           onViewImage={setViewImage}
           onSaveImageAs={saveImageAs}
-          onAiPreset={(text) => {
-            requestAgentAction('edit', text)
+          onAiPreset={(text, operation) => {
+            requestAgentAction('edit', text, operation)
           }}
           onRestartNumbering={restartNumbering}
           onContinueNumbering={continueNumbering}

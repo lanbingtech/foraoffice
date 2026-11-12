@@ -63,6 +63,79 @@ embedding application's external conversation. It is not needed for ordinary
 tool execution. The application owns any conversation, model request or task
 orchestration.
 
+### Built-in AI operations and instructions
+
+Built-in AI actions include a stable, UI-language-independent `operationId` and
+structured `parameters`. The action's `id` remains a unique invocation ID, and
+`bindingId` remains the existing document/selection authority. Neither identifier
+should be used to infer which built-in operation was clicked.
+
+| `operationId`                               | Parameters                   |
+| ------------------------------------------- | ---------------------------- |
+| `proofread_document`, `proofread_selection` | `{}`                         |
+| `translate_document`, `translate_selection` | `{ targetLanguage: string }` |
+| `suggest_synonyms`                          | `{}`                         |
+| `resolve_comments`, `summarize_revisions`   | `{}`                         |
+| `name_document`                             | `{}`                         |
+| `summarize_document`                        | `{}`                         |
+| `polish_document`, `polish_selection`       | `{}`                         |
+| `format_document`, `create_mind_map`        | `{}`                         |
+
+Translation uses the original language code, for example `fr`, `zh` or `zh-TW`,
+not the translated language label. Equivalent Review/context-menu operations use
+the same identifier. The Home shortcuts are identified too. Tools/F7 proofreading
+retains its whole-document operation. These fields describe existing editor
+actions; they do not select a model, provider, settings format or conversation API.
+
+Hosts can optionally implement `harness.resolveInstruction(request, signal)`.
+`DocsAiInstructionRequest` supplies the operation descriptor, `defaultInstruction`,
+the invocation `id`, `documentId`, `bindingId` and projected `context`. The editor
+captures and binds this context before calling the resolver. Public SDK exports
+also include `DocsAiOperationId` and the discriminated `DocsAiOperation` type.
+
+```ts
+const harness: DocsHarnessAdapter = {
+  resolveInstruction(request, signal) {
+    signal.throwIfAborted()
+    if (request.operationId === 'translate_selection') {
+      return `Translate only the selected text into ${request.parameters.targetLanguage}. Preserve its meaning.`
+    }
+    return null
+  },
+  async submit(action) {
+    // Forward this resolved instruction and its existing binding to the
+    // application's conversation or task runner.
+    await submitToConversation(action)
+  },
+}
+```
+
+The callback may be synchronous or asynchronous. Missing callbacks and
+`null`/`undefined`/blank results preserve the editor default. A nonblank custom
+string is preserved verbatim. Errors, including cancellation, refuse submission;
+they do not silently fall back. External AI naming retains its previous empty
+default instruction and `kind: 'name_document'`; the resolver can supply its task
+text. Other existing kinds retain their meanings.
+
+User-entered instructions and generic conversation focus do not carry an
+`operationId` or `parameters` and never enter this resolver. Do not infer operations
+by matching localized instruction text, even when a user types a default prompt.
+Editable suggestion text in the selection popover is also a free instruction.
+
+The request and its parameters are snapshots. A successful submission contains
+the resolved instruction snapshot; later configuration changes do not rewrite it.
+Cursor movement during resolution preserves the original selection. Document
+content edits while resolving cancel the stale action. Document replacement,
+closure, scope revocation and disposal cancel pending resolution; authored-state
+and Harness identity are rechecked before submission. Hosts can cancel a pending
+request with `editor.commands.releaseScope(request.bindingId)` and should observe
+the standard `AbortSignal` when awaiting their own configuration or UI work. Even
+an uncooperative resolver's late result cannot cause submission after cancellation.
+`DocsRuntimeScope.signal` exposes the lifetime of captured document authority.
+
+Template storage and settings UI belong to the embedding application. There is no
+editor settings service or host-specific template schema associated with this hook.
+
 The selection's Ask AI entry always opens the editor's instruction popover,
 including when an external Harness is installed. Confirming with Send now or
 Enter calls the existing `harness.submit(action)` with `kind: 'edit'`, the user's
@@ -597,6 +670,35 @@ the sample wires it and acknowledges the actual first Word save. The optional
 viewer. Without it those files are created successfully with `opened: false`.
 `setActionHandler` forwards editor-originated actions and scoped grants to an
 external conversation; `--harness-stdio` demonstrates that handoff without a model.
+
+Qt hosts use `setInstructionResolver(InstructionResolver)` for the same optional
+built-in instruction hook. Its request is the JSON representation of
+`DocsAiInstructionRequest`; it includes stable operation IDs and translation
+language codes, independent of the Qt/editor UI language. Complete on the GUI
+thread with the existing `Completion` result/error envelope:
+
+```cpp
+editor.setInstructionResolver([](const QJsonObject& request,
+                                foraoffice::DocsQtEditor::Completion done) {
+    if (request.value("operationId") == "translate_selection") {
+        const auto language = request.value("parameters").toObject()
+                                  .value("targetLanguage").toString();
+        done({{"result", QStringLiteral("Translate only the selected text into ") + language}});
+    } else {
+        done({{"result", QJsonValue::Null}}); // editor default
+    }
+});
+```
+
+An empty resolver restores defaults. For asynchronous configuration or a host
+dialog, retain the invocation `request.id` to cancel with
+`cancelInstructionResolution(actionId)`. Observe
+`instructionResolutionCanceled(actionId)` to stop host work; late and duplicate
+completions are ignored. Replacing the native resolver cancels its outstanding
+requests. A failure/cancellation uses `{ "error": { "message": "...",
+"data": { "errorCode": "canceled" } } }`, rather than returning null.
+Resolution itself creates no extra grant. Successful actions still flow through
+`setActionHandler` with the original binding and the resolved instruction snapshot.
 
 The Qt adapter runs process startup, initialization, stdio parsing and request
 tracking on an internal worker thread. These steps progress while the GUI event

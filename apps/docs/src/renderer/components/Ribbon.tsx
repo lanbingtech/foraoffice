@@ -1,4 +1,5 @@
 import { getDocsHost } from '../host/docs-host'
+import type { DocsAiOperation } from '../../shared/editor-action'
 import { FileMenu } from './FileMenu'
 import { ASSISTANT_ICON_SIZE, HOME_RIBBON_ICON_SIZE, RIBBON_ICON_SIZE } from './ribbon-metrics'
 import { RibbonExtensionGroups, RibbonQuickAccess, ribbonItemVisible } from './RibbonExtensions'
@@ -361,7 +362,7 @@ interface RibbonProps {
   onZoomDialog: () => void
   darkPage: boolean
   onDarkPage: (v: boolean) => void
-  onAiPreset: (instruction: string) => void
+  onAiPreset: (instruction: string, operation: DocsAiOperation) => void
   /** external request (e.g. native menu Page Setup) to switch to a specific tab */
   tabRequest?: { tab: string; nonce: number } | null
   header: HeaderFooter | null
@@ -3578,7 +3579,12 @@ function RibbonInner({
                   className="rb-big ai-entry"
                   disabled={docEmpty}
                   data-tip={t('aiSummarizeBtn')}
-                  onClick={() => onAiPreset(t('aiSummarizePrompt'))}
+                  onClick={() =>
+                    onAiPreset(t('aiSummarizePrompt'), {
+                      operationId: 'summarize_document',
+                      parameters: {},
+                    })
+                  }
                 >
                   <span className="rb-big-icon">
                     <span className="ai-feature-icon" aria-hidden="true">
@@ -3615,6 +3621,12 @@ function RibbonInner({
                       t(
                         editor.state.selection.empty ? 'aiPolishPrompt' : 'aiPolishSelectionPrompt',
                       ),
+                      {
+                        operationId: editor.state.selection.empty
+                          ? 'polish_document'
+                          : 'polish_selection',
+                        parameters: {},
+                      },
                     )
                   }
                 >
@@ -3646,7 +3658,12 @@ function RibbonInner({
                   className="rb-big ai-entry"
                   disabled={docEmpty}
                   data-tip={t('aiTidyBtn')}
-                  onClick={() => onAiPreset(t('aiTidyPrompt'))}
+                  onClick={() =>
+                    onAiPreset(t('aiTidyPrompt'), {
+                      operationId: 'format_document',
+                      parameters: {},
+                    })
+                  }
                 >
                   <span className="rb-big-icon">
                     <span className="ai-feature-icon" aria-hidden="true">
@@ -3675,7 +3692,12 @@ function RibbonInner({
                   className="rb-big ai-entry"
                   disabled={docEmpty}
                   data-tip={t('aiMindMapBtn')}
-                  onClick={() => onAiPreset(t('aiMindMapPrompt'))}
+                  onClick={() =>
+                    onAiPreset(t('aiMindMapPrompt'), {
+                      operationId: 'create_mind_map',
+                      parameters: {},
+                    })
+                  }
                 >
                   <span className="rb-big-icon">
                     <span className="ai-feature-icon" aria-hidden="true">

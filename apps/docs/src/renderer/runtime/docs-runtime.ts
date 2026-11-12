@@ -108,6 +108,8 @@ export interface DocsRuntime {
 }
 
 export interface DocsRuntimeScope {
+  /** Aborted when the captured document authority is closed or disposed. */
+  readonly signal: AbortSignal
   readonly documentId: string
   readonly text: string
   connect(caller: RuntimeCaller): DocsRuntimeClient
@@ -755,6 +757,7 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
       const scopedClients = new Set<DocsRuntimeClient>()
       return {
         ...context,
+        signal: seed.signal,
         connect(caller) {
           const client = seed.fork(caller)
           scopedClients.add(client)

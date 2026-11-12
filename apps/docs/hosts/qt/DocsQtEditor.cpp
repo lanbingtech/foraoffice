@@ -444,6 +444,29 @@ void DocsQtEditor::setServiceHandler(const QString& service, ServiceHandler hand
     if (handler) serviceHandlers_.insert(service, std::move(handler));
     else serviceHandlers_.remove(service);
 }
+void DocsQtEditor::setInstructionResolver(InstructionResolver resolver) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    const auto requests = std::exchange(instructionRequests_, {});
+    instructionResolver_ = std::move(resolver);
+    QPointer<DocsQtEditor> self(this);
+    for (auto request = requests.cbegin(); request != requests.cend(); ++request) {
+        rendererError(request.value(), tr("The instruction resolution was canceled."), {{"errorCode", "canceled"}});
+        if (!self) return;
+        emit instructionResolutionCanceled(request.key());
+        if (!self) return;
+    }
+}
+void DocsQtEditor::cancelInstructionResolution(const QString& actionId) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    const auto request = instructionRequests_.find(actionId);
+    if (request == instructionRequests_.end()) return;
+    const auto id = request.value();
+    instructionRequests_.erase(request);
+    QPointer<DocsQtEditor> self(this);
+    rendererError(id, tr("The instruction resolution was canceled."), {{"errorCode", "canceled"}});
+    if (!self) return;
+    emit instructionResolutionCanceled(actionId);
+}
 void DocsQtEditor::setServiceEnabled(const QString& service, bool enabled) {
     Q_ASSERT(QThread::currentThread() == thread());
     if (enabled) disabledServices_.remove(service);
@@ -507,6 +530,29 @@ void DocsQtEditor::fromRenderer(const QString& source) {
     }
     else if (method == "editor.mcpRevoked") {
         sendBackend({{"jsonrpc", "2.0"}, {"method", "mcp.revoke"}, {"params", params}});
+    }
+    else if (method == "editor.cancelInstruction") {
+        cancelInstructionResolution(params.value("id").toString());
+    }
+    else if (method == "editor.resolveInstruction") {
+        if (!instructionResolver_) { rendererReply(id, QJsonValue::Null); return; }
+        const auto resolver = instructionResolver_;
+        const auto actionId = params.value("id").toString();
+        if (actionId.isEmpty() || instructionRequests_.contains(actionId)) {
+            rendererError(id, tr("The instruction resolution identity is invalid or already in use.")); return;
+        }
+        instructionRequests_.insert(actionId, id);
+        resolver(params, [self = QPointer<DocsQtEditor>(this), id, actionId](const QJsonObject& response) {
+            if (!self || self->stopping_ || self->instructionRequests_.value(actionId) != id) return;
+            Q_ASSERT(QThread::currentThread() == self->thread());
+            self->instructionRequests_.remove(actionId);
+            if (response.contains("error")) {
+                const auto error = response.value("error").toObject();
+                self->rendererError(id, error.value("message").toString(), error.value("data").toObject());
+            } else if (response.contains("result") && (response.value("result").isNull() || response.value("result").isString())) {
+                self->rendererReply(id, response.value("result"));
+            } else self->rendererError(id, self->tr("The instruction resolver returned an invalid result."));
+        });
     }
     else if (method == "editor.submitAction") {
         if (!actionHandler_) { rendererError(id, tr("No external Harness conversation is configured.")); return; }
@@ -709,6 +755,7 @@ void DocsQtEditor::stopBackend() {
     const auto pending = std::exchange(pending_, {});
     editorRequests_.clear();
     const auto sdkPending = std::exchange(sdkPending_, {});
+    const auto instructionRequests = std::exchange(instructionRequests_, {});
     closeTimer_->stop();
     emit backendStopRequested();
     if (mcpState_.value("status") != "failed") mcpState_ = {{"status", "stopped"}};
@@ -716,6 +763,12 @@ void DocsQtEditor::stopBackend() {
     // Destruction removes their owner and must not invoke reentrant application callbacks.
     if (disposing_) return;
     QPointer<DocsQtEditor> self(this);
+    for (auto request = instructionRequests.cbegin(); request != instructionRequests.cend(); ++request) {
+        rendererError(request.value(), tr("The instruction resolution was canceled."), {{"errorCode", "canceled"}});
+        if (!self) return;
+        emit instructionResolutionCanceled(request.key());
+        if (!self) return;
+    }
     for (const auto& callback : pending) {
         callback(errorResult(QJsonValue::Null, tr("The document backend operation was canceled.")));
         if (!self) return;

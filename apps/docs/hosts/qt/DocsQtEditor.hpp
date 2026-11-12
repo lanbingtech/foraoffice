@@ -56,6 +56,8 @@ public:
     using Completion = std::function<void(const QJsonObject&)>;
     using ActionHandler = std::function<void(const QJsonObject& action,
                                              const QJsonObject& grant, Completion done)>;
+    /** Return a JSON-RPC string/null result, or an error; complete on the GUI thread. */
+    using InstructionResolver = std::function<void(const QJsonObject& request, Completion done)>;
     using CreateWordHandler = std::function<void(const QJsonObject& content, Completion done)>;
     using OpenFileHandler = std::function<bool(const QString& path)>;
     /** Complete on the GUI thread with a JSON-RPC result or error member, including cancellation. */
@@ -66,6 +68,10 @@ public:
     ~DocsQtEditor() override;
     QWebEngineView* view() const { return view_; }
     void setActionHandler(ActionHandler handler) { actionHandler_ = std::move(handler); }
+    /** An empty resolver preserves editor defaults. Replacing it cancels pending resolutions. */
+    void setInstructionResolver(InstructionResolver resolver);
+    /** Cancel one pending instruction by the request's stable action id. */
+    void cancelInstructionResolution(const QString& actionId);
     void setCreateWordHandler(CreateWordHandler handler) { createWordHandler_ = std::move(handler); }
     void setOpenFileHandler(OpenFileHandler handler) { openFileHandler_ = std::move(handler); }
     /** An empty handler restores the default; a handler's cancellation/failure never falls back. */
@@ -91,6 +97,8 @@ signals:
     void menuActionTriggered(QString actionId, QJsonObject context);
     /** Custom ribbon actions from tabs, appended groups and quick access. */
     void ribbonActionTriggered(QString actionId, QJsonObject context);
+    /** Resolver work should stop; any later completion is ignored. */
+    void instructionResolutionCanceled(QString actionId);
     /** Current SDK document state, or JSON null with no active document. Emitted after ready. */
     void documentStateChanged(QJsonValue state);
     /** Status and document identity only; obtain credentials through startMcp/mcpState. */
@@ -123,11 +131,13 @@ private:
     QHash<QString, Completion> pending_;
     QHash<QString, Completion> sdkPending_;
     QSet<QString> editorRequests_;
+    QHash<QString, QJsonValue> instructionRequests_;
     DocsQtChannel* channel_ = nullptr;
     QWebEngineProfile* profile_ = nullptr;
     QWebEngineView* view_ = nullptr;
     QLabel* status_ = nullptr;
     ActionHandler actionHandler_;
+    InstructionResolver instructionResolver_;
     CreateWordHandler createWordHandler_;
     OpenFileHandler openFileHandler_;
     QHash<QString, ServiceHandler> serviceHandlers_;

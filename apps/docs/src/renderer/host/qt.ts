@@ -1,6 +1,6 @@
 import { createExternalDocsHost, type DocsEditorServices } from './docs-host'
 import type { McpCommandMessage } from '../../shared/ipc'
-import type { DocsEditorAction } from '../../shared/editor-action'
+import type { DocsAiInstructionRequest, DocsEditorAction } from '../../shared/editor-action'
 import type { DocsOperationResult } from '../../shared/operation-result'
 import { createDocsResourceTools } from '../runtime/resource-tools'
 import { ResourceAccessError } from '@genoffice/agent-core/resource-tools'
@@ -81,25 +81,57 @@ export function createQtDocsHost(channel: DocsQtChannel) {
   let disposed = false
   let editor: EditorEndpoint | undefined
   let editorDisposers: Array<() => void> = []
-  const pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void }>()
+  const pending = new Map<string, { resolve(value: unknown): void; reject(error: unknown): void }>()
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
   let attachments: AttachmentMeta[] = []
   let knowledge: Awaited<ReturnType<DocsEditorServices['kbList']>> = []
   let resources: ReturnType<typeof createDocsResourceTools> | undefined
   const notify = (method: string, params: unknown) =>
     channel.request(JSON.stringify({ jsonrpc: '2.0', method, params: encode(params) }))
-  const request = (method: string, params: unknown): Promise<unknown> =>
+  const request = (
+    method: string,
+    params: unknown,
+    signal?: AbortSignal,
+    cancel?: () => void,
+  ): Promise<unknown> =>
     new Promise((resolve, reject) => {
       if (disposed) {
         reject(new Error('The Qt editor host was disposed'))
         return
       }
+      if (signal?.aborted) {
+        reject(signal.reason)
+        return
+      }
       const id = crypto.randomUUID()
-      pending.set(id, { resolve, reject })
+      const cleanup = () => signal?.removeEventListener('abort', abort)
+      const abort = () => {
+        if (!pending.delete(id)) return
+        cleanup()
+        try {
+          cancel?.()
+        } catch (error) {
+          reject(error)
+          return
+        }
+        reject(signal?.reason)
+      }
+      pending.set(id, {
+        resolve: (value) => {
+          cleanup()
+          resolve(value)
+        },
+        reject: (error) => {
+          cleanup()
+          reject(error)
+        },
+      })
+      signal?.addEventListener('abort', abort, { once: true })
       try {
         channel.request(JSON.stringify({ jsonrpc: '2.0', id, method, params: encode(params) }))
       } catch (error) {
         pending.delete(id)
+        cleanup()
         reject(error)
       }
     })
@@ -272,6 +304,13 @@ export function createQtDocsHost(channel: DocsQtChannel) {
     'qt',
     services,
     {
+      resolveInstruction: async (action: DocsAiInstructionRequest, signal: AbortSignal) => {
+        const result = await request('editor.resolveInstruction', action, signal, () =>
+          notify('editor.cancelInstruction', { id: action.id }),
+        )
+        if (result === null || result === undefined || typeof result === 'string') return result
+        throw new Error('The Qt instruction resolver returned an invalid result')
+      },
       submit: async (action: DocsEditorAction) => {
         await request('editor.submitAction', action)
       },

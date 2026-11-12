@@ -7,6 +7,7 @@ import { createDocsFileMenu } from '../src/renderer/sdk/file-menu'
 import { createDocsRibbon } from '../src/renderer/sdk/ribbon'
 import type { DocsInspection } from '../src/renderer/sdk/inspection'
 import type { DocsAnnotations } from '../src/renderer/sdk/annotations'
+import type { DocsAiInstructionRequest, DocsEditorAction } from '../src/shared/editor-action'
 
 function signal<Args extends unknown[]>(): QtSignal<Args> & { emit(...args: Args): void } {
   const listeners = new Set<(...args: Args) => void>()
@@ -377,4 +378,145 @@ it('forwards resource CLI cancellation and waits for its actual file outcome', a
   )
   expect(await result).toMatchObject({ isError: true, committed: null })
   adapter.dispose()
+})
+
+const instructionRequest: DocsAiInstructionRequest = {
+  id: 'instruction-action',
+  bindingId: 'captured-selection',
+  documentId: 'document-generation',
+  operationId: 'translate_selection',
+  parameters: { targetLanguage: 'fr' },
+  defaultInstruction: 'Default translation',
+  context: 'Selected text: example',
+}
+
+function instructionChannel() {
+  const channel = {
+    request: vi.fn(),
+    complete: vi.fn(),
+    reply: signal<[string]>(),
+    event: signal<[string, string]>(),
+    command: signal<[string]>(),
+  }
+  return { channel, adapter: createQtDocsHost(channel) }
+}
+
+it.each(['Configured translation', null])(
+  'resolves built-in instructions through the neutral Qt contract (%s)',
+  async (result) => {
+    const { channel, adapter } = instructionChannel()
+    try {
+      expect(adapter.host.harness!.resolveInstruction).toBeTypeOf('function')
+      const resolved = adapter.host.harness!.resolveInstruction!(
+        instructionRequest,
+        new AbortController().signal,
+      )
+      const request = JSON.parse(channel.request.mock.calls[0][0])
+      expect(request).toMatchObject({
+        jsonrpc: '2.0',
+        method: 'editor.resolveInstruction',
+        params: instructionRequest,
+      })
+      channel.reply.emit(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }))
+      expect(await resolved).toBe(result)
+      const action: DocsEditorAction = {
+        ...instructionRequest,
+        kind: 'edit',
+        instruction: 'Resolved snapshot',
+      }
+      const submitted = adapter.host.harness!.submit(action)
+      const submitRequest = JSON.parse(channel.request.mock.calls[1][0])
+      expect(submitRequest).toMatchObject({ method: 'editor.submitAction', params: action })
+      channel.reply.emit(JSON.stringify({ jsonrpc: '2.0', id: submitRequest.id, result: null }))
+      await submitted
+    } finally {
+      adapter.dispose()
+    }
+  },
+)
+
+it('cancels a pending Qt instruction request and ignores its late response', async () => {
+  const { channel, adapter } = instructionChannel()
+  const controller = new AbortController()
+  try {
+    const resolved = adapter.host.harness!.resolveInstruction!(
+      instructionRequest,
+      controller.signal,
+    )
+    const rejected = expect(resolved).rejects.toMatchObject({ name: 'AbortError' })
+    const request = JSON.parse(channel.request.mock.calls[0][0])
+    controller.abort()
+    await rejected
+    expect(channel.request.mock.calls.map(([value]) => JSON.parse(value))).toContainEqual({
+      jsonrpc: '2.0',
+      method: 'editor.cancelInstruction',
+      params: { id: instructionRequest.id },
+    })
+    channel.reply.emit(
+      JSON.stringify({ jsonrpc: '2.0', id: request.id, result: 'Late instruction' }),
+    )
+    expect(channel.request.mock.calls.map(([value]) => JSON.parse(value).method)).not.toContain(
+      'editor.submitAction',
+    )
+  } finally {
+    adapter.dispose()
+  }
+})
+
+it('does not send an instruction request when cancellation already happened', async () => {
+  const { channel, adapter } = instructionChannel()
+  const controller = new AbortController()
+  controller.abort()
+  try {
+    await expect(
+      adapter.host.harness!.resolveInstruction!(instructionRequest, controller.signal),
+    ).rejects.toMatchObject({ name: 'AbortError' })
+    expect(channel.request).not.toHaveBeenCalled()
+  } finally {
+    adapter.dispose()
+  }
+})
+
+it('rejects pending instruction resolution on disposal and does not consume a late reply', async () => {
+  const { channel, adapter } = instructionChannel()
+  const resolved = adapter.host.harness!.resolveInstruction!(
+    instructionRequest,
+    new AbortController().signal,
+  )
+  const rejected = expect(resolved).rejects.toThrow('disposed')
+  const request = JSON.parse(channel.request.mock.calls[0][0])
+  adapter.dispose()
+  await rejected
+  channel.reply.emit(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: 'Late instruction' }))
+  expect(channel.request.mock.calls.map(([value]) => JSON.parse(value).method)).not.toContain(
+    'editor.submitAction',
+  )
+})
+
+it('propagates native resolver failures and rejects invalid native result types', async () => {
+  const { channel, adapter } = instructionChannel()
+  try {
+    const failed = adapter.host.harness!.resolveInstruction!(
+      instructionRequest,
+      new AbortController().signal,
+    )
+    const rejected = expect(failed).rejects.toThrow('Resolver refused')
+    const request = JSON.parse(channel.request.mock.calls[0][0])
+    channel.reply.emit(
+      JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { message: 'Resolver refused' } }),
+    )
+    await rejected
+    const invalid = adapter.host.harness!.resolveInstruction!(
+      instructionRequest,
+      new AbortController().signal,
+    )
+    const invalidRejected = expect(invalid).rejects.toThrow('instruction')
+    const second = JSON.parse(channel.request.mock.calls[1][0])
+    channel.reply.emit(
+      JSON.stringify({ jsonrpc: '2.0', id: second.id, result: { instruction: 'wrong shape' } }),
+    )
+    await invalidRejected
+  } finally {
+    adapter.dispose()
+  }
 })

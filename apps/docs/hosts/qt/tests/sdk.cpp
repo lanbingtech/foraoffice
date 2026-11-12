@@ -56,11 +56,170 @@ QString literal(const QString& value) {
     const auto json = QJsonDocument(QJsonArray{value}).toJson(QJsonDocument::Compact);
     return QString::fromUtf8(json.mid(1, json.size() - 2));
 }
+std::unique_ptr<foraoffice::DocsQtEditor> instructionEditor(QTemporaryDir& workspace) {
+    foraoffice::DocsQtOptions options;
+    options.packageRoot = qEnvironmentVariable("FORAOFFICE_QT_TEST_PACKAGE");
+    options.nodeExecutable = qEnvironmentVariable("FORAOFFICE_QT_TEST_NODE");
+    options.stateDirectory = workspace.filePath(".state");
+    options.defaultSaveDirectory = workspace.path();
+    options.readRoots = options.writeRoots = {workspace.path()};
+    options.language = "en";
+    return std::make_unique<foraoffice::DocsQtEditor>(options);
+}
 }
 
 class SdkTests final : public QObject {
     Q_OBJECT
 private slots:
+    void replacingAnInstructionResolverIsReentrant() {
+        QTemporaryDir workspace;
+        auto editor = instructionEditor(workspace);
+        auto* channel = editor->findChild<foraoffice::DocsQtChannel*>();
+        QVERIFY(channel);
+        QSignalSpy replies(channel, &foraoffice::DocsQtChannel::reply);
+        const auto send = [channel](const QString& rpcId, const QString& actionId) {
+            channel->request(QString::fromUtf8(QJsonDocument(QJsonObject{{"jsonrpc", "2.0"}, {"id", rpcId},
+                {"method", "editor.resolveInstruction"}, {"params", QJsonObject{{"id", actionId}}}}).toJson(QJsonDocument::Compact)));
+        };
+        QList<foraoffice::DocsQtEditor::Completion> oldCompletions;
+        int newCalls = 0;
+        editor->setInstructionResolver([&](const QJsonObject&, foraoffice::DocsQtEditor::Completion done) {
+            oldCompletions.push_back(std::move(done));
+        });
+        send("old-rpc", "old-action");
+        bool nested = false;
+        connect(channel, &foraoffice::DocsQtChannel::reply, this, [&](const QString& source) {
+            const auto value = QJsonDocument::fromJson(source.toUtf8()).object();
+            if (value.value("id") == "old-rpc" && !nested) {
+                nested = true;
+                // Reuse the action id with a new RPC id: the old completion must
+                // not consume authority belonging to the replacement request.
+                send("new-rpc", "old-action");
+            }
+        }, Qt::DirectConnection);
+        editor->setInstructionResolver([&](const QJsonObject&, foraoffice::DocsQtEditor::Completion done) {
+            ++newCalls;
+            done({{"result", "New resolver"}});
+        });
+        QCOMPARE(oldCompletions.size(), 1);
+        QCOMPARE(newCalls, 1);
+        QVERIFY(nested);
+        QCOMPARE(replies.size(), 2);
+        oldCompletions.first()({{"result", "Old resolver result"}});
+        QCOMPARE(replies.size(), 2);
+    }
+
+    void instructionCancellationCanDestroyTheEditor_data() {
+        QTest::addColumn<QString>("trigger");
+        QTest::newRow("explicit cancellation") << QString("cancel");
+        QTest::newRow("resolver replacement") << QString("replace");
+        QTest::newRow("backend shutdown") << QString("stop");
+    }
+
+    void instructionCancellationCanDestroyTheEditor() {
+        QFETCH(QString, trigger);
+        QTemporaryDir workspace;
+        auto editor = instructionEditor(workspace);
+        const QPointer<foraoffice::DocsQtEditor> guard(editor.get());
+        auto* channel = editor->findChild<foraoffice::DocsQtChannel*>();
+        QVERIFY(channel);
+        foraoffice::DocsQtEditor::Completion late;
+        editor->setInstructionResolver([&](const QJsonObject&, foraoffice::DocsQtEditor::Completion done) { late = std::move(done); });
+        channel->request(QString::fromUtf8(QJsonDocument(QJsonObject{{"jsonrpc", "2.0"}, {"id", "destroy-rpc"},
+            {"method", "editor.resolveInstruction"}, {"params", QJsonObject{{"id", "destroy-action"}}}}).toJson(QJsonDocument::Compact)));
+        int cancellationSignals = 0;
+        connect(editor.get(), &foraoffice::DocsQtEditor::instructionResolutionCanceled, this,
+            [&](const QString&) { ++cancellationSignals; }, Qt::DirectConnection);
+        connect(channel, &foraoffice::DocsQtChannel::reply, this, [&](const QString& source) {
+            if (QJsonDocument::fromJson(source.toUtf8()).object().value("id") == "destroy-rpc") editor.reset();
+        }, Qt::DirectConnection);
+        if (trigger == "cancel") editor->cancelInstructionResolution("destroy-action");
+        else if (trigger == "replace") editor->setInstructionResolver({});
+        else channel->request(QString::fromUtf8(QJsonDocument(QJsonObject{{"jsonrpc", "2.0"}, {"method", "editor.disposed"}}).toJson(QJsonDocument::Compact)));
+        QVERIFY(guard.isNull());
+        QCOMPARE(cancellationSignals, 0);
+        late({{"result", "After destruction"}});
+    }
+
+    void instructionResolutionUsesTheNeutralNativeContract() {
+        QTemporaryDir workspace;
+        foraoffice::DocsQtOptions options;
+        options.packageRoot = qEnvironmentVariable("FORAOFFICE_QT_TEST_PACKAGE");
+        options.nodeExecutable = qEnvironmentVariable("FORAOFFICE_QT_TEST_NODE");
+        options.stateDirectory = workspace.filePath(".state");
+        options.defaultSaveDirectory = workspace.path();
+        options.readRoots = options.writeRoots = {workspace.path()};
+        options.language = "en";
+        auto editor = std::make_unique<foraoffice::DocsQtEditor>(options);
+        auto* channel = editor->findChild<foraoffice::DocsQtChannel*>();
+        QVERIFY(channel);
+        QSignalSpy replies(channel, &foraoffice::DocsQtChannel::reply);
+        QSignalSpy cancellations(editor.get(), &foraoffice::DocsQtEditor::instructionResolutionCanceled);
+        const auto send = [channel](const QString& id, const QString& method, const QJsonObject& params) {
+            channel->request(QString::fromUtf8(QJsonDocument(QJsonObject{{"jsonrpc", "2.0"}, {"id", id}, {"method", method}, {"params", params}}).toJson(QJsonDocument::Compact)));
+        };
+        const auto response = [&replies](const QString& id) {
+            for (const auto& arguments : replies) {
+                const auto value = QJsonDocument::fromJson(arguments.first().toString().toUtf8()).object();
+                if (value.value("id").toString() == id) return value;
+            }
+            return QJsonObject{};
+        };
+        QJsonObject request{{"id", "fallback"}, {"bindingId", "selection"}, {"documentId", "document"},
+            {"operationId", "translate_selection"}, {"parameters", QJsonObject{{"targetLanguage", "fr"}}},
+            {"defaultInstruction", "Default translation"}, {"context", "Selected content"}};
+        send("fallback-rpc", "editor.resolveInstruction", request);
+        QVERIFY(response("fallback-rpc").value("result").isNull());
+
+        QJsonObject captured;
+        foraoffice::DocsQtEditor::Completion finish;
+        editor->setInstructionResolver([&](const QJsonObject& value, foraoffice::DocsQtEditor::Completion done) { captured = value; finish = std::move(done); });
+        request["id"] = "custom";
+        send("custom-rpc", "editor.resolveInstruction", request);
+        QCOMPARE(captured, request);
+        finish({{"result", "  Configured translation\n"}});
+        QCOMPARE(response("custom-rpc").value("result").toString(), QString("  Configured translation\n"));
+        const auto completedCount = replies.size();
+        finish({{"result", "Duplicate"}});
+        QCOMPARE(replies.size(), completedCount);
+
+        request["id"] = "host-cancel";
+        send("host-cancel-rpc", "editor.resolveInstruction", request);
+        const auto lateHost = finish;
+        editor->cancelInstructionResolution("host-cancel");
+        QCOMPARE(response("host-cancel-rpc").value("error").toObject().value("data").toObject().value("errorCode").toString(), QString("canceled"));
+        QCOMPARE(cancellations.last().first().toString(), QString("host-cancel"));
+        const auto canceledCount = replies.size();
+        lateHost({{"result", "Late"}});
+        QCOMPARE(replies.size(), canceledCount);
+
+        request["id"] = "renderer-cancel";
+        send("renderer-cancel-rpc", "editor.resolveInstruction", request);
+        send("cancel", "editor.cancelInstruction", {{"id", "renderer-cancel"}});
+        QCOMPARE(cancellations.last().first().toString(), QString("renderer-cancel"));
+        QVERIFY(response("renderer-cancel-rpc").contains("error"));
+
+        request["id"] = "replaced-resolver";
+        send("replaced-rpc", "editor.resolveInstruction", request);
+        editor->setInstructionResolver({});
+        QVERIFY(response("replaced-rpc").contains("error"));
+        request["id"] = "fallback-again";
+        send("fallback-again-rpc", "editor.resolveInstruction", request);
+        QVERIFY(response("fallback-again-rpc").value("result").isNull());
+
+        editor->setInstructionResolver([](const QJsonObject&, foraoffice::DocsQtEditor::Completion done) { done({{"result", QJsonObject{{"instruction", "Invalid shape"}}}}); });
+        request["id"] = "invalid-result";
+        send("invalid-rpc", "editor.resolveInstruction", request);
+        QVERIFY(response("invalid-rpc").contains("error"));
+
+        editor->setInstructionResolver([&](const QJsonObject&, foraoffice::DocsQtEditor::Completion done) { finish = std::move(done); });
+        request["id"] = "disposed";
+        send("disposed-rpc", "editor.resolveInstruction", request);
+        const auto afterDisposal = finish;
+        editor.reset();
+        afterDisposal({{"result", "After disposal"}});
+    }
+
     void ribbonContributionsUseThePublicSdkAndNativeActionSignal() {
         QTemporaryDir workspace;
         foraoffice::DocsQtOptions options;

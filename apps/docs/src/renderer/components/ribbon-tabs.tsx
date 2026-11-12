@@ -1,4 +1,5 @@
 import { getDocsHost } from '../host/docs-host'
+import type { DocsAiOperation } from '../../shared/editor-action'
 import { RIBBON_ICON_SIZE } from './ribbon-metrics'
 import { useRef, useState } from 'react'
 import type { Editor, JSONContent } from '@tiptap/core'
@@ -774,7 +775,7 @@ export const AI_REWRITE_ACK_KEY = 'docs-ai-rewrite-ack'
 export type { BalloonMode, RevisionDisplayMode }
 
 interface ReviewTabProps extends TabProps {
-  onAiPreset: (instruction: string) => void
+  onAiPreset: (instruction: string, operation: DocsAiOperation) => void
   commentCount: number
   /** unresolved root comments; 0 disables the AI resolve-comments action */
   openCommentCount: number
@@ -920,8 +921,16 @@ export function ReviewTab({
             disabled={!hasDoc}
             data-tip={`${t('ribbonEditorTip')} — ${t('ribbonAiCreditNote')}`}
             onClick={() => {
-              if (hasRangeSelection()) onAiPreset(t('ribbonEditorSelectionPrompt'))
-              else if (confirmAiRewrite()) onAiPreset(t('ribbonEditorPrompt'))
+              if (hasRangeSelection())
+                onAiPreset(t('ribbonEditorSelectionPrompt'), {
+                  operationId: 'proofread_selection',
+                  parameters: {},
+                })
+              else if (confirmAiRewrite())
+                onAiPreset(t('ribbonEditorPrompt'), {
+                  operationId: 'proofread_document',
+                  parameters: {},
+                })
             }}
           >
             <span className="rb-big-icon">
@@ -975,9 +984,16 @@ export function ReviewTab({
                       if (hasRangeSelection()) {
                         onAiPreset(
                           t('ribbonTranslateSelectionPrompt', { lang: t(ribbonLangKey(code)) }),
+                          {
+                            operationId: 'translate_selection',
+                            parameters: { targetLanguage: code },
+                          },
                         )
                       } else if (confirmAiRewrite()) {
-                        onAiPreset(t('ribbonTranslatePrompt', { lang: t(ribbonLangKey(code)) }))
+                        onAiPreset(t('ribbonTranslatePrompt', { lang: t(ribbonLangKey(code)) }), {
+                          operationId: 'translate_document',
+                          parameters: { targetLanguage: code },
+                        })
                       }
                     }}
                   >
@@ -1087,7 +1103,12 @@ export function ReviewTab({
             className="rb-big"
             disabled={!hasDoc || openCommentCount === 0}
             data-tip={`${t('ribbonAiCommentsTip', { count: openCommentCount })} — ${t('ribbonAiCreditNote')}`}
-            onClick={() => onAiPreset(t('ribbonAiCommentsPrompt'))}
+            onClick={() =>
+              onAiPreset(t('ribbonAiCommentsPrompt'), {
+                operationId: 'resolve_comments',
+                parameters: {},
+              })
+            }
           >
             <span className="rb-big-icon">
               <span className="ai-feature-icon" aria-hidden="true">
@@ -1290,7 +1311,12 @@ export function ReviewTab({
             className="rb-big"
             disabled={!hasDoc || revisionCount === 0}
             data-tip={`${t('ribbonAiRevisionsTip', { count: revisionCount })} — ${t('ribbonAiCreditNote')}`}
-            onClick={() => onAiPreset(t('ribbonAiRevisionsPrompt'))}
+            onClick={() =>
+              onAiPreset(t('ribbonAiRevisionsPrompt'), {
+                operationId: 'summarize_revisions',
+                parameters: {},
+              })
+            }
           >
             <span className="rb-big-icon">
               <span className="ai-feature-icon" aria-hidden="true">

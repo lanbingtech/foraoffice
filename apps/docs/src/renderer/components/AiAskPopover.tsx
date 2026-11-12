@@ -324,7 +324,7 @@ export function AiAskPopover({
               e.preventDefault()
               if (!canSubmit) return
               if (!queueEnabled) {
-                onSendNow(text.trim())
+                onSendNow(text)
                 close()
               } else if (open.mode === 'edit') {
                 onQueueUpdate(open.qid, text.trim())
@@ -383,7 +383,7 @@ export function AiAskPopover({
                   className="ai-ask-cancel"
                   disabled={!canSubmit}
                   onClick={() => {
-                    onSendNow(text.trim())
+                    onSendNow(text)
                     close()
                   }}
                 >
@@ -400,7 +400,7 @@ export function AiAskPopover({
                 }
                 onClick={() => {
                   if (queueEnabled) onQueueAdd(text.trim())
-                  else onSendNow(text.trim())
+                  else onSendNow(text)
                   close()
                 }}
               >

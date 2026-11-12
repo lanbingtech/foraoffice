@@ -18,7 +18,13 @@ export { createExternalDocsHost } from './host/docs-host'
 export { createQtDocsHost } from './host/qt'
 export type { DocsQtChannel, QtSignal } from './host/qt'
 export type { DocsHostAdapter, DocsEditorServices } from './host/docs-host'
-export type { DocsEditorAction, DocsHarnessAdapter } from '../shared/editor-action'
+export type {
+  DocsEditorAction,
+  DocsHarnessAdapter,
+  DocsAiOperationId,
+  DocsAiOperation,
+  DocsAiInstructionRequest,
+} from '../shared/editor-action'
 export type { DocsResourceTools } from '../shared/resource-tools'
 export { createDocsResourceTools } from './runtime/resource-tools'
 export type { DocsResourceOptions } from './runtime/resource-tools'

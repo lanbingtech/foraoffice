@@ -1,4 +1,5 @@
 import { getDocsHost, getOptionalDocsHost } from '../host/docs-host'
+import type { DocsAiOperation } from '../../shared/editor-action'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Editor } from '@tiptap/core'
 import type { Command } from '@tiptap/pm/state'
@@ -92,7 +93,7 @@ interface EditorContextMenuProps {
   onNewComment: () => void
   onViewImage: (src: string) => void
   onSaveImageAs: (src: string) => void
-  onAiPreset: (instruction: string) => void
+  onAiPreset: (instruction: string, operation: DocsAiOperation) => void
   /** List items: restart numbering / continue numbering (shown when the cursor is on a docListItem) */
   onRestartNumbering?: () => void
   onContinueNumbering?: () => void
@@ -737,7 +738,12 @@ export function EditorContextMenu({
           {item(t('appSynonyms'), {
             disabled: !synonymText,
             ai: true,
-            onClick: run(() => onAiPreset(t('appSynonymsPrompt', { text: synonymText }))),
+            onClick: run(() =>
+              onAiPreset(t('appSynonymsPrompt', { text: synonymText }), {
+                operationId: 'suggest_synonyms',
+                parameters: {},
+              }),
+            ),
           })}
           <div className="ctx-item-wrap" onMouseLeave={() => setSubmenu(null)}>
             {item(t('appTranslate'), {
@@ -757,6 +763,10 @@ export function EditorContextMenu({
                           lang: t(appLangKey(code)),
                           text: selectedText,
                         }),
+                        {
+                          operationId: 'translate_selection',
+                          parameters: { targetLanguage: code },
+                        },
                       ),
                     )}
                   >
