@@ -48,8 +48,16 @@ export interface DocsRibbonTab extends Presentation {
 export interface DocsRibbonGroupExtension extends DocsRibbonGroup {
   tabId: DocsRibbonBuiltinTab
 }
+export interface DocsRibbonAssistantButton {
+  label?: string
+  /** Same raster data URL contract as contributed controls. */
+  icon?: string
+  visible?: boolean
+}
 export interface DocsRibbonConfiguration {
   documentToken: string | null
+  /** Presentation of the native assistant entry; its existing action is preserved. */
+  assistantButton?: DocsRibbonAssistantButton
   tabs?: DocsRibbonTab[]
   groups?: DocsRibbonGroupExtension[]
   quickAccess?: DocsRibbonControl[]
@@ -64,7 +72,7 @@ export interface DocsRibbonAction {
   document: DocsDocumentState | null
 }
 export interface DocsRibbon {
-  /** Atomically replace this document session's contributions; built-ins are preserved. */
+  /** Atomically replace this session's presentation/contributions; built-in actions are preserved. */
   set(configuration: DocsRibbonConfiguration): void
   reset(): void
   onAction(listener: (event: DocsRibbonAction) => void): () => void
@@ -72,6 +80,10 @@ export interface DocsRibbon {
 
 const id = z.string().min(1).max(128)
 const label = z.string().min(1).max(256)
+const icon = z
+  .string()
+  .max(131072)
+  .regex(/^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/)
 const presentation = { id, label, visible: z.boolean().optional(), enabled: z.boolean().optional() }
 const menuItem: z.ZodType<DocsRibbonMenuItem> = z.lazy(() =>
   z.discriminatedUnion('type', [
@@ -82,11 +94,7 @@ const menuItem: z.ZodType<DocsRibbonMenuItem> = z.lazy(() =>
 )
 const controlPresentation = {
   ...presentation,
-  icon: z
-    .string()
-    .max(131072)
-    .regex(/^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/)
-    .optional(),
+  icon: icon.optional(),
   tooltip: z.string().max(1024).optional(),
 }
 const control = z.discriminatedUnion('type', [
@@ -104,6 +112,10 @@ const group = z.object({ ...presentation, items: z.array(control) }).strict()
 const configurationSchema = z
   .object({
     documentToken: z.string().min(1).nullable(),
+    assistantButton: z
+      .object({ label: label.optional(), icon: icon.optional(), visible: z.boolean().optional() })
+      .strict()
+      .optional(),
     tabs: z.array(z.object({ ...presentation, groups: z.array(group) }).strict()).optional(),
     groups: z.array(group.extend({ tabId: z.enum(DOCS_RIBBON_BUILTIN_TABS) })).optional(),
     quickAccess: z.array(control).optional(),

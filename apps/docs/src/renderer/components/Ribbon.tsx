@@ -1,6 +1,6 @@
 import { getDocsHost } from '../host/docs-host'
 import { FileMenu } from './FileMenu'
-import { HOME_RIBBON_ICON_SIZE, RIBBON_ICON_SIZE } from './ribbon-metrics'
+import { ASSISTANT_ICON_SIZE, HOME_RIBBON_ICON_SIZE, RIBBON_ICON_SIZE } from './ribbon-metrics'
 import { RibbonExtensionGroups, RibbonQuickAccess, ribbonItemVisible } from './RibbonExtensions'
 import type { DocsRibbonConfiguration } from '../sdk/ribbon'
 import type { DocsFileMenuCommand, DocsFileMenuItem } from '../sdk/file-menu'
@@ -965,6 +965,8 @@ function RibbonInner({
   onPagePreview,
 }: RibbonProps) {
   const { t, lang } = useI18n()
+  const assistantButton = ribbonConfiguration?.assistantButton
+  const assistantLabel = assistantButton?.label ?? 'Genspark AI'
   const collapse = useRibbonCollapse('aidocs.ribbonCollapsed', {
     collapse: t('ribbonCollapse'),
     expand: t('ribbonExpand'),
@@ -3547,19 +3549,31 @@ function RibbonInner({
           </div>
         ) : tab === 'home' ? (
           <>
-            {/* ---- Genspark AI (first slot: entry + one-click AI actions) ---- */}
+            {/* ---- Assistant entry + one-click AI actions ---- */}
             <div className="ribbon-group">
               <div className="ribbon-group-items">
-                <button
-                  className={`rb-big ai-entry ${showAi ? 'active' : ''}`}
-                  data-tip={t('aiOpenAssistant')}
-                  onClick={onToggleAi}
-                >
-                  <span className="rb-big-icon">
-                    <GensparkMark size={26} />
-                  </span>
-                  <span>Genspark AI</span>
-                </button>
+                {assistantButton?.visible !== false && (
+                  <button
+                    className={`rb-big ai-entry ${showAi ? 'active' : ''}`}
+                    data-tip={t('aiOpenAssistant')}
+                    onClick={onToggleAi}
+                  >
+                    <span className="rb-big-icon">
+                      {assistantButton?.icon ? (
+                        <img
+                          src={assistantButton.icon}
+                          alt=""
+                          width={ASSISTANT_ICON_SIZE}
+                          height={ASSISTANT_ICON_SIZE}
+                          draggable={false}
+                        />
+                      ) : (
+                        <GensparkMark size={ASSISTANT_ICON_SIZE} />
+                      )}
+                    </span>
+                    <span>{assistantLabel}</span>
+                  </button>
+                )}
                 <button
                   className="rb-big ai-entry"
                   disabled={docEmpty}
@@ -3683,7 +3697,7 @@ function RibbonInner({
                   <span>{t('aiMindMapBtn')}</span>
                 </button>
               </div>
-              <div className="ribbon-group-label">Genspark AI</div>
+              <div className="ribbon-group-label">{assistantLabel}</div>
             </div>
 
             <div className="ribbon-sep" />

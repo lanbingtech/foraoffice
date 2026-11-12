@@ -351,6 +351,37 @@ test('a browser host owns pathless storage while native inspection and advisory 
       expect(binding.bound).toMatchObject({ documentId: action.documentId, text: action.context })
       expect((binding.bound as { text: string }).text).not.toBe(binding.live.text)
     }
+    const assistant = page.getByRole('button', { name: 'Workspace assistant', exact: true })
+    await expect(page.getByRole('button', { name: 'Genspark AI', exact: true })).toBeVisible()
+    await page.evaluate((icon) => {
+      const { editor } = window as unknown as FixtureWindow
+      editor.ui.ribbon.set({
+        documentToken: editor.documents.state()!.documentToken,
+        assistantButton: { label: 'Workspace assistant', icon: `data:image/png;base64,${icon}` },
+      })
+    }, image)
+    await expect(assistant).toBeVisible()
+    await expect(assistant.locator('img')).toHaveAttribute('src', `data:image/png;base64,${image}`)
+    await expect(assistant.locator('img')).toHaveCSS('width', '26px')
+    await expect(assistant.locator('xpath=../..').locator('.ribbon-group-label')).toHaveText(
+      'Workspace assistant',
+    )
+    await expect(page.getByRole('button', { name: 'Genspark AI', exact: true })).toHaveCount(0)
+    await assistant.click()
+    expect(
+      await page.evaluate(() => (window as unknown as FixtureWindow).fixture.agentActions.at(-1)),
+    ).toMatchObject({ kind: 'ask', instruction: '' })
+    await page.evaluate(() => {
+      const { editor } = window as unknown as FixtureWindow
+      editor.ui.ribbon.set({
+        documentToken: editor.documents.state()!.documentToken,
+        assistantButton: { label: 'Workspace assistant', visible: false },
+      })
+    })
+    await expect(assistant).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'AI Summarize', exact: true })).toBeVisible()
+    await page.evaluate(() => (window as unknown as FixtureWindow).editor.ui.ribbon.reset())
+    await expect(page.getByRole('button', { name: 'Genspark AI', exact: true })).toBeVisible()
     const bodyInstance = await body.elementHandle()
     const beforeMenu = await page.evaluate(() => {
       const target = window as unknown as FixtureWindow
@@ -803,7 +834,7 @@ test('a browser host owns pathless storage while native inspection and advisory 
     await expect(instructionInput).toHaveCount(0)
     expect(
       await page.evaluate(() => (window as unknown as FixtureWindow).fixture.agentActions.length),
-    ).toBe(2)
+    ).toBe(3)
     expect(
       await page.evaluate(async () => {
         const { editor, fixture } = window as unknown as FixtureWindow

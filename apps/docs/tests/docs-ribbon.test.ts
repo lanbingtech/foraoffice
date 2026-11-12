@@ -53,6 +53,37 @@ const configuration = (): DocsRibbonConfiguration => ({
   quickAccess: [{ type: 'button', id: 'quick', label: 'Quick', actionId: 'quick' }],
 })
 
+it('customizes the native assistant entry with validated declarative presentation', () => {
+  const ribbon = createDocsRibbon(documentState)
+  const icon = 'data:image/png;base64,aGVsbG8='
+  const input = {
+    ...configuration(),
+    assistantButton: { label: 'Workspace assistant', icon, visible: false },
+  }
+  ribbon.set(input)
+  input.assistantButton.label = 'Changed input'
+  expect(ribbon.snapshot()).toMatchObject({
+    assistantButton: { label: 'Workspace assistant', icon, visible: false },
+  })
+  for (const assistantButton of [{}, { label: 'Assistant' }, { icon }, { visible: true }])
+    expect(parseDocsRibbon({ documentToken: null, assistantButton })).toMatchObject({
+      assistantButton,
+    })
+  for (const assistantButton of [
+    { label: '' },
+    { label: 'x'.repeat(257) },
+    { visible: 'false' },
+    { icon: 'https://example.com/icon.png' },
+    { icon: 'data:image/svg+xml;base64,PHN2Zz4=' },
+    { icon: 'javascript:alert(1)' },
+    { icon: 'data:image/png;base64,' + 'a'.repeat(131072) },
+    { onClick: 'script' },
+  ])
+    expect(() => parseDocsRibbon({ documentToken: null, assistantButton })).toThrow()
+  ribbon.reset()
+  expect(ribbon.snapshot()).toBeNull()
+})
+
 it('emits neutral actions with their location and captured document, without mutating document state', () => {
   const state = documentState()
   const ribbon = createDocsRibbon(() => ({ ...state }))

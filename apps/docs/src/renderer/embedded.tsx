@@ -44,6 +44,7 @@ export type {
 export { DOCS_RIBBON_BUILTIN_TABS } from './sdk/ribbon'
 export type {
   DocsRibbon,
+  DocsRibbonAssistantButton,
   DocsRibbonAction,
   DocsRibbonBuiltinTab,
   DocsRibbonConfiguration,

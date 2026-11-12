@@ -91,6 +91,7 @@ private slots:
         };
         const QJsonObject configuration{
             {"documentToken", token},
+            {"assistantButton", QJsonObject{{"label", "Workspace assistant"}, {"icon", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="}}},
             {"tabs", QJsonArray{QJsonObject{{"id", "extension.tools"}, {"label", "Extension tools"}, {"groups", QJsonArray{
                 QJsonObject{{"id", "tools"}, {"label", "Tools"}, {"items", QJsonArray{button("inspect", "Inspect")}}}}}}}},
             {"groups", QJsonArray{QJsonObject{{"tabId", "home"}, {"id", "home-tools"}, {"label", "Home tools"}, {"items", QJsonArray{
@@ -99,6 +100,7 @@ private slots:
             {"quickAccess", QJsonArray{button("quick", "Quick action")}}
         };
         QVERIFY(!call(editor, "ui.ribbon.set", configuration).contains("error"));
+        QVERIFY(script(editor, "(async()=>{await new Promise(requestAnimationFrame);const b=[...document.querySelectorAll('button.ai-entry')].find(b=>b.textContent.trim()==='Workspace assistant');return b&&b.querySelector('img').width===26&&b.closest('.ribbon-group').querySelector('.ribbon-group-label').textContent==='Workspace assistant'})()").value("result").toBool());
         const auto click = [&](const QString& label) {
             return script(editor, QStringLiteral("(async()=>{await new Promise(requestAnimationFrame);const b=[...document.querySelectorAll('button')].find(b=>b.getAttribute('aria-label')===%1||b.textContent.trim()===%1);if(!b)throw Error('Missing control');b.click();await new Promise(requestAnimationFrame);return true})()").arg(literal(label)));
         };
@@ -115,6 +117,10 @@ private slots:
         QCOMPARE(actions.at(1)[1].toJsonObject().value("tabId").toString(), QStringLiteral("extension.tools"));
         QCOMPARE(actions.at(2)[1].toJsonObject().value("documentToken"), token);
         auto released = configuration;
+        auto hidden = configuration;
+        hidden.insert("assistantButton", QJsonObject{{"label", "Workspace assistant"}, {"visible", false}});
+        QVERIFY(!call(editor, "ui.ribbon.set", hidden).contains("error"));
+        QVERIFY(script(editor, "(async()=>{await new Promise(requestAnimationFrame);return ![...document.querySelectorAll('button.ai-entry')].some(b=>b.textContent.trim()==='Workspace assistant')&&document.querySelectorAll('button.ai-entry').length===4})()").value("result").toBool());
         auto quick = button("quick", "Quick action"); quick.insert("pressed", false);
         released.insert("quickAccess", QJsonArray{quick});
         QVERIFY(!call(editor, "ui.ribbon.set", released).contains("error"));

@@ -207,6 +207,26 @@ business operations, execute scripts, or require an Agent/model service.
 - `tabs` appends new tabs, each containing labeled groups and controls.
 - `groups` appends groups to a native tab identified by `tabId`.
 - `quickAccess` appends controls after the native quick-access buttons.
+- `assistantButton` customizes the native assistant entry in Home using optional
+  `label`, `icon` and `visible` fields. Omitted fields retain the native defaults;
+  `visible: false` hides only this entry, leaving the other AI tools available.
+  The label also names its ribbon group. The icon uses the same raster data URL
+  validation as contributed controls and the native assistant's 26px canvas.
+  Clicking retains the existing assistant/Harness callback; it does not emit a
+  contributed ribbon action or change the Agent implementation.
+
+```ts
+editor.ui.ribbon.set({
+  documentToken: editor.documents.state()?.documentToken ?? null,
+  assistantButton: { label: 'Workspace assistant', icon: assistantIconDataUrl, visible: true },
+  // Include the rest of the current tabs/groups/quickAccess snapshot, if any.
+})
+```
+
+This follows the same document-session lifecycle as other ribbon configuration:
+`set` replaces the complete snapshot, `reset` restores defaults, and opening or
+replacing a document clears the configuration. Reapply it with the new document
+token. Qt hosts pass the same JSON through `callSdk("ui.ribbon.set", ...)`.
 
 All three locations support `type: 'button'` with an `actionId`, and
 `type: 'menu'` with menu `items`. Menu nodes use `action`, `group` or `submenu`;
