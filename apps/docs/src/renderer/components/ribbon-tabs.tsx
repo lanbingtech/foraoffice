@@ -975,7 +975,7 @@ export function ReviewTab({
               <span>{t('ribbonTranslate')}</span>
             </button>
             {dropdown === 'translate' && (
-              <div data-rb-panel="" className="layout-menu">
+              <div data-rb-panel="" className="layout-menu layout-menu-scroll">
                 {TRANSLATE_LANGS.map(({ code }) => (
                   <button
                     key={code}

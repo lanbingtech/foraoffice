@@ -91,7 +91,7 @@ for (const language of ['en', 'zh'] as const)
     let browser: SdkTestHost | undefined
     try {
       browser = await launchSdkTestHost()
-      const page = await browser.newPage({ viewport: { width: 1360, height: 1000 } })
+      const page = await browser.newPage({ viewport: { width: 1360, height: 800 } })
       page.on('dialog', (dialog) => dialog.accept())
       await page.goto(`http://127.0.0.1:${address.port}/`)
       await page.waitForFunction(() => (window as unknown as Fixture).ready)
@@ -122,6 +122,13 @@ for (const language of ['en', 'zh'] as const)
       expect(shortcut.context).toContain('Selected text (9 characters): "Cell text"')
       await select(false)
       await page.getByRole('button', { name: translateLabel, exact: true }).click()
+      const languageMenu = page.locator('.layout-menu').filter({
+        has: page.getByRole('button', { name: frenchLabel, exact: true }),
+      })
+      const menuBox = await languageMenu.boundingBox()
+      expect(menuBox).not.toBeNull()
+      expect(menuBox!.y).toBeGreaterThanOrEqual(0)
+      expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(800)
       await page
         .locator('.layout-menu')
         .getByRole('button', { name: frenchLabel, exact: true })
