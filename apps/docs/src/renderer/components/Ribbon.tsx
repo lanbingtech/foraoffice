@@ -1058,6 +1058,49 @@ function RibbonInner({
     }
   }, [tabRequest])
 
+  // Older embedded Chromium lacks CSS anchor positioning. Keep the same fixed
+  // panels outside the ribbon scroll clip, positioned from their owning wrap.
+  useLayoutEffect(() => {
+    if (
+      dropdown == null ||
+      (typeof CSS !== 'undefined' && CSS.supports?.('position-anchor', '--rb-drop-wrap'))
+    )
+      return
+    const panels = Array.from(
+      document.querySelectorAll<HTMLElement>('.ribbon .layout-menu[data-rb-panel]'),
+    )
+    const position = (event?: Event) => {
+      if (
+        event?.type === 'scroll' &&
+        event.target instanceof Node &&
+        panels.some((panel) => panel.contains(event.target as Node))
+      )
+        return
+      for (const panel of panels) {
+        const wrap = panel.parentElement
+        if (!wrap || getComputedStyle(panel).position !== 'fixed') continue
+        const anchor = wrap.getBoundingClientRect()
+        if (!anchor.width || !anchor.height) continue
+        panel.style.maxHeight = `min(70vh, 560px, ${Math.max(32, innerHeight - anchor.bottom - 12)}px)`
+        panel.style.overflowY = 'auto'
+        const bounds = panel.getBoundingClientRect()
+        const left = panel.classList.contains('align-right')
+          ? anchor.right - bounds.width
+          : anchor.left
+        panel.style.top = `${Math.max(8, Math.min(anchor.bottom + 4, innerHeight - bounds.height - 8))}px`
+        panel.style.left = `${Math.max(8, Math.min(left, innerWidth - bounds.width - 8))}px`
+        panel.style.right = 'auto'
+      }
+    }
+    position()
+    window.addEventListener('resize', position)
+    window.addEventListener('scroll', position, true)
+    return () => {
+      window.removeEventListener('resize', position)
+      window.removeEventListener('scroll', position, true)
+    }
+  }, [dropdown])
+
   // Unified dismissal: a press anywhere outside the open panel closes it (plus
   // window blur / shell chrome presses). The [data-rb-panel] element exists in
   // the DOM only while a dropdown is open, and its parent element is the wrap

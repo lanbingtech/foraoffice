@@ -92,6 +92,17 @@ for (const language of ['en', 'zh'] as const)
     try {
       browser = await launchSdkTestHost()
       const page = await browser.newPage({ viewport: { width: 1360, height: 800 } })
+      // Exercise the embedded-Chromium fallback independently of the browser's support.
+      if (language === 'zh')
+        await page.addInitScript(() => {
+          const supports = CSS.supports.bind(CSS)
+          CSS.supports = ((property: string, value?: string) =>
+            property === 'position-anchor'
+              ? false
+              : value === undefined
+                ? supports(property)
+                : supports(property, value)) as typeof CSS.supports
+        })
       page.on('dialog', (dialog) => dialog.accept())
       await page.goto(`http://127.0.0.1:${address.port}/`)
       await page.waitForFunction(() => (window as unknown as Fixture).ready)
