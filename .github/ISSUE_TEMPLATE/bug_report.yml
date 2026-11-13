@@ -1,3 +1,4 @@
+# Modified for ForaOffice: SDK/host context and fork-specific product scope.
 name: Bug report
 description: Something is broken or behaves unexpectedly
 labels: [bug]
@@ -6,15 +7,18 @@ body:
     id: app
     attributes:
       label: App
-      description: Which part of the suite is affected?
+      description: Which ForaOffice component or inherited desktop consumer is affected?
       options:
-        - GenOffice Docs (docs)
-        - GenOffice Sheets (sheets)
-        - GenOffice Slides (slides)
-        - GenOffice PDF (pdf)
-        - GenOffice Markdown (markdown)
-        - Shell / home screen
-        - AI panel / providers
+        - Docs SDK / embedded live runtime
+        - Docs standalone desktop
+        - Inherited Sheets desktop
+        - Inherited Slides desktop
+        - Inherited PDF desktop
+        - Inherited Markdown desktop
+        - Inherited HTML desktop
+        - Inherited shell / home screen
+        - External Harness / MCP integration
+        - Inherited AI panel / providers
         - Build / packaging
         - Other
     validations:
@@ -22,11 +26,20 @@ body:
   - type: input
     id: version
     attributes:
-      label: Version and OS
-      description: App version (or commit) and operating system
-      placeholder: '0.1.0 on macOS 15.3 / Windows 11'
+      label: Version, source and OS
+      description: SDK/app version, source commit and dirty status when available, and operating system
+      placeholder: 'Docs SDK 0.1.0, source commit, Windows 11'
     validations:
       required: true
+  - type: textarea
+    id: host
+    attributes:
+      label: Host and automation surface
+      description: >
+        For SDK issues include browser/Electron/Qt host and engine versions,
+        Node/Qt versions as applicable, managed versus local documents, and direct
+        runtime/Harness/MCP/file-level CLI mode. For MCP include client/version
+        and transport. Do not include tokens or credentials.
   - type: textarea
     id: what-happened
     attributes:
@@ -34,7 +47,8 @@ body:
       description: >
         What did you do, what did you expect, and what happened instead?
         If a document triggers the bug, attach a minimal sample file if
-        possible (please remove anything confidential first).
+        possible (please remove anything confidential first). Security or
+        sensitive reports must follow SECURITY.md rather than this public form.
       placeholder: Steps to reproduce, expected behavior, actual behavior.
     validations:
       required: true

@@ -1,6 +1,9 @@
-# ee/ is the enterprise-license boundary and takes no external contributions
-# (see ee/LICENSE); license-related files need a maintainer review.
-/ee/ @merrick-2002
-/LICENSE @merrick-2002
-/NOTICE @merrick-2002
-/.github/CODEOWNERS @merrick-2002
+# Modified for ForaOffice: actual fork maintainer ownership.
+# Review enforcement also requires repository rules; this file alone does not enforce it.
+/LICENSE @turbinefish
+/NOTICE @turbinefish
+/SECURITY.md @turbinefish
+/PRIVACY.md @turbinefish
+/CODE_OF_CONDUCT.md @turbinefish
+/CONTRIBUTING.md @turbinefish
+/.github/CODEOWNERS @turbinefish
