@@ -182,6 +182,11 @@ write was rolled back. An outstanding draft must be finalized, retained or
 discarded before saving. A stale target is refused; obtain fresh context and
 reassess the intended operation before submitting a new call.
 
+An unknown or released action binding returns `errorCode: 'stale_target'` and
+`committed: false`, with `documentId: ''` and `revision: 0` because no authorized
+document metadata remains. These values identify neither the old nor the active
+document; the host must grant a new binding before that conversation can continue.
+
 Freshness checks distinguish the body, revision decisions and document-side
 state (comments, notes, headers/footers, sections, styles and other authored
 stores). `revision` can advance for either body or document-side changes. A

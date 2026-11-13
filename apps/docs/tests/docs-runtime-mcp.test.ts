@@ -292,6 +292,76 @@ it('exposes a host-bound document over a standard SDK transport with no Electron
   router.dispose()
 })
 
+it.each(['unknown', 'released', 'replaced'] as const)(
+  'returns structured stale errors for a %s scope without inspecting the current document',
+  async (authority) => {
+    const { editorExtensions } = await import('../src/renderer/editor/extensions')
+    editor = new Editor({
+      element: document.createElement('div'),
+      extensions: editorExtensions,
+      content: '<p>Original document</p>',
+    })
+    const active = editor
+    let identity = {}
+    let reads = 0
+    let saves = 0
+    runtime = createDocsRuntime({
+      current: () => {
+        reads++
+        return { editor: active, identity, numIds: { bullet: null, ordered: null } }
+      },
+      save: async () => {
+        saves++
+        return { ok: true, committed: true, pending: false }
+      },
+    })
+    const router = createDocsCommandRouter(runtime)
+    if (authority !== 'unknown') router.bindScope('old-action', runtime.capture())
+    boundServer = createDocsMcpServer({
+      version: 'test',
+      bindingId: 'old-action',
+      endpoint: {
+        request: (message, signal) => router.handle(message, signal),
+        closeCaller: (callerId) => router.disconnect(callerId),
+      },
+    })
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
+    await boundServer.connect(serverTransport)
+    client = new Client({ name: 'stale-scope-harness', version: '1' }, { capabilities: {} })
+    await client.connect(clientTransport)
+    if (authority !== 'unknown') {
+      expect((await client.callTool({ name: 'read_document' })).isError).not.toBe(true)
+      if (authority === 'released') router.releaseScope('old-action')
+      else router.releaseAll()
+    }
+    active.commands.setContent('<p>Private replacement</p>')
+    identity = {}
+    // The injected host authority must not be asked to expose the replacement document.
+    const readsBefore = reads
+    for (const [name, args] of [
+      ['read_document', {}],
+      ['replace_selection', { html: 'Unauthorized edit' }],
+      ['save_document', { path: '/unauthorized.docx' }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: args })
+      expect(result).toMatchObject({
+        isError: true,
+        structuredContent: {
+          documentId: '',
+          revision: 0,
+          errorCode: 'stale_target',
+          committed: false,
+        },
+      })
+      expect(JSON.stringify(result)).not.toContain('Private replacement')
+    }
+    expect(reads).toBe(readsBefore)
+    expect(saves).toBe(0)
+    expect(active.getText()).toBe('Private replacement')
+    router.dispose()
+  },
+)
+
 it('returns document images using standard MCP image content rather than resource credentials in text', async () => {
   const { editorExtensions } = await import('../src/renderer/editor/extensions')
   const data =
