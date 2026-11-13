@@ -20,6 +20,7 @@ export async function runRealCodexDocs(options: {
     return `/mnt/${match[1].toLowerCase()}/${match[2].replaceAll('\\', '/')}`
   }
   const cwd = options.wsl ? linuxPath(options.cwd) : options.cwd
+  const nativeWindows = process.platform === 'win32' && !options.wsl
   const filesystem = {
     ':minimal': 'read',
     [cwd]: 'read',
@@ -47,11 +48,19 @@ export async function runRealCodexDocs(options: {
     'gpt-6.1-sol',
     ...config('approval_policy', '"never"'),
     ...config('model_reasoning_effort', '"low"'),
+    ...config('features.shell_tool', 'false'),
+    ...config('features.view_image', 'false'),
     ...(options.windowsSandbox
       ? config('windows.sandbox', JSON.stringify(options.windowsSandbox))
       : []),
-    ...config('default_permissions', '"foraoffice_acceptance"'),
-    ...config('permissions.foraoffice_acceptance.filesystem', filesystemToml),
+    // Native Windows supports the built-in read-only profile rather than split read roots.
+    // Editor file grants remain independently bounded by the host service.
+    ...(nativeWindows
+      ? config('default_permissions', '":read-only"')
+      : [
+          ...config('default_permissions', '"foraoffice_acceptance"'),
+          ...config('permissions.foraoffice_acceptance.filesystem', filesystemToml),
+        ]),
     ...config(
       'mcp_servers.foraoffice.command',
       JSON.stringify(options.wsl ? linuxPath(process.execPath) : process.execPath),
@@ -151,6 +160,28 @@ export async function runRealCodexDocs(options: {
       throw new Error(
         'Codex did not report a completed turn; inspect the isolated acceptance events',
       )
+    let savedThroughMcp = false
+    for (const event of events) {
+      if (!event || typeof event !== 'object' || !('type' in event) || !('item' in event)) continue
+      const item = event.item
+      if (!item || typeof item !== 'object' || !('type' in item)) continue
+      if (item.type === 'command_execution' || item.type === 'file_change')
+        throw new Error('Codex used a local command or file change instead of the editor MCP tools')
+      if (
+        event.type === 'item.completed' &&
+        item.type === 'mcp_tool_call' &&
+        'server' in item &&
+        item.server === 'foraoffice' &&
+        'tool' in item &&
+        item.tool === 'save_document' &&
+        'status' in item &&
+        item.status === 'completed' &&
+        !('error' in item && item.error)
+      )
+        savedThroughMcp = true
+    }
+    if (!savedThroughMcp)
+      throw new Error('Codex did not complete save_document through the editor MCP server')
   } finally {
     clearTimeout(timer)
     if (child.exitCode === null) child.kill('SIGTERM')
