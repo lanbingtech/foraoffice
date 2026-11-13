@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Docs: word processing
+
+> This manual describes the inherited GenOffice desktop consumer in ForaOffice, including its built-in agent and settings. Embedded Docs hosts provide their own services and agent integration; desktop features are not automatically SDK capabilities. See the [Docs SDK guide](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Docs is the Word-like processor: reads and writes genuine .docx with true WYSIWYG pagination.
 

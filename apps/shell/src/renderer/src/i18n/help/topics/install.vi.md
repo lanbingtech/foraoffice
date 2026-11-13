@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: distinguish upstream installers from fork delivery. -->
+
 # Cài đặt GenOffice
+
+> Hướng dẫn kế thừa dưới đây mô tả bộ cài GenOffice gốc. Các bản tải xuống không chứa thay đổi ForaOffice hay Docs SDK và không chứng minh bản phát hành, chữ ký hoặc nền tảng được fork này hỗ trợ. Xem [giới thiệu dự án](https://github.com/lanbingtech/foraoffice) và [hướng dẫn Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Mọi bản dựng đều được công bố trên [trang phát hành](https://github.com/genspark-ai/genoffice/releases/latest). Tất cả đều đến từ `main`; và trình cài đặt cho macOS và Windows đã được ký.
 

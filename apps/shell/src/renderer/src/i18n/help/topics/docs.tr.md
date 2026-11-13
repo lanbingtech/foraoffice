@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Docs: kelime işlem
+
+> Bu kılavuz, ForaOffice içindeki GenOffice’den devralınan masaüstü uygulamasını, yerleşik ajanını ve ayarlarını anlatır. Docs gömen ana uygulamalar kendi hizmetlerini ve ajan bütünleştirmelerini sağlar; masaüstü özellikleri otomatik olarak SDK yeteneği değildir. [Docs SDK kılavuzuna](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md) bakın.
 
 Docs, Word benzeri kelime işlemcidir: gerçek .docx okur ve yazar, gerçek WYSIWYG sayfalandırma yapar.
 

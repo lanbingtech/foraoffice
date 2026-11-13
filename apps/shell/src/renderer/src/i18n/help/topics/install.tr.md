@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: distinguish upstream installers from fork delivery. -->
+
 # GenOffice'i yükleme
+
+> Aşağıdaki devralınan yönergeler özgün GenOffice kurulum paketlerini anlatır. Bu indirmeler ForaOffice değişikliklerini veya Docs SDK’yı içermez; bu çatallamanın sürümlerini, imzalarını veya desteklenen platformlarını kanıtlamaz. [Proje tanıtımına](https://github.com/lanbingtech/foraoffice) ve [Docs SDK kılavuzuna](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md) bakın.
 
 Her derleme [Sürümler sayfasında](https://github.com/genspark-ai/genoffice/releases/latest) yayımlanır. Hepsi `main` dalından gelir; macOS ve Windows yükleyicileri imzalıdır.
 

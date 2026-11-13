@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: distinguish upstream installers from fork delivery. -->
+
 # GenOffice इंस्टॉल करना
+
+> नीचे दिए गए विरासत निर्देश मूल GenOffice के इंस्टॉलर बताते हैं। इन डाउनलोड में ForaOffice के बदलाव या Docs SDK नहीं हैं और ये इस फ़ोर्क के रिलीज़, हस्ताक्षर या समर्थित प्लेटफ़ॉर्म का प्रमाण नहीं हैं। [परियोजना परिचय](https://github.com/lanbingtech/foraoffice) और [Docs SDK गाइड](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md) देखें।
 
 हर बिल्ड [Releases पेज](https://github.com/genspark-ai/genoffice/releases/latest) पर प्रकाशित होता है। सभी `main` से बनी होती हैं; और macOS तथा Windows के इंस्टॉलर हस्ताक्षरित होते हैं।
 

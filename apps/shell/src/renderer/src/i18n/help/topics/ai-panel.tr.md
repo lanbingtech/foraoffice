@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # AI asistan paneli
+
+> Bu kılavuz, ForaOffice içindeki GenOffice’den devralınan masaüstü uygulamasını, yerleşik ajanını ve ayarlarını anlatır. Docs gömen ana uygulamalar kendi hizmetlerini ve ajan bütünleştirmelerini sağlar; masaüstü özellikleri otomatik olarak SDK yeteneği değildir. [Docs SDK kılavuzuna](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md) bakın.
 
 Her düzenleyici AI panelini çağırabilir: bir şey seçin, bir yönerge verin, akan sonucu izleyin.
 

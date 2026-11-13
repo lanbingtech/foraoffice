@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Le panneau d’assistant IA
+
+> Ce manuel décrit l’application de bureau héritée de GenOffice dans ForaOffice, avec son agent et ses paramètres intégrés. Les hôtes intégrant Docs fournissent leurs propres services et agents ; les fonctions de bureau ne sont pas automatiquement des capacités du SDK. Voir le [guide Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Chaque éditeur peut appeler le panneau IA: sélectionnez quelque chose, donnez une instruction, regardez le résultat en flux.
 

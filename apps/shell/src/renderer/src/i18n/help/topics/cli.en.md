@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Command line and agents
+
+> This manual describes the inherited GenOffice desktop consumer in ForaOffice, including its built-in agent and settings. Embedded Docs hosts provide their own services and agent integration; desktop features are not automatically SDK capabilities. See the [Docs SDK guide](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Every install ships a `genoffice` command that drives the same engines the window does — the same parsers, the same writer, the same renderer. A file the app saves and a file the command writes are the same file, and a check the app's AI panel passes is a check the command passes.
 

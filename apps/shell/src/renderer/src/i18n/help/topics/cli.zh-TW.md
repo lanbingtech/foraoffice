@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # 命令列與代理
+
+> 本手冊介紹 ForaOffice 中繼承自 GenOffice 的桌面應用程式，包括其內建代理與設定。嵌入式 Docs 的宿主自行提供服務及代理整合；桌面功能不會自動成為 SDK 的能力。請參閱 [Docs SDK 整合指南](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md)。
 
 每次安裝都會附帶一個 `genoffice` 命令，它驅動的是視窗所用的同一套引擎——同樣的解析器、同樣的寫入器、同樣的算繪器。應用程式儲存的檔案與命令寫出的檔案是同一個檔案；應用程式 AI 面板能通過的檢查，命令也能通過。
 

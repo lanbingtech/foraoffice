@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Docs: pemrosesan kata
+
+> Panduan ini menjelaskan aplikasi desktop warisan GenOffice di ForaOffice, termasuk agen dan pengaturan bawaannya. Host yang menyematkan Docs menyediakan layanan dan integrasi agen sendiri; fitur desktop tidak otomatis menjadi kemampuan SDK. Lihat [panduan Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Docs adalah pengolah kata mirip Word: membaca dan menulis .docx asli dengan penomoran halaman yang benar-benar sesuai dengan yang tampil (WYSIWYG).
 

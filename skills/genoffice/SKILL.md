@@ -1,14 +1,26 @@
 ---
 name: genoffice
-description: Create, convert, read and edit Office documents locally with GenOffice's command line. Build a new presentation (pptx) from a brief through a checked outline, per-page spec and render pipeline, a new spreadsheet (xlsx) from CSV or JSON data with formulas, a new Word document (docx) from Markdown or HTML, or a PDF; convert between pdf, docx, xlsx, pptx, md, html and csv; read the structure and text of an existing file (including the user's own docx / xlsx / pptx as source material) and apply structured edits to it. Use whenever the user asks for a slide deck, presentation, spreadsheet, workbook, report, Word document or any real Office file, a format conversion, a rewrite of part of an existing document, or wants the result opened in the GenOffice editor. Documents are processed locally; only search, image and media send the query or the referenced file to the provider configured in GenOffice.
+description: Create, convert, read and edit Office files locally with ForaOffice's inherited genoffice command line. Build a new presentation (pptx) from a brief through a checked outline, per-page spec and render pipeline, a new spreadsheet (xlsx) from CSV or JSON data with formulas, a new Word document (docx) from Markdown or HTML, or a PDF; convert between pdf, docx, xlsx, pptx, md, html and csv; read the structure and text of an existing file (including the user's own docx / xlsx / pptx as source material) and apply structured edits to it. Use whenever the user asks for a slide deck, presentation, spreadsheet, workbook, report, Word document or any real Office file, a format conversion, a rewrite of part of an existing file, or wants the result opened in the desktop editor. Documents are processed locally; search, image and media use the configured provider. This skill covers file tools and inherited desktop integration; use the host's Docs SDK for embedded live documents and unsaved state.
 metadata:
-  version: 2.68.0
+  version: 2.68.1
   cli: '>=0.9.0'
 ---
 
-# genoffice — GenOffice from the terminal
+# genoffice — ForaOffice's inherited file CLI
 
-`genoffice` is installed with GenOffice. Run `genoffice --version` first. If the command is not found, GenOffice writes the launcher directory to `~/.genoffice/launcher` (Windows: `%USERPROFILE%\.genoffice\launcher`) on every start: read that one line and run `"<dir>/genoffice"` from bash or `"<dir>\genoffice.cmd"` from PowerShell / cmd, quoted, in place of `genoffice` below. Default locations when that file is missing: macOS `/Applications/GenOffice.app/Contents/Resources/cli`, Windows `%LOCALAPPDATA%\Programs\GenOffice\resources\cli`, Linux `/opt/GenOffice/resources/cli`. Every command runs headless on the app's own engines; only `search`, `image` and `media` send data off the machine, to the provider configured in GenOffice.
+<!-- Modified for ForaOffice: distinguish inherited file automation from live SDK editing. -->
+
+ForaOffice keeps `genoffice` as the compatibility command for inherited file-level
+automation. This skill describes that CLI and its desktop integration, not the
+embedded Docs runtime. File operations read disk content; use the host's live
+Docs runtime or scoped MCP connection when the task concerns a mounted editor's
+unsaved state or captured selection. The host owns model and conversation setup
+for that integration; the desktop agent settings below are not SDK requirements.
+See the [Docs SDK guide](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
+Legacy application paths below describe upstream GenOffice installations; prefer
+the launcher record for the actual installed application.
+
+`genoffice` is installed with the desktop application. Run `genoffice --version` first. If the command is not found, the app writes the launcher directory to `~/.genoffice/launcher` (Windows: `%USERPROFILE%\.genoffice\launcher`) on every start: read that one line and run `"<dir>/genoffice"` from bash or `"<dir>\genoffice.cmd"` from PowerShell / cmd, quoted, in place of `genoffice` below. Upstream GenOffice locations when that file is missing are macOS `/Applications/GenOffice.app/Contents/Resources/cli`, Windows `%LOCALAPPDATA%\Programs\GenOffice\resources\cli`, Linux `/opt/GenOffice/resources/cli`; for a fork installation, use its actual installed resources directory. Every command runs headless on the app's own engines; only `search`, `image` and `media` send data off the machine, to the configured provider.
 
 Always add `--json` when a program reads the output: one JSON object on stdout, `{ "status": "ok" | "partial", "command", "summary", "output_path"?, "warnings"?, "detail"? }` (`partial`: an `apply` with `--best-effort` / `--stop-on-error` wrote the file but lost ops) or `{ "status": "error", "code", "error", "message", "suggestion"?, "detail"? }`. Exit codes: `0` ok, `1` usage or rejected ops, `2` file not found / output exists / file open in GenOffice, `3` conversion failed, `4` app not available. `error` is the machine-readable reason (table under "When a command fails"), `suggestion` the next step in one sentence, including `did you mean "…"?` when a command, option, op name, element id or sheet name is one typo away. `detail` carries facts as fields (`failures[]` with `index`, `op`, `error`, `reason`, `valid_range`, `available`, `supported`, `usage`; `sheets`, `options`, `commands`); never parse `message`.
 

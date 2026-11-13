@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Rychlý start: rozhraní a základy
+
+> Tato příručka popisuje desktopovou aplikaci převzatou z GenOffice do ForaOffice, včetně vestavěného agenta a nastavení. Hostitelé vloženého Docs poskytují vlastní služby a integraci agenta; desktopové funkce nejsou automaticky možnostmi SDK. Viz [průvodce Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 GenOffice je kancelářský balík, který běží celý na vašem počítači: jedno okno, jeden řádek karet a v něm šest editorů — Docs (textový editor), Sheets (tabulky), Slides (prezentace), PDF, Markdown a HTML. Soubory jsou skutečné soubory .docx / .xlsx / .pptx / .pdf, plně zaměnitelné s Wordem, Excelem a PowerPointem. Není potřeba žádné připojení k síti.
 

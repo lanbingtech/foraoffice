@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: distinguish upstream installers from fork delivery. -->
+
 # Memasang GenOffice
+
+> Petunjuk warisan berikut menjelaskan pemasang GenOffice asli. Unduhan tersebut tidak mencakup perubahan ForaOffice atau Docs SDK dan tidak membuktikan rilis, penandatanganan, atau dukungan platform fork ini. Lihat [pengantar proyek](https://github.com/lanbingtech/foraoffice) dan [panduan Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Setiap build dipublikasikan di [halaman Rilis](https://github.com/genspark-ai/genoffice/releases/latest). Semuanya berasal dari `main`; installer untuk macOS dan Windows sudah ditandatangani.
 

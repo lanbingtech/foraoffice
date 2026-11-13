@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Panel asystenta AI
+
+> Ta instrukcja opisuje odziedziczoną aplikację desktopową GenOffice w ForaOffice, wraz z wbudowanym agentem i ustawieniami. Hosty osadzające Docs zapewniają własne usługi i integrację agenta; funkcje desktopowe nie są automatycznie możliwościami SDK. Zobacz [przewodnik Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Każdy edytor może przywołać panel AI: zaznacz coś, wydaj polecenie i obserwuj wynik przesyłany strumieniowo.
 

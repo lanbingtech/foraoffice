@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: distinguish upstream installers from fork delivery. -->
+
 # تثبيت GenOffice
+
+> تصف الإرشادات الموروثة أدناه مثبتات GenOffice الأصلية. لا تتضمن التنزيلات تغييرات ForaOffice أو Docs SDK ولا تثبت وجود إصدارات أو توقيعات أو منصات مدعومة لهذا الفرع. راجع [مقدمة المشروع](https://github.com/lanbingtech/foraoffice) و[دليل Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 كل نسخة منشورة على [صفحة الإصدارات](https://github.com/genspark-ai/genoffice/releases/latest). وجميعها مبنية من `main`؛ وحزّامات التثبيت لنظامي macOS وWindows موقّعة.
 
