@@ -2,7 +2,9 @@ import type { AiPanelPrefs } from '@genoffice/ui'
 import type { Lang } from '@genoffice/i18n'
 import type { AiSettings, AiStreamChunk, AiStreamRequest } from '@genoffice/ai-provider'
 import type { PrintDuplex, PrintJobOptions, PrinterInfo } from '@genoffice/electron-utils/print-job'
+import type { PrinterOption } from '@genoffice/electron-utils/printer-options'
 export type { PrintDuplex, PrintJobOptions, PrinterInfo }
+export type { PrinterOption }
 
 /** largest slice readFileChunk hands over IPC; the renderer loops over them */
 export const PDF_READ_CHUNK_BYTES = 8 * 1024 * 1024
@@ -62,6 +64,7 @@ export const PDF_CHANNELS = {
   printRequest: 'pdf:print-request',
   print: 'pdf:print',
   printFile: 'pdf:print-file',
+  printerOptions: 'pdf:printer-options',
   printers: 'pdf:printers',
   fileRenamed: 'pdf:file-renamed',
   getLanguage: 'app:get-language',
@@ -70,6 +73,7 @@ export const PDF_CHANNELS = {
   themeChanged: 'app:theme-changed',
   getAiPanelPrefs: 'app:get-ai-panel-prefs',
   aiPanelPrefsChanged: 'app:ai-panel-prefs-changed',
+  authorNameChanged: 'app:author-name-changed',
 } as const
 
 export const VISUAL_SIGNATURE_CONTENT_PREFIX = 'GenOffice visual signature field: '
@@ -1186,8 +1190,9 @@ export interface PdfApi {
   addSavedSignature(data: SignatureData): Promise<SavedSignature[]>
   /** Delete one saved signature by id; returns the updated list */
   removeSavedSignature(id: string): Promise<SavedSignature[]>
-  /** OS account name, used as the default author of new note comments; '' when unavailable */
+  /** Settings → General user name (the OS account name when unset), used as the default author of new note comments */
   getUsername(): Promise<string>
+  onUsernameChanged(handler: (name: string) => void): () => void
   /** Mirror unsaved-changes state to the main process; drives the save prompt before closing a tab/window */
   setDirty(dirty: boolean): void
   /** Main process asks for a save (close prompt, menu Save, export flows) and waits for sendCloseSaveResult.
@@ -1213,6 +1218,9 @@ export interface PdfApi {
   ): Promise<{ ok: boolean; error?: string }>
   /** installed printers for the in-app print dialog */
   listPrinters(): Promise<PrinterInfo[]>
+  /** the driver option groups a queue advertises (quality, color, media type),
+   *  for the print dialog's driver-options dropdowns; empty when none */
+  printerOptions(queue: string): Promise<PrinterOption[]>
   /** The file was renamed or moved from the shell (home Folders / Files pane); the viewer follows the new path */
   onFileRenamed(handler: (newPath: string) => void): () => void
   getLanguage(): Promise<Lang>

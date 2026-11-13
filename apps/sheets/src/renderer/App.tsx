@@ -226,6 +226,7 @@ import type {
   AttachmentAddResult,
   AttachmentMeta,
   WorkbookConnection as QueryConnection,
+  ExternalLinkOps,
   ExternalLinkRow,
   MenuAction,
   RecoveryPromptPayload,
@@ -321,6 +322,7 @@ import {
   pivotFieldMembers as pivotFieldMembersImpl,
   pivotFieldOptions as pivotFieldOptionsImpl,
   pivotSelectionKey as pivotSelectionKeyImpl,
+  restoreSlicerPanels,
   type PivotActionContext,
   type PivotEditContext,
   type SlicerPickerState,
@@ -355,7 +357,11 @@ import { installFilterRangeOutlineSuppression } from './filter-range-outline'
 import { createSheetTabActions } from './sheet-tab-actions'
 import { installVeryHiddenSheetGuard } from './very-hidden-sheets'
 import { installFormulaBarAutosize } from './formula-bar-autosize'
-import { createFunctionArgumentsHost, installFxButtonHook } from './function-arguments-runtime'
+import {
+  createFunctionArgumentsHost,
+  installFxButtonHook,
+  installWorkbookPickRelay,
+} from './function-arguments-runtime'
 import {
   applyShowFormulasView,
   formulaViewSheets,
@@ -553,8 +559,9 @@ import {
 import { SlicerFieldPicker, SlicerPanels, type SlicerUiState } from './SlicerPanel'
 import { WatchWindowPanel, watchKey, type WatchCell, type WatchRowValue } from './WatchWindowPanel'
 import { ExternalLinksPanel } from './ExternalLinksPanel'
-import { updateExternalLinksFlow } from './external-links-flow'
-import { applyExternalLinkValues } from './univer-sync'
+import { breakExternalLinkFlow, updateExternalLinksFlow } from './external-links-flow'
+import { externalFileTarget } from './external-link-target'
+import { applyExternalLinkValues, journalExternalLinkLiterals } from './univer-sync'
 import { TimelineFieldPicker, TimelinePanels, type TimelineUiState } from './TimelinePanel'
 import type { DefinedNameAction, DefinedNameRow } from './NameManagerDialog'
 import { workbookMediaDataUrl } from './workbook-media'
@@ -939,8 +946,8 @@ export function App({
   /// journal size (pendingEdits) alone misses same-target re-edits and the
   /// ribbon echo would go stale.
   const [, setVisualEditTick] = useState(0)
-  /// In-session slicers (OOXML slicer part persistence: see the TODO in
-  /// SlicerPanel).
+  /// In-session slicers (persisted on save through the gateway's slicer
+  /// parts; restored from the file after each open — see restoreSlicerPanels).
   const [slicers, setSlicers] = useState<readonly SlicerUiState[]>([])
   const [watchOpen, setWatchOpen] = useState(false)
   const [linksOpen, setLinksOpen] = useState(false)
@@ -974,14 +981,40 @@ export function App({
       cancelled = true
     }
   }, [linksOpen])
+  /// Re-reads the panel's rows from the session that is open *now*: a save
+  /// reopens the workbook, so the session id captured before it is gone.
+  function refreshLinkStatuses(): void {
+    const sessionId = lazyWorkbookRef.current?.file.sessionId
+    if (sessionId === undefined) {
+      setLinkStatuses([])
+      return
+    }
+    void window.desktopApi
+      .listExternalLinks({ sessionId })
+      .then((fresh) => {
+        setLinksNotice(null)
+        setLinkStatuses(fresh.links)
+      })
+      .catch(() => setLinkStatuses([]))
+  }
+  /// External-link breaks/retargets the links panel queued for the next save;
+  /// cleared once the save settles (see saveContext).
+  const pendingExternalLinkOpsRef = useRef<ExternalLinkOps | null>(null)
   const [watchCells, setWatchCells] = useState<readonly WatchCell[]>([])
   const [calcManual, setCalcManual] = useState(false)
   /// Non-null while the "Insert Slicer" field picker is open.
   const [slicerPicker, setSlicerPicker] = useState<SlicerPickerState | null>(null)
-  /// In-session timelines (same session-only model as slicers).
+  /// In-session timelines (session-only: timeline parts are not persisted yet).
   const [timelines, setTimelines] = useState<readonly TimelineUiState[]>([])
   /// Non-null while the "Insert Timeline" field picker is open.
   const [timelinePicker, setTimelinePicker] = useState<TimelinePickerState | null>(null)
+  /// True while slicer panels changed since the last restore (open) and the
+  /// next save should persist the slicers as OOXML parts. Timelines are
+  /// session-only, so they never contribute here.
+  const slicersDirtyRef = useRef(false)
+  /// File-restored controls deleted this session: their parts and references
+  /// are removed on save (nothing else may ever be listed here).
+  const removedSlicerPartsRef = useRef<{ partPath: string; cachePath: string }[]>([])
   const menuActionRef = useRef<(action: MenuAction) => void>(() => {})
   /// Where the user was when a save started: the post-save session swap
   /// reinstalls the workbook, and the install consumes this instead of
@@ -1052,6 +1085,16 @@ export function App({
       timelinePicker,
       setTimelines,
       setTimelinePicker,
+      markSlicersChanged: () => {
+        slicersDirtyRef.current = true
+      },
+      recordSlicerRemoval: (control) => {
+        if (control.partPath === undefined || control.cachePath === undefined) return
+        removedSlicerPartsRef.current.push({
+          partPath: control.partPath,
+          cachePath: control.cachePath,
+        })
+      },
       setMessage,
       setPendingEdits,
     }
@@ -1176,9 +1219,38 @@ export function App({
       openLazyWorkbook,
       setPendingEdits,
       readCells: (addresses, sheetId) => readCellsImpl(readContext(), addresses, sheetId),
-      // null until the part was read: a save in that window must not clear it
+      // null until the file's own part has been read: an empty array means
+      // "clear the part" to the gateway, and a save that lands before the read
+      // would wipe the withheld-cell marks the file already carries.
       redactionStates: () =>
         loadedRedactionStatesRef.current === null ? null : redactionStatesRef.current,
+      slicerState: () => {
+        // Only a session that changed its slicers rides them on the save:
+        // untouched panels keep their parts byte-identical (raw-copied), and
+        // a file without slicers never gains any.
+        if (!slicersDirtyRef.current) return null
+        if (slicers.length === 0 && removedSlicerPartsRef.current.length === 0) {
+          return null
+        }
+        return {
+          slicers: slicers.map((slicer) => ({
+            sheetId: slicer.sheetId,
+            pivotPath: slicer.pivotPath,
+            sourceName: slicer.fieldName,
+            caption: slicer.caption ?? slicer.fieldName,
+            ...(slicer.name === undefined ? {} : { name: slicer.name }),
+            ...(slicer.partPath === undefined ? {} : { partPath: slicer.partPath }),
+            ...(slicer.cachePath === undefined ? {} : { cachePath: slicer.cachePath }),
+            ...(slicer.cacheName === undefined ? {} : { cacheName: slicer.cacheName }),
+            items: slicer.members.map((member) => ({
+              x: member.x,
+              selected: slicer.selected.includes(member.member),
+            })),
+          })),
+          removals: removedSlicerPartsRef.current.map((removal) => ({ ...removal })),
+        }
+      },
+      externalLinkOps: () => pendingExternalLinkOpsRef.current,
       stashViewRestore: (view) => {
         viewRestoreRef.current = view
       },
@@ -2344,7 +2416,7 @@ export function App({
     // Copying in a filtered sheet must skip hidden rows;
     // see filtered-copy.ts for why the built-in hook is not enough.
     const filteredCopyDisposable = installFilteredCopyHook(runtime)
-    // A sorted formula keeps pointing at its own row (sort-formula-refs.ts).
+    // A sort that cuts a shared formula group keeps the rest of the group (sort-formula-refs.ts).
     const sortFormulaRefsDisposable = installSortFormulaRefs(runtime)
     // Excel-compatible TSV plain text (TRUE/FALSE, quoted newlines).
     const tsvClipboardDisposable = installTsvClipboardFix(runtime)
@@ -2356,6 +2428,9 @@ export function App({
     // The fx bar grows to fit a wrapped formula instead of clipping it.
     const formulaBarAutosizeDisposable = installFormulaBarAutosize(runtime)
     const fxButtonDisposable = installFxButtonHook(runtime)
+    // The picking side of the cross-workbook range picker (#2109): another
+    // tab's dialog can arm a pick against this workbook's grid.
+    const pickRelayDisposable = installWorkbookPickRelay(runtime)
     // A file formula the engine re-computes into an error shows the file's
     // cached result instead; display-only.
     const cachedValueDisposable = installCachedValueFallbackInterceptor(runtime, lazyWorkbookRef)
@@ -3820,6 +3895,7 @@ export function App({
       formulaTextDisposable.dispose()
       formulaBarAutosizeDisposable.dispose()
       fxButtonDisposable.dispose()
+      pickRelayDisposable.dispose()
       cachedValueDisposable.dispose()
       formulaNewlineDisposable.dispose()
       functionProbeDisposable.dispose()
@@ -4527,6 +4603,10 @@ export function App({
       createFunctionArgumentsHost(
         () => univerRef.current,
         () => t('appWorkbookNotReady'),
+        () => {
+          const file = lazyWorkbookRef.current?.file
+          return file && !file.needsSaveAs && file.csvPath === undefined ? file.sessionId : null
+        },
       ),
     [],
   )
@@ -5059,23 +5139,36 @@ export function App({
       })
     // Pivot definitions load eagerly so refresh (a synchronous apply step)
     // never waits on IPC. Best effort: a failed parse just disables refresh.
+    // Once they are in, the file's own slicer/timeline controls restore
+    // against them (they need the field/member tables to rebuild panels).
+    const pivotDefinitionLoads: Promise<void>[] = []
     for (const sheet of selected.sheets) {
       for (const pivot of sheet.pivotTables) {
         if (pivot.cachePath === null) continue
-        void window.desktopApi
-          .readPivotDefinition({
-            sessionId: selected.sessionId,
-            path: pivot.path,
-            cachePath: pivot.cachePath,
-          })
-          .then((definition) => {
-            if (lazyWorkbookRef.current === state) {
-              state.pivotDefinitions.set(pivot.path, definition)
-            }
-          })
-          .catch(() => undefined)
+        pivotDefinitionLoads.push(
+          window.desktopApi
+            .readPivotDefinition({
+              sessionId: selected.sessionId,
+              path: pivot.path,
+              cachePath: pivot.cachePath,
+            })
+            .then((definition) => {
+              if (lazyWorkbookRef.current === state) {
+                state.pivotDefinitions.set(pivot.path, definition)
+              }
+            })
+            .catch(() => undefined),
+        )
       }
     }
+    void Promise.all(pivotDefinitionLoads)
+      .then(() => window.desktopApi.readSlicerState({ sessionId: selected.sessionId }))
+      .then((entries) => {
+        if (lazyWorkbookRef.current !== state || entries.length === 0) return
+        const restored = restoreSlicerPanels(state, entries)
+        setSlicers(restored)
+      })
+      .catch(() => undefined)
     // Dev-only diagnosis hooks: e2e drivers dump journal state and dispatch
     // Univer commands (drag interactions are hard to synthesize over CDP).
     if (import.meta.env.DEV) {
@@ -5119,11 +5212,14 @@ export function App({
     lazyPreviewRef.current = null
     setPendingEdits(0)
     // Slicers/timelines belong to the previous workbook's session only;
-    // switching files invalidates them.
+    // switching files invalidates them. The file's own controls are restored
+    // below, once the pivot definitions they bind to have loaded.
     setSlicers([])
     setSlicerPicker(null)
     setTimelines([])
     setTimelinePicker(null)
+    slicersDirtyRef.current = false
+    removedSlicerPartsRef.current = []
     disposeVisuals(visualDisposablesRef.current)
     loadWorkbookSkeleton(univerRef.current, selected)
     applyWorkbookNotes(univerRef.current, selected)
@@ -6245,6 +6341,67 @@ export function App({
                 })
               } finally {
                 setLinksBusy(false)
+              }
+            })()
+          }}
+          onBreak={(index) => {
+            void (async () => {
+              const file = lazyWorkbookRef.current?.file
+              const sessionId = file && !file.needsSaveAs ? file.sessionId : null
+              if (sessionId === null || linksBusy) return
+              setLinksBusy(true)
+              try {
+                await breakExternalLinkFlow({
+                  index,
+                  readUsage: () => window.desktopApi.readExternalLinkUsage({ sessionId }),
+                  journal: async (cells) => {
+                    const runtime = univerRef.current
+                    if (!runtime) return async () => {}
+                    const restore = (await journalExternalLinkLiterals(runtime, cells)).restore
+                    const stateAtJournal = lazyWorkbookRef.current
+                    return async () => {
+                      // a split save can land phase one (which carried the ops)
+                      // and then fail phase two after reopening the workbook:
+                      // the file has the break, so putting the formulas back
+                      // would now contradict it
+                      if (lazyWorkbookRef.current !== stateAtJournal) return
+                      await restore()
+                    }
+                  },
+                  queue: (ops) => {
+                    pendingExternalLinkOpsRef.current = ops
+                  },
+                  clear: () => {
+                    pendingExternalLinkOpsRef.current = null
+                  },
+                  save: () => handleSave('save'),
+                })
+              } finally {
+                setLinksBusy(false)
+                refreshLinkStatuses()
+              }
+            })()
+          }}
+          onChangeSource={(index) => {
+            void (async () => {
+              const file = lazyWorkbookRef.current?.file
+              const sessionId = file && !file.needsSaveAs ? file.sessionId : null
+              if (sessionId === null || linksBusy) return
+              // a web source has no local file to point at
+              if (linkStatuses.find((link) => link.index === index)?.source === null) return
+              const picked = await window.desktopApi.selectExternalLinkSource()
+              if (!picked) return
+              setLinksBusy(true)
+              try {
+                pendingExternalLinkOpsRef.current = {
+                  broken: [],
+                  retargets: [{ index, target: externalFileTarget(picked) }],
+                }
+                await handleSave('save')
+              } finally {
+                pendingExternalLinkOpsRef.current = null
+                setLinksBusy(false)
+                refreshLinkStatuses()
               }
             })()
           }}

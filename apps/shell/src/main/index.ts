@@ -215,6 +215,7 @@ import {
   authorizeMcpSheetWrite,
   sendSheetsMenuAction,
   sheetsFileRenamed,
+  setSheetsActivateTabHook,
   setSheetsCloseTabHook,
   setSheetsExtraFileMenuItems,
   setSheetsHostWindowHook,
@@ -2536,13 +2537,13 @@ const tMain = createI18n({
     menuTabCloseRight: 'Fechar abas à direita',
     menuTabCloseAll: 'Fechar todas as abas',
     menuTabReopen: 'Reabrir aba fechada',
-    menuTabPin: 'Fixar separador (manter carregado)',
-    menuTabUnpin: 'Desafixar separador',
+    menuTabPin: 'Fixar guia (manter carregado)',
+    menuTabUnpin: 'Desafixar guia',
     dlgAddFolderRoot: 'Adicionar pasta à página inicial',
-    watchdogTitle: 'O documento está a consumir demasiados recursos',
+    watchdogTitle: 'O documento está consumindo muitos recursos',
     watchdogBody:
-      '"{title}" está a usar muita memória ou CPU há vários minutos ({memory} MB, {cpu}% de CPU). Pode continuar a aguardar ou fechar o documento (será pedido para guardar alterações não guardadas primeiro). O diagnóstico foi registado.',
-    watchdogWait: 'Continuar a aguardar',
+      '"{title}" está usando muita memória ou CPU há vários minutos ({memory} MB, {cpu}% de CPU). Você pode aguardar ou fechar o documento (será solicitado que salve as alterações pendentes primeiro). O diagnóstico foi registrado.',
+    watchdogWait: 'Continuar aguardando',
     watchdogClose: 'Fechar documento',
     watchdogIgnore: 'Não lembrar novamente',
     errFolderRootUnusable: 'Não é possível ler a pasta selecionada',
@@ -4204,6 +4205,11 @@ function createShellWindow(): void {
   setSheetsShellWindow(win)
   setDocsHostWindowHook((wc) => detachedWindowForWebContents(wc.id))
   setSheetsHostWindowHook((wc) => detachedWindowForWebContents(wc.id))
+  // the cross-workbook range picker returns focus to the editing tab
+  setSheetsActivateTabHook((wcId) => {
+    const tabId = tabManager?.tabIdForWebContents(wcId)
+    if (tabId !== undefined) tabManager?.activateTab(tabId)
+  })
   setSlidesShellWindow(win)
   setSlidesHostWindowHook((wc) => detachedWindowForWebContents(wc.id))
   setSlidesShowBleed((wc, on) => manager.setContentBleed(wc, on))

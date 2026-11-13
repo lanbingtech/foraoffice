@@ -69,6 +69,26 @@ for the current boundary.
 Private host IPC is not a public MCP endpoint. The SDK guide defines the live
 runtime's transport revisions, credentials, document bindings and revocation.
 
+## Inherited desktop functionality
+
+These features belong to the inherited desktop applications and file-level CLI;
+they do not extend the portable Docs SDK's host or agent contract.
+
+- Sheets includes images in cell notes, external-link management and persisted
+  slicers. Timelines remain session-only. CSV/PDF export and printing wait for
+  formula results before reading cells.
+- Optional desktop integrations include SiliconFlow, PPIO and Command Code,
+  Stability/FLUX image generation and SearchApi search. The Skills catalog has
+  an All tab with localized descriptions; embedding hosts supply their own agent
+  integration instead of relying on these settings.
+- Slides and the CLI can convert legacy PowerPoint files with
+  `genoffice convert deck.ppt --to pptx`. This initial conversion preserves slide
+  order and size as editable text boxes; shape geometry, images and text
+  formatting are not yet retained. The converted file is a separate copy.
+- The [ChromeOS/Crostini guide](docs/platforms/chromeos.md) covers the inherited
+  Linux desktop workflow. [Linux wrapper recipes](packaging/README.md) identify
+  when they download upstream binaries rather than ForaOffice builds.
+
 ## Development
 
 ```sh
