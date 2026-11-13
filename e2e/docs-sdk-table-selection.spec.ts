@@ -1,4 +1,5 @@
-import { test, expect, chromium } from '@playwright/test'
+import { test, expect } from '@playwright/test'
+import { launchSdkTestHost, sdkHostIsElectron, type SdkTestHost } from './sdk-host'
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
@@ -39,7 +40,7 @@ test('embedded SDK polishes only selected cell text with pending whole-table rev
         const doc=()=>({id:'table:fixture',name:'Table.docx',data:window.saved.length
           ?Uint8Array.from(window.saved).buffer
           :Uint8Array.from(atob('${Buffer.from(bytes).toString('base64')}'),c=>c.charCodeAt(0)).buffer});
-        const host=createExternalDocsHost('browser',services);
+        const host=createExternalDocsHost('${sdkHostIsElectron ? 'electron' : 'browser'}',services);
         host.documents={initialDocument:async()=>doc(),openDocument:async()=>doc(),
           saveDocument:async r=>{window.saved=Array.from(new Uint8Array(r.data));return {ok:true,committed:true,pending:false};}};
         window.editor=await mountDocsEditor(document.getElementById('root'),{host});
@@ -70,14 +71,9 @@ test('embedded SDK polishes only selected cell text with pending whole-table rev
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('No SDK fixture port')
-  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
+  let browser: SdkTestHost | undefined
   try {
-    browser = await chromium.launch({
-      headless: true,
-      channel:
-        process.env.FORAOFFICE_BROWSER_CHANNEL ??
-        (process.platform === 'win32' ? 'chrome' : undefined),
-    })
+    browser = await launchSdkTestHost()
     const page = await browser.newPage({ viewport: { width: 1360, height: 1000 } })
     await page.goto(`http://127.0.0.1:${address.port}/`)
     await page.waitForFunction(() => (window as unknown as FixtureWindow).sdkReady)

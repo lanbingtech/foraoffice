@@ -60,6 +60,7 @@ const annotationKey = new PluginKey<DecorationSet>('sdk-annotations')
 export const DocsAnnotationsExtension = Extension.create({
   name: 'sdkAnnotations',
   addProseMirrorPlugins() {
+    let printing = false
     return [
       new Plugin<DecorationSet>({
         key: annotationKey,
@@ -72,8 +73,28 @@ export const DocsAnnotationsExtension = Extension.create({
         },
         props: {
           decorations(state) {
-            return this.getState(state)
+            return printing ? DecorationSet.empty : this.getState(state)
           },
+        },
+        view(view) {
+          const window = view.dom.ownerDocument.defaultView
+          // Even transparent inline boxes can change printed text shaping.
+          const beforePrint = () => {
+            printing = true
+            view.updateState(view.state)
+          }
+          const afterPrint = () => {
+            printing = false
+            view.updateState(view.state)
+          }
+          window?.addEventListener('beforeprint', beforePrint)
+          window?.addEventListener('afterprint', afterPrint)
+          return {
+            destroy() {
+              window?.removeEventListener('beforeprint', beforePrint)
+              window?.removeEventListener('afterprint', afterPrint)
+            },
+          }
         },
       }),
     ]

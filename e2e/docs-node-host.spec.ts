@@ -176,10 +176,13 @@ test('a native host owns an independent Node document backend through JSON-RPC a
         .toBe(true)
       const replies = received.find(
         (value) => Array.isArray(value) && value.some((reply) => reply.id === batchIds[0]),
-      ) as Array<{ id: number; error?: { message: string } }>
+      ) as Array<{ id: number; error?: { message: string }; result?: unknown }>
       expect(replies.find((reply) => reply.id === batchIds[0])?.error?.message).toMatch(
         /closed|revoked/,
       )
+      expect(replies.find((reply) => reply.id === batchIds[1])).toMatchObject({
+        result: { released: revoke === 'document.releaseAction' ? true : 1 },
+      })
     }
     await expect(
       request('services.call', {

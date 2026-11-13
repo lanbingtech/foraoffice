@@ -1,4 +1,5 @@
-import { test, expect, chromium } from '@playwright/test'
+import { test, expect } from '@playwright/test'
+import { launchSdkTestHost, sdkHostIsElectron, type SdkTestHost } from './sdk-host'
 import { createServer } from 'node:http'
 import { readFile, mkdir, writeFile } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
@@ -22,7 +23,10 @@ type Fixture = Window & {
     } | null
   }
 }
-const output = resolve('apps/docs/out/diagnostics/ai-operations')
+const output = resolve(
+  'apps/docs/out/diagnostics',
+  sdkHostIsElectron ? 'electron-parity/ai-operations' : 'ai-operations',
+)
 for (const language of ['en', 'zh'] as const)
   test(`neutral shortcut resolution and free input (${language})`, async () => {
     test.setTimeout(120_000)
@@ -41,7 +45,7 @@ for (const language of ['en', 'zh'] as const)
         const defaults={getLanguage:'${language}',getSystemLocale:'en-US',getTheme:'light',getDocumentTheme:'follow',getAuthorName:'Fixture',getAutoSaveDefault:{on:false,updatedAt:0},getAiPanelPrefs:{side:'left',fontSize:'default',spellcheck:false,openInNewDocs:false,showAiSidebar:false},spellLanguages:{active:[],available:[]},docPasswordIntentRevision:0};
         const services=new Proxy({}, {get(_,key){if(key==='then')return undefined;if(key.startsWith('on'))return ()=>()=>{};if(key==='confirmDocumentReplace')return async()=>true;return async()=>defaults[key];}});
         window.actions=[];window.fixture={requests:[],custom:null,mode:'normal',pending:null,aborts:0};
-        const host=createExternalDocsHost('browser',services,{
+        const host=createExternalDocsHost('${sdkHostIsElectron ? 'electron' : 'browser'}',services,{
           resolveInstruction:(request,signal)=>{
             window.fixture.requests.push(structuredClone(request));
             if(window.fixture.mode==='pending')return new Promise(resolve=>{
@@ -82,11 +86,9 @@ for (const language of ['en', 'zh'] as const)
     await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('No port')
-    const browser = await chromium.launch({
-      headless: true,
-      channel: process.platform === 'win32' ? 'chrome' : undefined,
-    })
+    let browser: SdkTestHost | undefined
     try {
+      browser = await launchSdkTestHost()
       const page = await browser.newPage({ viewport: { width: 1360, height: 1000 } })
       page.on('dialog', (dialog) => dialog.accept())
       await page.goto(`http://127.0.0.1:${address.port}/`)
@@ -302,6 +304,63 @@ for (const language of ['en', 'zh'] as const)
       await expect
         .poll(() => page.evaluate(() => (window as unknown as Fixture).actions.length))
         .toBe(10)
+      const comment = await page.evaluate(async () => {
+        const { editor, actions, fixture } = window as unknown as Fixture
+        const request = {
+          callerId: 'external',
+          bindingId: actions[7].bindingId,
+        }
+        await editor.commands.handle({
+          ...request,
+          requestId: crypto.randomUUID(),
+          command: 'read_document',
+          payload: {},
+        })
+        fixture.custom = 'Configured comment task'
+        return editor.commands.handle({
+          ...request,
+          requestId: crypto.randomUUID(),
+          command: 'execute_tool',
+          payload: {
+            name: 'add_comment',
+            input: { blockIndex: 0, text: 'Opening', comment: 'Please clarify the opening.' },
+          },
+        }) as Promise<{ isError?: boolean }>
+      })
+      expect(comment.isError).not.toBe(true)
+      await select(false)
+      const resolveComments = page.getByRole('button', {
+        name: language === 'en' ? 'AI Resolve Comments' : 'AI 处理批注',
+        exact: true,
+      })
+      if (!(await resolveComments.isVisible()))
+        await page.getByRole('button', { name: review, exact: true }).click()
+      await resolveComments.click()
+      await expect
+        .poll(() => page.evaluate(() => (window as unknown as Fixture).actions.length))
+        .toBe(11)
+      await page
+        .getByRole('button', {
+          name: language === 'en' ? 'Track Changes' : '修订',
+          exact: true,
+        })
+        .click()
+      await page.evaluate(() => {
+        const { editor, fixture } = window as unknown as Fixture
+        fixture.custom = 'Configured revision task'
+        editor.inspection.locate(editor.inspection.find('Opening').matches[0], { focus: true })
+      })
+      await page.keyboard.insertText('Revised opening')
+      await select(false)
+      await page
+        .getByRole('button', {
+          name: language === 'en' ? 'AI Revision Summary' : 'AI 总结修订',
+          exact: true,
+        })
+        .click()
+      await expect
+        .poll(() => page.evaluate(() => (window as unknown as Fixture).actions.length))
+        .toBe(12)
       const final = await page.evaluate(() => {
         const w = window as unknown as Fixture
         return {
@@ -326,13 +385,30 @@ for (const language of ['en', 'zh'] as const)
         operationId: selectedTranslation.operationId,
         parameters: selectedTranslation.parameters,
       })
+      for (const [index, operationId, instruction] of [
+        [10, 'resolve_comments', 'Configured comment task'],
+        [11, 'summarize_revisions', 'Configured revision task'],
+      ] as const) {
+        const action = final.actions[index]
+        expect(action).toMatchObject({ operationId, parameters: {}, instruction })
+        expect(
+          final.requests.find((request) => request.bindingId === action.bindingId),
+        ).toMatchObject({
+          operationId,
+          parameters: {},
+          documentId: action.documentId,
+          context: action.context,
+        })
+        expect(action.context).toContain('Cell text to polish.')
+      }
+      expect(final.actions[11].context).toContain('Revised opening')
       await writeFile(
         resolve(output, `${language}.json`),
         JSON.stringify({ language, ...final }, null, 2),
       )
       await page.screenshot({ path: test.info().outputPath(`${language}-operations.png`) })
     } finally {
-      await browser.close()
+      await browser?.close()
       await new Promise<void>((done) => server.close(() => done()))
     }
   })

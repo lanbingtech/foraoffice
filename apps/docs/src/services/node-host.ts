@@ -725,12 +725,12 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
     return { released: !!bridge || !!creating }
   }
   if (method === 'document.releaseAllActions') {
-    await stopHttpMcp()
     const grants = [...bridges.values()]
     const creating = [...creatingBindings.values()].filter((binding) => !binding.revoked)
+    // Revoke pending grants before asynchronous transport shutdown can publish them.
     for (const binding of creating) binding.revoked = true
     bridges.clear()
-    await Promise.all(grants.map((bridge) => bridge.close()))
+    await Promise.all([stopHttpMcp(), ...grants.map((bridge) => bridge.close())])
     return { released: grants.length + creating.length }
   }
   throw new Error('Method not found')

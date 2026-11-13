@@ -54,6 +54,41 @@ it('updates advisory rules and independent decorations without authoring content
   expect(editor.view.dom.querySelector('.sdk-range-decoration')).toBeNull()
 })
 
+it('suspends annotation boxes for printing and restores the current view without editing content', async () => {
+  const { editor, annotations } = fixture()
+  annotations.setRules('host', [{ id: 'bad', pattern: 'bad', message: 'Invalid' }])
+  const before = editor.getJSON()
+  const diagnostics = annotations.diagnostics()
+  let transactions = 0
+  editor.on('transaction', () => transactions++)
+  window.dispatchEvent(new Event('beforeprint'))
+  expect(editor.view.dom.querySelector('.sdk-range-decoration')).toBeNull()
+  expect(annotations.diagnostics()).toEqual(diagnostics)
+  window.dispatchEvent(new Event('afterprint'))
+  expect(editor.view.dom.querySelector('.sdk-range-decoration')?.textContent).toBe('bad')
+  expect(transactions).toBe(0)
+  expect(editor.getJSON()).toEqual(before)
+  expect(editor.commands.undo()).toBe(false)
+
+  window.dispatchEvent(new Event('beforeprint'))
+  annotations.setRules('host', [{ id: 'new', pattern: 'value', message: 'Current finding' }])
+  await annotations.refresh()
+  expect(editor.view.dom.querySelector('.sdk-range-decoration')).toBeNull()
+  window.dispatchEvent(new Event('afterprint'))
+  expect(editor.view.dom.querySelectorAll('.sdk-range-decoration')).toHaveLength(2)
+  expect(annotations.diagnostics()[0].message).toBe('Current finding')
+})
+
+it('does not resurrect annotations reset while a print is outstanding', () => {
+  const { editor, annotations } = fixture()
+  annotations.setRules('host', [{ id: 'bad', pattern: 'bad', message: 'Invalid' }])
+  window.dispatchEvent(new Event('beforeprint'))
+  annotations.reset()
+  window.dispatchEvent(new Event('afterprint'))
+  expect(editor.view.dom.querySelector('.sdk-range-decoration')).toBeNull()
+  expect(annotations.diagnostics()).toEqual([])
+})
+
 it('discards asynchronous stale findings and clears registrations on document switches', async () => {
   const { editor, annotations } = fixture()
   let resolve!: (value: Array<{ from: number; to: number; message: string }>) => void

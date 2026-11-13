@@ -1,8 +1,9 @@
-import { test, expect, chromium } from '@playwright/test'
+import { test, expect } from '@playwright/test'
+import { launchSdkTestHost, sdkHostIsElectron, type SdkTestHost } from './sdk-host'
 import { createServer } from 'node:http'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, extname, join, resolve, sep } from 'node:path'
 import JSZip from 'jszip'
@@ -38,7 +39,43 @@ type FixtureWindow = Window & {
   }
 }
 
+async function createPrintRenderer() {
+  const require = createRequire(__filename)
+  const { init } = await import('@embedpdf/pdfium')
+  const wasm = await readFile(require.resolve('@embedpdf/pdfium/pdfium.wasm'))
+  const wrapped = await init({
+    wasmBinary: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+  })
+  const module = (wrapped.pdfium ?? wrapped) as unknown as PdfiumModule & {
+    _PDFiumExt_Init(): void
+  }
+  module._PDFiumExt_Init()
+  return (bytes: Uint8Array) =>
+    withPdfDocument(module, bytes, (document) =>
+      Array.from({ length: module._FPDF_GetPageCount(document) }, (_, index) => {
+        const page = renderPageByIndexPng(module, document, index, 1)
+        if (!page) throw new Error('Could not render native print output')
+        expect(page.data.byteLength).toBeGreaterThan(0)
+        const pdfPage = module._FPDF_LoadPage(document, index)
+        if (!pdfPage) throw new Error('Could not load native print page')
+        let textPage = 0
+        try {
+          textPage = module._FPDFText_LoadPage(pdfPage)
+          if (!textPage) throw new Error('Could not read native print text')
+          const text = Array.from({ length: module._FPDFText_CountChars(textPage) }, (_, i) =>
+            String.fromCodePoint(module._FPDFText_GetUnicode(textPage, i)),
+          ).join('')
+          return { png: page.data, text }
+        } finally {
+          if (textPage) module._FPDFText_ClosePage(textPage)
+          module._FPDF_ClosePage(pdfPage)
+        }
+      }),
+    )
+}
+
 test('the real Qt public SDK preserves DOCX resources and identical printed content with view annotations', async () => {
+  test.skip(sdkHostIsElectron, 'Qt native adapter has a separate integration target')
   test.skip(process.platform !== 'win32', 'Native Qt fixture uses the configured Windows build')
   test.setTimeout(180_000)
   const executable =
@@ -69,27 +106,16 @@ test('the real Qt public SDK preserves DOCX resources and identical printed cont
   )
   expect(pictures.length).toBeGreaterThan(0)
   expect(await pictures[0].async('base64')).toBe(image)
-  const require = createRequire(__filename)
-  const { init } = await import('@embedpdf/pdfium')
-  const wasm = await readFile(require.resolve('@embedpdf/pdfium/pdfium.wasm'))
-  const wrapped = await init({
-    wasmBinary: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-  })
-  const module = (wrapped.pdfium ?? wrapped) as unknown as PdfiumModule & {
-    _PDFiumExt_Init(): void
-  }
-  module._PDFiumExt_Init()
-  const render = (bytes: Uint8Array) =>
-    withPdfDocument(module, bytes, (document) =>
-      Array.from({ length: module._FPDF_GetPageCount(document) }, (_, index) => {
-        const page = renderPageByIndexPng(module, document, index, 1)
-        if (!page) throw new Error('Could not render native print output')
-        return page.png
-      }),
-    )
+  const render = await createPrintRenderer()
   const decorated = render(await readFile(join(output, 'annotated.pdf')))
   const clean = render(await readFile(join(output, 'clean.pdf')))
   expect(decorated.length).toBeGreaterThan(0)
+  expect(
+    decorated
+      .map((page) => page.text)
+      .join('')
+      .replace(/\s+/g, ''),
+  ).toContain('samesamesame[invalid')
   expect(decorated).toEqual(clean)
 })
 
@@ -118,7 +144,7 @@ test('a browser host owns pathless storage while native inspection and advisory 
           if(name==='readImageSource')return async()=>({base64:'${image}',mime:'image/png',name:'fixture.png'});
           return async(...args)=>{if(name.startsWith('saveDocx'))window.fixture.fallback.push(name);return defaults[name];};
         }});
-        const host=createExternalDocsHost('browser',services,{submit:async action=>{window.fixture.agentActions.push(action);}});
+        const host=createExternalDocsHost('${sdkHostIsElectron ? 'electron' : 'browser'}',services,{submit:async action=>{window.fixture.agentActions.push(action);}});
         const doc=()=>({id:'browser:object',name:'Browser.docx',readOnly:window.fixture.readonly,
           ...(window.fixture.saved.length?{data:Uint8Array.from(window.fixture.saved).buffer}:{})});
         host.documents={autoSave:{enabled:true,intervalMs:600000,onBlur:true},initialDocument:async()=>location.search.includes('empty')?null:doc(),
@@ -134,7 +160,7 @@ test('a browser host owns pathless storage while native inspection and advisory 
           host.documents.openDocument=()=>new Promise(resolve=>{finishOpen=resolve;});
           const pendingOpen=old.open();
           window.editor.dispose();
-          const replacement=createExternalDocsHost('browser',services);
+          const replacement=createExternalDocsHost('${sdkHostIsElectron ? 'electron' : 'browser'}',services);
           window.fixture.newHostCalls=0;
           replacement.documents={...host.documents,newDocument:async()=>{window.fixture.newHostCalls++;return doc();}};
           window.editor=await mountDocsEditor(document.getElementById('root'),{host:replacement});
@@ -174,22 +200,19 @@ test('a browser host owns pathless storage while native inspection and advisory 
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('No browser fixture port')
-  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
+  let browser: SdkTestHost | undefined
   const errors: string[] = []
   try {
-    browser = await chromium.launch({
-      headless: true,
-      // Windows uses the installed browser; CI elsewhere can use Playwright's bundled Chromium.
-      channel:
-        process.env.FORAOFFICE_BROWSER_CHANNEL ??
-        (process.platform === 'win32' ? 'chrome' : undefined),
-    })
-    for (const platform of ['MacIntel', 'Win32', 'Linux x86_64']) {
+    browser = await launchSdkTestHost()
+    const platforms = sdkHostIsElectron ? [process.platform] : ['MacIntel', 'Win32', 'Linux x86_64']
+    for (const platform of platforms) {
       const layoutPage = await browser.newPage({ viewport: { width: 1360, height: 900 } })
       try {
-        await layoutPage.addInitScript((platform) => {
-          Object.defineProperty(navigator, 'platform', { get: () => platform })
-        }, platform)
+        if (!sdkHostIsElectron) {
+          await layoutPage.addInitScript((platform) => {
+            Object.defineProperty(navigator, 'platform', { get: () => platform })
+          }, platform)
+        }
         await layoutPage.goto(`http://127.0.0.1:${address.port}/`)
         await layoutPage.waitForFunction(() => (window as unknown as FixtureWindow).sdkReady)
         for (const theme of ['light', 'dark']) {
@@ -288,8 +311,8 @@ test('a browser host owns pathless storage while native inspection and advisory 
     const instructionInput = page.locator('.ai-ask-pop-input')
     const openSelectionPrompt = async () => {
       await body.click()
-      await page.keyboard.press('Control+Home')
-      await page.keyboard.press('Control+Shift+ArrowRight')
+      await body.press('Control+Home')
+      await body.press('Control+Shift+ArrowRight')
       await expect(page.locator('.ai-ask-trigger')).toBeVisible()
       await page.locator('.ai-ask-trigger').click()
       await expect(instructionInput).toBeFocused()
@@ -332,6 +355,20 @@ test('a browser host owns pathless storage while native inspection and advisory 
       await body.click()
       await page.keyboard.press('Control+End')
       await page.keyboard.press('Control+Shift+ArrowLeft')
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const live = (window as unknown as FixtureWindow).editor.runtime.connect({
+              id: 'await-live-selection',
+            })
+            try {
+              return live.context().text
+            } finally {
+              live.close()
+            }
+          }),
+        )
+        .not.toBe(action.context)
       const binding = await page.evaluate(async (action) => {
         const { editor } = window as unknown as FixtureWindow
         const bound = await editor.commands.handle({
@@ -680,6 +717,7 @@ test('a browser host owns pathless storage while native inspection and advisory 
     expect(popup!.y).toBeGreaterThanOrEqual(band!.y)
     await page.getByRole('menuitem', { name: 'View action', exact: true }).click()
     await expect(extensionPopup).toBeHidden()
+    await page.mouse.move(0, 0)
     await extensionTrigger.focus()
     await page.keyboard.press('ArrowDown')
     await expect(page.getByRole('menuitem', { name: 'View action', exact: true })).toBeFocused()
@@ -815,12 +853,48 @@ test('a browser host owns pathless storage while native inspection and advisory 
     expect(results.count).toBe(3)
     expect(results.diagnostics).toHaveLength(1)
     expect(results.text).toContain('same! same! same!')
-    expect(results.state.path).toBeNull()
+    expect(results.state!.path).toBeNull()
     expect(results.fallback).toEqual([])
     const archive = await JSZip.loadAsync(Uint8Array.from(results.bytes))
     expect(await archive.file('word/document.xml')!.async('string')).not.toContain(
       'sdk-range-decoration',
     )
+    if (sdkHostIsElectron) {
+      await page.evaluate(async () => {
+        await document.fonts.ready
+        await (window as unknown as FixtureWindow).editor.annotations.refresh()
+      })
+      await expect(page.locator('.sdk-range-decoration').first()).toBeVisible()
+      await expect(page.locator('.app-toast')).toHaveCount(0)
+      await body.evaluate((element) => (element as HTMLElement).blur())
+      const annotated = await browser.printToPDF!(page)
+      await expect(page.locator('.sdk-range-decoration').first()).toBeVisible()
+      await page.evaluate(() => (window as unknown as FixtureWindow).editor.annotations.reset())
+      await expect(page.locator('.sdk-range-decoration')).toHaveCount(0)
+      await body.evaluate((element) => (element as HTMLElement).blur())
+      const clean = await browser.printToPDF!(page)
+      await writeFile(test.info().outputPath('annotated.pdf'), annotated)
+      await writeFile(test.info().outputPath('clean.pdf'), clean)
+      const render = await createPrintRenderer()
+      const decorated = render(annotated)
+      expect(decorated.length).toBeGreaterThan(0)
+      await writeFile(test.info().outputPath('annotated-print-page-1.png'), decorated[0].png)
+      expect(
+        decorated
+          .map((page) => page.text)
+          .join('')
+          .replace(/\s+/g, ''),
+      ).toContain('same!same!same!')
+      const plain = render(clean)
+      await writeFile(test.info().outputPath('clean-print-page-1.png'), plain[0].png)
+      expect(decorated.map((page) => page.text)).toEqual(plain.map((page) => page.text))
+      expect(decorated.length).toBe(plain.length)
+      for (const [index, page] of decorated.entries())
+        expect(
+          Buffer.from(page.png).equals(Buffer.from(plain[index].png)),
+          `print page ${index}`,
+        ).toBe(true)
+    }
     await body.click()
     await page.keyboard.press('Control+Home')
     await page.keyboard.press('Control+Shift+ArrowRight')
