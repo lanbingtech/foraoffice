@@ -1,6 +1,6 @@
 {
   "name": "@genoffice/slides",
-  "productName": "GenOffice Slides",
+  "productName": "ForaOffice Slides",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "private": true,
@@ -48,10 +48,10 @@
     "vite": "^7.3.7",
     "vitest": "^4.1.12"
   },
-  "author": "GenOffice",
+  "author": "ForaOffice contributors",
   "build": {
-    "appId": "com.genoffice.slides",
-    "productName": "GenOffice Slides",
+    "appId": "com.foraoffice.slides",
+    "productName": "ForaOffice Slides",
     "electronVersion": "43.3.0",
     "directories": {
       "output": "release"
@@ -96,5 +96,17 @@
     "pngjs": "^7.0.0",
     "utif2": "^4.1.0",
     "@genoffice/agent-core": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lanbingtech/foraoffice.git"
+  },
+  "homepage": "https://github.com/lanbingtech/foraoffice",
+  "bugs": {
+    "url": "https://github.com/lanbingtech/foraoffice/issues"
+  },
+  "foraoffice": {
+    "modifiedFrom": "GenOffice v0.12.852",
+    "modifications": "Fork product identity, source/support routing and Docs SDK delivery"
   }
 }

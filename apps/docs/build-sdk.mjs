@@ -1,3 +1,4 @@
+// ForaOffice modification: distributable package identity and independently consumable notices.
 import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -81,6 +82,17 @@ await cp(require.resolve('@embedpdf/pdfium/pdfium.wasm'), join(stage, 'wasm/pdfi
 await cp(resolve(root, 'hosts/qt'), join(stage, 'hosts/qt'), { recursive: true })
 await cp(resolve(root, 'sdk/examples'), join(stage, 'examples'), { recursive: true })
 await cp(resolve(root, 'sdk/README.md'), join(stage, 'README.md'))
+// Bundling strips ordinary source comments; retain a readable fork notice in
+// the distributed editor/host bundles without changing third-party packages.
+const forkNotice =
+  '/*! Modified for ForaOffice from GenOffice; see LICENSE, NOTICE and build-info.json. */\n'
+for (const directory of ['embedded', 'services', 'qt', 'cli']) {
+  for (const entry of await readdir(join(stage, directory), { recursive: true })) {
+    if (!/\.(?:js|cjs|css)$/.test(entry)) continue
+    const file = join(stage, directory, entry)
+    await writeFile(file, forkNotice + (await readFile(file, 'utf8')))
+  }
+}
 for (const name of ['LICENSE', 'NOTICE', 'LICENSE-UNICODE.txt'])
   await cp(resolve(repository, name), join(stage, name))
 await mkdir(join(stage, 'licenses'))
@@ -110,6 +122,12 @@ await writeFile(
       private: true,
       type: 'module',
       license: metadata.license,
+      description:
+        'ForaOffice embeddable Docs editor and host-neutral document services (development SDK)',
+      repository: metadata.repository,
+      homepage: metadata.homepage,
+      bugs: metadata.bugs,
+      foraoffice: metadata.foraoffice,
       engines: { node: '>=24' },
       exports: {
         '.': { types: './editor.d.ts', default: './embedded/editor.js' },
@@ -139,6 +157,7 @@ await writeFile(
   JSON.stringify(
     {
       baseline: '4b55db9ed1994575a695160ffc6cfd0bfc866211',
+      version: metadata.version,
       source: git(['rev-parse', 'HEAD']),
       dirty: git(['status', '--porcelain']).length > 0,
       node: process.versions.node,
