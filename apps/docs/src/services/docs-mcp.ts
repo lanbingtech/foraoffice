@@ -19,6 +19,8 @@ export interface DocsMcpServerOptions {
   endpoint: DocsCommandEndpoint
   /** A binding created by the host for the selected document/action, never a tool argument. */
   bindingId?: string
+  /** Host-created read grant: writes are neither advertised nor executable. */
+  readOnly?: boolean
 }
 
 /** A pre-bound document MCP server. The host supplies a standard SDK transport and authorized endpoint. */
@@ -52,6 +54,8 @@ export function createDocsMcpServer(options: DocsMcpServerOptions): McpServer {
     },
   ]
   for (const tool of tools) {
+    if (options.readOnly && tool.name !== 'read_document' && !DOCS_READ_TOOLS.has(tool.name))
+      continue
     server.registerTool(
       tool.name,
       {

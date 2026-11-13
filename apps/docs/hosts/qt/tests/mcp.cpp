@@ -117,6 +117,20 @@ private slots:
         QVERIFY(clientResult.value("tools").toArray().contains("read_document"));
         const auto session = initialize(connection);
         QVERIFY(!session.isEmpty());
+        const auto readConnection = enabled.value("result").toObject().value("readOnlyConnection").toObject();
+        const auto readSession = initialize(readConnection);
+        QVERIFY(!readSession.isEmpty());
+        const auto readTools = rpc(readConnection, "tools/list", {}, readSession).body.value("result").toObject().value("tools").toArray();
+        bool hasRead = false;
+        for (const auto& tool : readTools) {
+            const auto name = tool.toObject().value("name").toString();
+            hasRead |= name == "read_document";
+            QVERIFY(name != "apply_ops" && name != "save_document" && name != "run_cli");
+        }
+        QVERIFY(hasRead);
+        const auto forbiddenWrite = rpc(readConnection, "tools/call", {{"name", "insert_content"},
+            {"arguments", QJsonObject{{"html", "<p>FORBIDDEN READ GRANT WRITE</p>"}}}}, readSession);
+        QVERIFY(forbiddenWrite.body.contains("error") || forbiddenWrite.body.value("result").toObject().value("isError").toBool());
         QFile input(workspace.filePath("original-input.txt"));
         QVERIFY(input.open(QIODevice::WriteOnly));
         input.write("ORIGINAL INPUT SENTINEL"); input.close();
@@ -132,6 +146,7 @@ private slots:
         const auto revokedAttachment = rpc(connection, "tools/call", {{"name", "read_attachment"},
             {"arguments", QJsonObject{{"index", 0}}}}, session);
         QVERIFY(!QString::fromUtf8(QJsonDocument(revokedAttachment.body).toJson()).contains("ORIGINAL INPUT SENTINEL"));
+        rpc(connection, "tools/call", {{"name", "read_document"}, {"arguments", QJsonObject{}}}, session);
         const auto write = rpc(connection, "tools/call", {{"name", "insert_content"}, {"arguments", QJsonObject{{"html", "<p>Unsaved Agent edit</p>"}}}}, session);
         QVERIFY2(!write.body.value("result").toObject().value("isError").toBool(), qPrintable(QString::fromUtf8(QJsonDocument(write.body).toJson())));
         QVERIFY(sdk(*editor, "snapshot").value("result").toObject().value("text").toString().contains("Unsaved Agent edit"));
