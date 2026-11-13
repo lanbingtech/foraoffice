@@ -7,7 +7,12 @@ import { parseDocx } from '@genoffice/docx-engine'
 import { buildDocx } from '../../../packages/docx-engine/tests/helpers/build-docx'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { collectRevisions } from '../src/renderer/editor/revisions'
-import { loadFile, newFile, type FileActionContext } from '../src/renderer/file-actions'
+import {
+  loadFile,
+  newFile,
+  saveExplicit,
+  type FileActionContext,
+} from '../src/renderer/file-actions'
 import type { DocState } from '../src/renderer/doc-state'
 import { installDocsHost, type DocsEditorServices } from '../src/renderer/host/docs-host'
 import { createDocsRuntime, type RuntimeDocument } from '../src/renderer/runtime/docs-runtime'
@@ -39,6 +44,7 @@ async function fixture() {
       kind: 'browser',
       services: {
         getRecentFiles: async () => [],
+        saveDocxTo: async (path: string) => ({ ok: true, path }),
         getSystemLocale: async () => 'en-US',
         docPasswordIntentRevision: async () => 0,
         discardDocPasswordIntents: async () => {},
@@ -96,6 +102,8 @@ async function fixture() {
   const base = {
     editor,
     dirtyRef: { current: true },
+    saveInFlightRef: { current: false },
+    saveIncompleteRef: { current: false },
     commitDocumentState: (operation: () => void) => flushSync(operation),
   }
   const ctx = new Proxy(base, {
@@ -193,4 +201,16 @@ it('commits a new blank document and clears prior document metadata before compl
     trackChanges: false,
     removePersonalInfo: false,
   })
+})
+
+it('commits the saved baseline before the save promise resolves', async () => {
+  const { ctx, metadata, status } = await fixture()
+  expect(await newFile(ctx), String(status())).toBe(true)
+  const before = metadata().doc
+  const result = await saveExplicit(ctx, { path: '/saved.docx', overwrite: true })
+  expect(result, String(status())).toMatchObject({ ok: true, committed: true, pending: false })
+  expect(metadata().doc.filePath).toBe('/saved.docx')
+  expect(metadata().doc.parsed).not.toBe(before.parsed)
+  expect(metadata().hfVariantsDirty).toEqual([])
+  expect(metadata().sectionHfEdits).toEqual({})
 })
