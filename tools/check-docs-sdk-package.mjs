@@ -110,11 +110,34 @@ export { mountDocsEditor, host, createDocsFileSession, createDocsMcpServer }
     await readFile(join(documents, 'source.docx')),
     'The packaged file service must preserve an untouched document',
   )
+  await writeFile(
+    join(consumer, 'resources.mjs'),
+    `import assert from 'node:assert/strict'
+import { join } from 'node:path'
+import { createDocsResourceServices } from '@foraoffice/docs-sdk/services'
+const [sdk, documents] = process.argv.slice(2)
+const resources = await createDocsResourceServices({
+  stateDirectory: join(documents, '.resource-state'),
+  readRoots: [documents],
+  writeRoots: [documents],
+  cwd: documents,
+  cli: { executable: process.execPath, entry: join(sdk, 'cli/genoffice.cjs') },
+})
+try {
+  const read = await resources.runCli(['docs', 'read', join(documents, 'source.docx')])
+  assert.equal(read.ok, true, read.stdout + read.stderr)
+  assert.ok(JSON.parse(read.stdout).detail.items.length > 0)
+} finally {
+  resources.dispose()
+}
+`,
+  )
+  run(join(consumer, 'resources.mjs'), [installed, documents])
   console.log(
     `Docs SDK package: ${metadata.version}; Node ${process.versions.node}; source ${provenance.source}; dirty ${provenance.dirty}`,
   )
   console.log(
-    'Independent package installation, exports, types, notices and file round trip: passed',
+    'Independent package installation, exports, types, notices, bounded CLI and file round trip: passed',
   )
 } catch (error) {
   console.error(`Failed consumer retained at ${consumer}`)
