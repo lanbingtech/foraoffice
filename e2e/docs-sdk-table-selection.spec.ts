@@ -445,6 +445,81 @@ test('embedded SDK preserves table-cell revisions and template structures throug
     expect(freshness.sideStale.output).toBe(
       'Document-side state changed since this caller read it; use read_document or get_document_context for fresh full context. read_blocks does not refresh document-side state.',
     )
+
+    const imageTable = Array.from(
+      await buildDocx({
+        withImage: true,
+        bodyXml:
+          '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="5000"/></w:tblGrid>' +
+          '<w:tr><w:tc><w:p><w:r><w:t>Old label</w:t></w:r></w:p></w:tc>' +
+          `<w:tc><w:p><w:r>${inlinePictureDrawingXml({ rId: 'rId10', docPrId: 1, widthPx: 100, heightPx: 80 })}</w:r></w:p></w:tc></w:tr></w:tbl>`,
+      }),
+    )
+    for (const keep of [false, true]) {
+      const result = await page.evaluate(
+        async ({ bytes, keep }) => {
+          const fixture = window as unknown as FixtureWindow
+          fixture.saved = bytes
+          const { editor } = fixture
+          const opened = await editor.documents.open()
+          const client = editor.runtime.connect({ id: 'image-replacement' })
+          try {
+            client.context()
+            const read = {
+              id: 'read',
+              name: 'read_blocks',
+              input: { startBlockIndex: 0, endBlockIndex: 0 },
+            }
+            const before = await client.execute(read)
+            const replacement = await client.execute({
+              id: 'replace',
+              name: 'replace_blocks',
+              input: {
+                startBlockIndex: 0,
+                endBlockIndex: 0,
+                html: `<table>${[0, 1, 2].map((i) => `<tr><td>Parameter ${i}</td><td>${keep && i === 0 ? '<img src="doc:0.0">' : ''}</td></tr>`).join('')}</table>`,
+              },
+            })
+            const after = await client.execute(read)
+            const saved = await editor.documents.save()
+            return { opened, before, replacement, after, saved, bytes: fixture.saved }
+          } finally {
+            client.close()
+          }
+        },
+        { bytes: imageTable, keep },
+      )
+      expect(result.opened).toBe(true)
+      expect(result.before.output.match(/<img /g)).toHaveLength(1)
+      expect(result.before.output).toContain('doc:0.0')
+      expect(result.replacement.isError, result.replacement.output).not.toBe(true)
+      expect(result.after.output.match(/<img /g) ?? []).toHaveLength(keep ? 1 : 0)
+      expect(result.replacement.output.includes('1 picture(s)')).toBe(!keep)
+      expect(result.saved).toBe(true)
+      const zip = await JSZip.loadAsync(Uint8Array.from(result.bytes))
+      const xml = await zip.file('word/document.xml')!.async('string')
+      expect(xml.match(/<w:drawing[\s>]/g) ?? []).toHaveLength(keep ? 1 : 0)
+      await page.evaluate(async () => {
+        await (window as unknown as FixtureWindow).editor.documents.open()
+      })
+      const reloaded = await page.evaluate(async () => {
+        const client = (window as unknown as FixtureWindow).editor.runtime.connect({
+          id: 'image-reopened',
+        })
+        try {
+          client.context()
+          return await client.execute({
+            id: 'read',
+            name: 'read_blocks',
+            input: { startBlockIndex: 0, endBlockIndex: 0 },
+          })
+        } finally {
+          client.close()
+        }
+      })
+      expect(reloaded.isError, reloaded.output).not.toBe(true)
+      expect(reloaded.output.match(/<img /g) ?? []).toHaveLength(keep ? 1 : 0)
+    }
   } finally {
     await browser?.close()
     await new Promise<void>((done) => server.close(() => done()))

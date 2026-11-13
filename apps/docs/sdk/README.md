@@ -214,7 +214,10 @@ Markdown document creation remains plain Markdown, not an HTML write.
 
 For ordinary inline images, the existing `<img src="doc:B.I">` reference is
 writable: copy the exact reference from the current read to preserve that image.
-Omitting it removes the image, as reported by the tool. Protected block objects
+This also applies to table cells. Table and row formatting templates do not
+implicitly retain images or copy them into newly inserted rows. An explicit
+image in a formerly merged-away cell dissolves that merge to keep the content.
+Omitting the reference removes the image, as reported by the tool. Protected block objects
 and Word fields have no equivalent generic HTML preservation reference; keep
 them outside replacement ranges. Use `apply_ops/findReplace` on a known text
 range, or `replace_selection` for text within a single paragraph/cell, when

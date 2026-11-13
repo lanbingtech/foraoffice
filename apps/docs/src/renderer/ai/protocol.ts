@@ -533,6 +533,7 @@ function tableToHtml(
   start: number,
   sel?: InlineSelection | null,
   image?: ImageSrcMapper,
+  refs?: ImageRefs,
 ): string {
   const model = pmTableToModel(node.toJSON() as PmNode)
   const headerRow = isHeaderRowTable(model)
@@ -562,13 +563,19 @@ function tableToHtml(
             if (!image) readOnly ??= readOnlyInlineKind(redactNode(json).content)
             paras.push(
               sel || image
-                ? inlineToHtml(json.content, selection, image)
-                : escapeHtml(
-                    inlineToRuns(redactNode(json).content ?? [])
-                      .filter((run) => !run.del)
-                      .map((run) => run.text)
-                      .join(''),
-                  ),
+                ? inlineToHtml(json.content, selection, image, refs)
+                : (redactNode(json).content ?? [])
+                    .map((child) =>
+                      child.type === 'docInlineImage'
+                        ? inlineToHtml([child], undefined, undefined, refs)
+                        : escapeHtml(
+                            inlineToRuns([child])
+                              .filter((run) => !run.del)
+                              .map((run) => run.text)
+                              .join(''),
+                          ),
+                    )
+                    .join(''),
             )
           })
         return `<${tag}${readOnly ? ` data-doc-readonly="${readOnly}"` : ''}>${paras.join('<br>')}</${tag}>`
@@ -651,7 +658,7 @@ export function serializeRangeToHtml(
     } else if (node.type === 'docTable') {
       flushList()
       const position = blockRangePositions(editor, startIndex + i, startIndex + i).from
-      parts.push(tableToHtml(editor.state.doc.child(startIndex + i), position, sel, image))
+      parts.push(tableToHtml(editor.state.doc.child(startIndex + i), position, sel, image, refs))
     } else {
       flushList()
       const formula = node.attrs?.formulaDisplay as { tokens?: string[]; latex?: string } | null
@@ -1196,42 +1203,57 @@ function parseList(
   })
 }
 
-/** paragraph texts of one table cell: <br> and nested <p>/<div> split paragraphs */
-function cellParas(cell: Element): string[] {
-  const paras: string[] = []
-  let current = ''
+/** Cell paragraphs retain image references; <br> and nested <p>/<div> split them. */
+function cellParas(cell: Element): PmNode[][] {
+  const paras: PmNode[][] = []
+  let current: PmNode[] = []
+  const hasContent = () => current.some((node) => node.type !== 'text' || node.text?.trim())
   const push = () => {
-    paras.push(current.replace(/\s+/g, ' ').trim())
-    current = ''
+    for (const node of current)
+      if (node.type === 'text') node.text = node.text!.replace(/\s+/g, ' ')
+    if (current[0]?.type === 'text') current[0].text = current[0].text!.trimStart()
+    const last = current.at(-1)
+    if (last?.type === 'text') last.text = last.text!.trimEnd()
+    paras.push(current.filter((node) => node.type !== 'text' || node.text))
+    current = []
   }
   const walk = (node: Node) => {
     node.childNodes.forEach((child) => {
       if (child.nodeType === Node.TEXT_NODE) {
-        current += child.textContent ?? ''
+        const text = child.textContent ?? ''
+        const last = current.at(-1)
+        if (last?.type === 'text') last.text += text
+        else current.push({ type: 'text', text })
         return
       }
       if (child.nodeType !== Node.ELEMENT_NODE) return
       const el = child as Element
       const tag = el.tagName.toLowerCase()
       if (tag === 'br') push()
-      else if (tag === 'p' || tag === 'div') {
-        if (current.trim()) push()
+      else if (tag === 'img') {
+        const ref = IMAGE_REF_RE.exec(el.getAttribute('src') ?? '')
+        if (ref)
+          current.push({
+            type: IMAGE_REF_NODE,
+            attrs: { block: Number(ref[1]), index: Number(ref[2]) },
+          })
+      } else if (tag === 'p' || tag === 'div') {
+        if (hasContent()) push()
         walk(el)
         push()
       } else walk(el)
     })
   }
   walk(cell)
-  if (current.trim()) push()
-  const out = paras.filter((p, i) => p !== '' || (i > 0 && i < paras.length - 1))
-  return out.length > 0 ? out : ['']
+  if (hasContent()) push()
+  const out = paras.filter((p, i) => p.length > 0 || (i > 0 && i < paras.length - 1))
+  return out.length > 0 ? out : [[]]
 }
 
 /**
- * <table> -> protected table block: display TableModel + generated w:tbl
- * fragment. Cell texts are patched into the fragment at save time via the
- * existing genXml branch of pmDocToSavePlan (patchTableCellTexts), so the
- * model row/col counts must mirror the generated grid.
+ * Build an editable table with the normal table defaults. Text establishes
+ * its grid and paragraphs; image-reference nodes then occupy their original
+ * inline positions until resolveImageRefs supplies the document images.
  */
 function parseTable(el: Element): PmNode | null {
   const trs = Array.from(el.querySelectorAll('tr'))
@@ -1240,13 +1262,33 @@ function parseTable(el: Element): PmNode | null {
   const cols = Math.max(...rawRows.map((r) => r.length))
   if (cols === 0) return null
   const headerRow = rawRows[0].some((c) => c.tagName.toLowerCase() === 'th')
-  const rows: TableCell[][] = rawRows.map((cells, r) => {
+  const contents = rawRows.map((cells) => cells.map(cellParas))
+  const rows: TableCell[][] = contents.map((cells, r) => {
     const style = headerRow && r === 0 ? { bold: true, fill: TABLE_HEADER_FILL } : undefined
-    const row = cells.map((cell) => wordTableCell(cellParas(cell), style))
+    const row = cells.map((paras) =>
+      wordTableCell(
+        paras.map((content) => content.map((node) => node.text ?? '').join('')),
+        style,
+      ),
+    )
     while (row.length < cols) row.push(wordTableCell([''], style))
     return row
   })
-  return tableModelToPmNode(wordTableModel(rows, cols))
+  const table = tableModelToPmNode(wordTableModel(rows, cols))
+  contents.forEach((cells, r) =>
+    cells.forEach((paras, c) => {
+      const cell = table.content![r].content![c]
+      paras.forEach((content, p) => {
+        if (!content.some((node) => node.type === IMAGE_REF_NODE)) return
+        const paragraph = cell.content![p]
+        const marks = paragraph.content?.find((node) => node.type === 'text')?.marks
+        paragraph.content = content.map((node) =>
+          node.type === 'text' && marks ? { ...node, marks } : node,
+        )
+      })
+    }),
+  )
+  return table
 }
 
 /** <pre> -> mono/shaded paragraph; newlines preserved as hard breaks */
@@ -1290,6 +1332,7 @@ const IMAGE_REF_NODE = '__imageRef'
 function inlineImagesOf(block: ProseMirrorNode): ProseMirrorNode[] {
   const out: ProseMirrorNode[] = []
   block.descendants((n) => {
+    if (hasDeletionRevision(n)) return false
     if (
       n.type.name === 'docInlineImage' &&
       !n.attrs.rule &&

@@ -6,7 +6,7 @@
  * selection context strips them too. A rewrite therefore has to take its
  * formatting from the blocks it replaces: paragraph attrs and the dominant run
  * style for text blocks (issue #175), and the whole table/row/cell property
- * set for tables, whose cells only ever reach the model as plain text.
+ * set for tables, whose cells reach the model as plain text and image references.
  */
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { inlineToRuns, pmTableToModel, type PmMark, type PmNode } from '../editor/convert'
@@ -175,7 +175,7 @@ const ROW_STYLE_ATTRS = ['heightTwips', 'heightRule', 'repeatHeader', 'repeatHea
 
 /**
  * Inline marks a rewritten cell text takes over from the cell's dominant run,
- * complete with the run's docTextStyle. Cells reach the model as plain text
+ * complete with the run's docTextStyle. Cells reach the model without text styling
  * (see tableToHtml), so unlike body paragraphs the bold/italic/underline of
  * the old text has to be inherited too — and the whole mark set, rawRPr
  * included, exactly as typing into the cell would continue it: a uniformly
@@ -204,6 +204,74 @@ function cellText(cell: PmNode): string {
   return cellParagraphs(cell)
     .map((p) => inlineText(p.content))
     .join('\n')
+}
+
+function cellHasImages(cell: PmNode): boolean {
+  return cellParagraphs(cell).some((paragraph) =>
+    paragraph.content?.some((node) => node.type === 'docInlineImage' && !node.attrs?.rule),
+  )
+}
+
+/** Keep unchanged runs and their marks while applying only the requested images. */
+function reconcileParagraphImages(old: PmNode, next: PmNode): PmNode[] | null {
+  const textOf = (content: PmNode[]) =>
+    inlineToRuns(content)
+      .map((run) => run.text)
+      .join('')
+  const before = textOf(old.content ?? [])
+  const after = textOf(next.content ?? [])
+  const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+  if (normalize(before) !== normalize(after)) return null
+
+  // HTML collapses whitespace; map its character boundaries back to the old runs.
+  const boundaries = [0]
+  for (const match of before.matchAll(/\s+|\S/g)) {
+    if (
+      /^\s/.test(match[0]) &&
+      (boundaries.length === 1 || match.index + match[0].length === before.length)
+    )
+      continue
+    boundaries.push(match.index + match[0].length)
+  }
+  const images: Array<{ at: number; node: PmNode }> = []
+  let prefix = ''
+  for (const node of next.content ?? []) {
+    if (node.type === 'docInlineImage' && !node.attrs?.rule) {
+      const at =
+        before === after
+          ? prefix.length
+          : boundaries[
+              Math.min(prefix.replace(/\s+/g, ' ').trimStart().length, boundaries.length - 1)
+            ]
+      images.push({ at, node })
+    } else prefix += textOf([node])
+  }
+  const result: PmNode[] = []
+  let offset = 0
+  let cursor = 0
+  for (const node of old.content ?? []) {
+    if (node.type === 'docInlineImage' && !node.attrs?.rule) continue
+    const text = textOf([node])
+    if (node.type !== 'text' || node.text !== text) {
+      while (cursor < images.length && images[cursor].at === offset)
+        result.push(images[cursor++].node)
+      if (cursor < images.length && images[cursor].at < offset + text.length) return null
+      result.push(node)
+      offset += text.length
+      continue
+    }
+    let start = 0
+    while (cursor < images.length && images[cursor].at <= offset + text.length) {
+      const cut = images[cursor].at - offset
+      if (cut > start) result.push({ ...node, text: text.slice(start, cut) })
+      result.push(images[cursor++].node)
+      start = cut
+    }
+    if (start < text.length) result.push({ ...node, text: text.slice(start) })
+    offset += text.length
+  }
+  while (cursor < images.length && images[cursor].at === offset) result.push(images[cursor++].node)
+  return cursor === images.length ? result : null
 }
 
 function rowText(row: PmNode): string {
@@ -256,13 +324,30 @@ function inheritCellParagraph(old: ProseMirrorNode, next: PmNode, first: boolean
 }
 
 /**
- * New cell content: unchanged text keeps the old cell's content verbatim
- * (per-run formatting, hyperlinks, images, nested tables); rewritten text
+ * New cell content: unchanged text without images keeps the old cell's content
+ * verbatim (per-run formatting, hyperlinks, nested tables); rewritten text
  * inherits from the old paragraphs (paragraph i from old paragraph i, extra
  * paragraphs from the last one). Nested tables and anchored boxes stay put.
+ * Inline images always come from the replacement, never from a style template.
  */
 function inheritCellContent(old: ProseMirrorNode, oldJson: PmNode, next: PmNode): PmNode[] {
-  if (cellText(oldJson) === cellText(next)) return oldJson.content ?? []
+  if (cellText(oldJson) === cellText(next) && !cellHasImages(oldJson) && !cellHasImages(next))
+    return oldJson.content ?? []
+  if (cellText(oldJson) === cellText(next)) {
+    const oldParas = cellParagraphs(oldJson)
+    const nextParas = cellParagraphs(next)
+    if (oldParas.length === nextParas.length) {
+      const content = oldParas.map((paragraph, i) =>
+        reconcileParagraphImages(paragraph, nextParas[i]),
+      )
+      if (content.every((paragraph) => paragraph !== null)) {
+        let i = 0
+        return (oldJson.content ?? []).map((node) =>
+          CELL_PARA_TYPES.has(node.type) ? { ...node, content: content[i++]! } : node,
+        )
+      }
+    }
+  }
   const templates: ProseMirrorNode[] = []
   old.forEach((child) => {
     if (CELL_PARA_TYPES.has(child.type.name)) templates.push(child)
@@ -447,13 +532,26 @@ export function inheritTableFormatting(
 
   // exact grid: the parsed row lists one cell per physical grid cell (padding
   // cells past a ragged row are only accepted when they are empty)
-  const exactRow = (r: number, row: PmNode): boolean => {
+  const fitsGrid = (r: number, row: PmNode): boolean => {
     const cells = row.content ?? []
     const physical = grid[r]
     if (!physical || cells.length < physical.length) return false
-    if (!cells.slice(physical.length).every((c) => cellText(c) === '')) return false
+    if (!cells.slice(physical.length).every((c) => cellText(c) === '' && !cellHasImages(c)))
+      return false
     const live = physical.filter((c) => c.vMerge !== 'continue').length
     return live === (oldRows[r].content?.length ?? 0)
+  }
+  const exactRow = (r: number, row: PmNode): boolean => {
+    if (!fitsGrid(r, row)) return false
+    if (
+      grid[r].some(
+        (entry, c) =>
+          entry.vMerge === 'continue' &&
+          (cellText(row.content![c]) !== '' || cellHasImages(row.content![c])),
+      )
+    )
+      return false
+    return true
   }
   const exact = newRows.length === oldRows.length && newRows.every((row, r) => exactRow(r, row))
 
@@ -492,7 +590,7 @@ export function inheritTableFormatting(
         const template = pairRows(oldRows, newRows)
         return newRows.map((row, r) => {
           const j = template[r]
-          if (sameGrid && exactRow(j, row)) return mapGridRow(j, row, rowMerged(j))
+          if (sameGrid && fitsGrid(j, row)) return mapGridRow(j, row, rowMerged(j))
           const oldRow = old.child(j)
           const oldRowJson = oldRows[j]
           const oldCells = oldRowJson.content ?? []
