@@ -1,5 +1,6 @@
+# Modified for ForaOffice: fork-owned reporting policy and current channel availability.
 blank_issues_enabled: true
 contact_links:
-  - name: Security vulnerability
-    url: https://github.com/genspark-ai/genoffice/security/advisories/new
-    about: Please report security issues privately, never as a public issue.
+  - name: Security or sensitive report
+    url: https://github.com/lanbingtech/foraoffice/blob/main/SECURITY.md
+    about: Read current private-channel availability before sharing details. Do not post confidential reports publicly.

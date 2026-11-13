@@ -1,4 +1,6 @@
-# Contributing to GenOffice
+# Contributing to ForaOffice
+
+<!-- Modified for ForaOffice from GenOffice contributor guidance. -->
 
 Thanks for your interest in contributing. This document covers the local
 setup, the checks a change must pass, and the conventions used in this
@@ -6,19 +8,23 @@ repository.
 
 ## How changes land here
 
-This GitHub repository is a mirror: development happens in a private tree,
-and `main` here advances through single squashed snapshot commits
-(`Sync snapshot (<date>)`). That is why every file in a sync shows the same
-last-commit message, and why nobody — maintainers included — pushes to
-`main` directly.
+Development and issue tracking happen in [lanbingtech/foraoffice](https://github.com/lanbingtech/foraoffice).
+This fork does not use GenOffice's private-tree snapshot/import workflow. Discuss
+bugs and proposals in GitHub Issues. Maintainers implement accepted work on
+focused branches, review the resulting changes and validation, then integrate it
+into the target branch. Do not infer that an upstream PR or release contains a
+fork-specific change.
 
-External pull requests are welcome and are reviewed here. Once a change is
-accepted, a maintainer imports it into the private tree with your authorship
-preserved as a `Co-authored-by:` trailer, and it ships to `main` in the next
-snapshot; your PR is then closed with a note pointing at the snapshot that
-carried it. GitHub will show the PR as "closed" rather than "merged" — the
-code and the attribution still land. Issues and feature requests are handled
-directly on this repository as usual.
+Preserve contributor authorship in commits and integrations. An issue is complete
+only when its acceptance criteria have evidence and the reviewed source, tests and
+documentation are committed; link the relevant commit or integration in the issue.
+Use pull requests when the maintainer's chosen integration requires them, not as a
+second request tracker. Existing issue labels describe readiness, not permission
+to perform an unapproved external action.
+
+The current sensitive-file owner is [@turbinefish](https://github.com/turbinefish),
+as listed in CODEOWNERS. A CODEOWNERS entry requests review; enforcement also
+depends on repository rules and must not be assumed enabled.
 
 ## Repository layout
 
@@ -29,6 +35,35 @@ directly on this repository as usual.
   dependency, unit-tested): docx/pptx engines, AI agent core, providers,
   i18n, UI kit.
 - `apps/sheets/native/xlsx-engine` — Rust xlsx engine (runs as a sidecar process) for xlsx import/export.
+
+## Docs SDK contribution boundary
+
+Only Docs currently has the portable host/runtime work. Read the
+[SDK guide](apps/docs/sdk/README.md), [integration overview](docs/docs-sdk-integration.md)
+and [delivery policy](docs/docs-sdk-releases.md) before changing its public surface.
+The editor must not acquire a dependency on a particular model, conversation API,
+host application's storage schema or private IPC protocol. Inject native and
+application services at the existing host boundary; use standard MCP at the public
+agent transport boundary.
+
+When changing a public editor handle, host service, tool, scope/lifecycle behavior,
+file/ribbon extension or instruction hook, update its authoritative SDK reference,
+version/compatibility notes and affected examples. Reuse public-interface tests.
+Preserve untouched document data and the distinction between live unsaved content
+and file-level processing. UI chrome uses semantic theme tokens; theme changes
+must not rewrite authored document colors or alter export/print output. New UI
+strings belong in every locale shard, not in an enlarged dictionary aggregator.
+
+Public contributor guidance must be available in tracked documents. Local agent
+configuration is intentionally ignored and must not be published wholesale or
+made a prerequisite for following this guide. Specs, task graphs, progress and
+acceptance evidence live in GitHub Issues; do not add repository-local process
+ledgers or temporary investigation files. Leave unrelated user changes intact and
+account for task-owned tracked/untracked files before committing.
+
+External test environments are read-only unless the user explicitly approves a
+specific write. This includes login/session creation, configuration, deployments,
+container changes and cleanup. A local development request is not such approval.
 
 ## Engine packages
 
@@ -80,7 +115,7 @@ editor didn't touch survives the round trip untouched.
 
 ## Getting started
 
-Prerequisites: Node 22+, npm 10+, and a Rust toolchain (`cargo` on PATH,
+Prerequisites: Node 24+ for Docs SDK build/consumption, npm 10+, and a Rust toolchain (`cargo` on PATH,
 needed only for the sheets xlsx sidecar).
 
 ```bash
@@ -92,7 +127,7 @@ npm run dev:docs     # or run a single app
 
 ## Checks every change must pass
 
-CI runs these on every PR; please run them locally first:
+Run the checks relevant to your change locally; CI runs the configured repository gates. Docs SDK metadata/build changes also require the package and host checks described in the delivery guide:
 
 ```bash
 npm run format:check # Prettier check for uncommitted changed/new files
@@ -162,7 +197,7 @@ testing and local overrides:
 | `XLSX_SIDECAR_PATH`, `XLSX_OPEN_PATH`, `XLSX_DEBUG_PORT`                                                               | Point at a locally built xlsx sidecar and its debug port                                    |
 | `*_DEV_PORT`, `*_RENDERER_URL`                                                                                         | Per-app Vite dev server ports and renderer URLs (set by `npm run dev`)                      |
 
-AI features degrade rather than break without credentials: requests surface an
+In the inherited desktop consumer, AI features degrade rather than break without credentials: requests surface an
 inline sign-in prompt, and web search falls back to keyless backends (Parallel's
 free Search MCP, then DuckDuckGo).
 
@@ -176,10 +211,7 @@ free Search MCP, then DuckDuckGo).
   is cheap.
 - Tests live in `apps/*/tests` and `packages/*/tests` (vitest). New engine
   behavior needs a unit test; renderer-only UI tweaks generally don't.
-- Playwright/Electron acceptance drivers and Office-app comparison scripts
-  (anything that drives the built app or Word/Excel/PowerPoint on your
-  machine) are local, on-demand tools: keep them out of the tree (they are
-  gitignored) and never wire them into CI.
+- Keep ad-hoc Office comparison drivers and sensitive repro files local and ignored. Maintained SDK/browser/Electron integration tests belong in the existing test suites and CI; temporary evidence belongs in ignored build output or outside the repository.
 - Keep files from growing without bound: if you are adding a substantial new
   concern to an already-large file, prefer a new module.
 
@@ -205,13 +237,19 @@ All community spaces follow the
 
 ## License and CLA
 
-There is no CLA (contributor license agreement), and we do not plan to add
-one. By contributing, you agree that your contributions are licensed under
-the [Apache License 2.0](LICENSE) that covers this project — inbound =
-outbound, per Apache-2.0 §5. Because community contributions keep their
-Apache-2.0 terms, the open-source core cannot be retroactively relicensed.
+There is no CLA. Contributions are accepted under the [Apache License 2.0](LICENSE)
+that covers the open-source project: inbound = outbound, per Apache-2.0 section 5.
+Contributors retain their copyright; do not replace upstream ownership notices or
+invent a legal entity from a GitHub account name.
 
-The `ee/` directory is reserved for future enterprise modules under a
-[separate license](ee/LICENSE) and does not accept external contributions —
-pull requests from outside the maintainer team must not modify files under
-`ee/` (enforced via [CODEOWNERS](.github/CODEOWNERS)).
+Retain applicable upstream, dependency and font notices in source and distributed
+artifacts. Modified upstream files must prominently state they were changed, as
+required by Apache-2.0 section 4; a project changelog alone is not assumed to satisfy
+that file-level requirement. Preserve the license text itself. See [NOTICE](NOTICE)
+for origin and distribution attribution. Product branding uses ForaOffice;
+GenOffice/Genspark names remain appropriate for origin and compatibility references.
+
+The unused upstream enterprise placeholder has been removed from the fork's active
+policy and payloads. This does not relicense upstream enterprise material or any
+third-party component. Any separately licensed material introduced later must have
+its boundary explicitly reviewed and disclosed.

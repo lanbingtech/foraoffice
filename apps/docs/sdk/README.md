@@ -1,5 +1,11 @@
 # ForaOffice Docs SDK
 
+Project-level architecture, compatibility, versioning and delivery policy are
+maintained in the [ForaOffice repository](https://github.com/lanbingtech/foraoffice).
+This guide is the authoritative reference for the package's public interfaces;
+the repository introduction distinguishes the inherited desktop and file-level
+CLI consumers from this live editor SDK.
+
 This package embeds the Word editor and exposes its live editing runtime. It does
 not configure a model or run an Agent. An external caller supplies instructions
 and content, invokes tools, and consumes their results.

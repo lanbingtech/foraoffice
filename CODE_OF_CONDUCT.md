@@ -1,5 +1,7 @@
 # Contributor Covenant Code of Conduct
 
+<!-- Modified for ForaOffice: project scope and enforcement contact. -->
+
 ## Our Pledge
 
 We as members, contributors, and leaders pledge to make participation in our
@@ -55,14 +57,19 @@ an individual is officially representing the community in public spaces.
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement through
-GitHub's
-[private vulnerability reporting](https://github.com/genspark-ai/genoffice/security/advisories/new)
-channel on this repository (used here as the private contact channel for
-conduct reports as well). All complaints will be reviewed and investigated
-promptly and fairly.
+This code applies to the ForaOffice community maintained at
+[lanbingtech/foraoffice](https://github.com/lanbingtech/foraoffice). The current
+maintainer contact is [@turbinefish](https://github.com/turbinefish); upstream
+GenOffice maintainers do not administer this fork's community.
 
+A verified private conduct-report address has not yet been published. GitHub's
+private vulnerability reporting is also currently disabled for this repository;
+it is not an available conduct channel. For non-sensitive moderation requests,
+open an issue addressed to the maintainer. For sensitive complaints, ask for a
+private contact without posting names, private documents or incident details,
+and withhold those details until a verified private channel is provided. A public
+contact request does not constitute confidential reporting. The maintainer must
+publish and verify a private conduct-report route before promising one.
 All community leaders are obligated to respect the privacy and security of the
 reporter of any incident.
 

@@ -1,3 +1,4 @@
+# Modified for ForaOffice: integration surfaces and current editor scope.
 name: Feature request
 description: Suggest a new capability or an improvement
 labels: [enhancement]
@@ -7,16 +8,24 @@ body:
     attributes:
       label: App
       options:
-        - GenOffice Docs (docs)
-        - GenOffice Sheets (sheets)
-        - GenOffice Slides (slides)
-        - GenOffice PDF (pdf)
-        - GenOffice Markdown (markdown)
-        - Shell / home screen
-        - AI panel / providers
+        - Docs SDK / host services
+        - Docs live runtime / Harness / MCP
+        - Docs standalone desktop
+        - Inherited Sheets desktop
+        - Inherited Slides desktop
+        - Inherited PDF desktop
+        - Inherited Markdown desktop
+        - Inherited HTML desktop
+        - Inherited shell / home screen
+        - Inherited AI panel / providers
         - Whole suite
     validations:
       required: true
+  - type: input
+    id: host
+    attributes:
+      label: Intended host or client
+      description: Host type, automation mode, client/runtime versions and affected public interface, if applicable
   - type: textarea
     id: problem
     attributes:

@@ -1,3 +1,10 @@
+ForaOffice
+
+Modified from GenOffice by ForaOffice contributors. The fork separates the Docs
+editor from its built-in agent and desktop host and revises project integration,
+governance and distribution support. Applicable upstream attribution follows.
+This notice does not change component licenses or assert ownership of upstream
+work. Per-file modification notices remain a separate redistribution obligation.
 GenOffice
 Copyright 2026 Mainfunc, Inc.
 
@@ -6,12 +13,12 @@ This product includes software developed at Mainfunc, Inc.
 Bundled third-party components are listed in THIRD-PARTY-NOTICES.txt, which
 tools/gen-third-party-notices.mjs generates at packaging time. It is not
 checked into this repository; in a release build it ships inside the
-application bundle (Contents/Resources on macOS, resources/ on Windows).
+desktop application bundle (Contents/Resources on macOS, resources/ on Windows) and at the root of a Docs SDK package.
 Run `node tools/gen-third-party-notices.mjs` to produce it from a source
 checkout.
 
 Bundled fonts and their licenses are documented in
-apps/docs/src/renderer/fonts/README.md.
+apps/docs/src/renderer/fonts/README.md (licenses/fonts-README.md in the SDK package).
 
 Downloadable fonts
 
