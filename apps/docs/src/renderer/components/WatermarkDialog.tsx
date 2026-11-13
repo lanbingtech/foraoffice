@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { getDocsHost } from '../host/docs-host'
 /**
  * Word's Insert Watermark dialog: No watermark / Picture (scale, washout) /

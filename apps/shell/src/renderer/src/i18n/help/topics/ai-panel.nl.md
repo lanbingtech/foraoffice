@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Het AI-assistentpaneel
+
+> Deze handleiding beschrijft de van GenOffice overgenomen desktopapp in ForaOffice, inclusief ingebouwde agent en instellingen. Hosts die Docs insluiten leveren eigen diensten en agentintegratie; desktopfuncties zijn niet automatisch SDK-mogelijkheden. Zie de [Docs-SDK-handleiding](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Elke editor kan het AI-paneel oproepen: selecteer iets, geef een instructie en zie het gestreamde resultaat.
 

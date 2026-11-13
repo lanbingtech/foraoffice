@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { LENGTH_DESC, ANCHORS, WRAPS } from '../../shared/floating-tool-schema'
 export {
   SET_WATERMARK_TOOL,

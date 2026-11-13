@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # 快速上手：介面與基本操作
+
+> 本手冊介紹 ForaOffice 中繼承自 GenOffice 的桌面應用程式，包括其內建代理與設定。嵌入式 Docs 的宿主自行提供服務及代理整合；桌面功能不會自動成為 SDK 的能力。請參閱 [Docs SDK 整合指南](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md)。
 
 GenOffice 是一套完全在你電腦上運作的辦公套件：單一視窗、一排分頁，裡面裝著六個編輯器——Docs（文字處理）、Sheets（試算表）、Slides（簡報）、PDF、Markdown 與 HTML。檔案就是真正的 .docx / .xlsx / .pptx / .pdf，與 Word、Excel、PowerPoint 完全互通，不需要連網。
 

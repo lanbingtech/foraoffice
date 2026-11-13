@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 // @vitest-environment node
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'

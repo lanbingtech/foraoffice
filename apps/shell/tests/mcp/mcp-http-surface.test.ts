@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createServer, get as httpGet, request as httpRequest } from 'node:http'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'

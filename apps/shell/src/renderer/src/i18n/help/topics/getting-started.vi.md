@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Bắt đầu nhanh: giao diện và những điều cơ bản
+
+> Tài liệu này mô tả ứng dụng máy tính để bàn kế thừa từ GenOffice trong ForaOffice, gồm tác nhân và cài đặt tích hợp. Ứng dụng chủ nhúng Docs cung cấp dịch vụ và tích hợp tác nhân riêng; tính năng máy tính để bàn không tự động trở thành khả năng của SDK. Xem [hướng dẫn Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 GenOffice là bộ ứng dụng văn phòng chạy hoàn toàn trên máy của bạn: một cửa sổ, một hàng thẻ, chứa sáu trình soạn thảo — Docs (xử lý văn bản), Sheets (bảng tính), Slides (trình chiếu), PDF, Markdown và HTML. Tập tin đều là .docx / .xlsx / .pptx / .pdf thật, hoàn toàn tương thích với Word, Excel và PowerPoint. Không cần mạng.
 

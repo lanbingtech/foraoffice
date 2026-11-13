@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { existsSync } from 'node:fs'
 import { basename, extname, isAbsolute, join } from 'node:path'
 import { z } from 'zod'

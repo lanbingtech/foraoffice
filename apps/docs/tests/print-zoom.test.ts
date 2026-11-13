@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { afterEach, describe, expect, it } from 'vitest'
 import { clearPrintZoom, printZoom, setPrintZoom } from '../src/renderer/print-zoom'
 import {

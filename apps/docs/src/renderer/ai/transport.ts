@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { getNativeAgentServices } from '../host/docs-host'
 import { createIpcTransport, type AgentTransport } from '@genoffice/agent-core'
 import type { AiSettings } from '../../shared/ipc'

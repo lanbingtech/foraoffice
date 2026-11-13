@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Docs: textový editor
+
+> Tato příručka popisuje desktopovou aplikaci převzatou z GenOffice do ForaOffice, včetně vestavěného agenta a nastavení. Hostitelé vloženého Docs poskytují vlastní služby a integraci agenta; desktopové funkce nejsou automaticky možnostmi SDK. Viz [průvodce Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Docs je textový procesor podobný Wordu: čte a zapisuje skutečné soubory .docx se stránkováním typu WYSIWYG.
 

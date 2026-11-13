@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Docs: работа с текстом
+
+> Это руководство описывает унаследованное настольное приложение GenOffice в ForaOffice, включая встроенного агента и настройки. Хосты, встраивающие Docs, предоставляют свои службы и интеграцию агента; настольные функции не становятся возможностями SDK автоматически. См. [руководство Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Docs — текстовый редактор, похожий на Word: читает и пишет настоящие .docx с настоящей пагинацией «как на экране».
 

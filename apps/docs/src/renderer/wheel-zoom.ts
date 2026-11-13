@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { clampZoom, notchStep, type ZoomWheelIntent } from '@genoffice/ui/editor'
 
 export const DOCS_ZOOM_MIN = 10

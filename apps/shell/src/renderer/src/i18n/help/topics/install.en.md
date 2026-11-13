@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: distinguish upstream installers from fork delivery. -->
+
 # Installing GenOffice
+
+> These inherited instructions describe upstream GenOffice installers. Those downloads do not include ForaOffice changes or its Docs SDK. They do not establish fork releases, signing or supported targets. For this fork, follow the [project introduction](https://github.com/lanbingtech/foraoffice) and the [Docs SDK guide](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Every build is published on the [Releases page](https://github.com/genspark-ai/genoffice/releases/latest). All of them come from `main`; the macOS and Windows installers are signed.
 

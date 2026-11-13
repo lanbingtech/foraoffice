@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /**
  * Chromium lays print jobs out at device scale 1, but pagination measured the
  * canvas at the screen's scale, and Blink rounds font ascent/descent to device

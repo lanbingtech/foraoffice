@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Démarrage rapide : l’interface et les bases
+
+> Ce manuel décrit l’application de bureau héritée de GenOffice dans ForaOffice, avec son agent et ses paramètres intégrés. Les hôtes intégrant Docs fournissent leurs propres services et agents ; les fonctions de bureau ne sont pas automatiquement des capacités du SDK. Voir le [guide Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 GenOffice est une suite bureautique qui fonctionne entièrement sur votre machine : une fenêtre, une rangée d’onglets, six éditeurs — Docs (traitement de texte), Sheets (tableurs), Slides (présentations), PDF, Markdown et HTML. Les fichiers sont de vrais .docx / .xlsx / .pptx / .pdf, totalement interchangeables avec Word, Excel et PowerPoint. Aucun réseau requis.
 

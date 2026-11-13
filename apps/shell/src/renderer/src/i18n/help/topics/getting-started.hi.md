@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # त्वरित प्रारंभ: इंटरफ़ेस और बुनियादी बातें
+
+> यह मैनुअल ForaOffice में विरासत GenOffice डेस्कटॉप ऐप, उसके अंतर्निहित एजेंट और सेटिंग्स का वर्णन करता है। एम्बेड किए गए Docs के होस्ट अपनी सेवाएँ और एजेंट एकीकरण देते हैं; डेस्कटॉप सुविधाएँ अपने आप SDK की क्षमताएँ नहीं बनतीं। [Docs SDK गाइड](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md) देखें।
 
 GenOffice एक ऑफ़िस सूट है जो पूरी तरह आपकी मशीन पर चलता है: एक विंडो, टैब की एक पंक्ति, और उसमें छह एडिटर — Docs (शब्द प्रसंस्करण), Sheets (स्प्रेडशीट), Slides (प्रस्तुतियाँ), PDF, Markdown और HTML। फ़ाइलें असली .docx / .xlsx / .pptx / .pdf होती हैं, जो Word, Excel और PowerPoint से पूरी तरह आदान-प्रदान योग्य हैं। नेटवर्क की ज़रूरत नहीं।
 

@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Hızlı başlangıç: arayüz ve temeller
+
+> Bu kılavuz, ForaOffice içindeki GenOffice’den devralınan masaüstü uygulamasını, yerleşik ajanını ve ayarlarını anlatır. Docs gömen ana uygulamalar kendi hizmetlerini ve ajan bütünleştirmelerini sağlar; masaüstü özellikleri otomatik olarak SDK yeteneği değildir. [Docs SDK kılavuzuna](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md) bakın.
 
 GenOffice tamamen makinenizde çalışan bir ofis paketidir: tek pencere, tek sekme sırası, altı düzenleyici — Docs (kelime işlem), Sheets (elektronik tablo), Slides (sunu), PDF, Markdown ve HTML. Dosyalar gerçek .docx / .xlsx / .pptx / .pdf'dir; Word, Excel ve PowerPoint ile tamamen değiştirilebilir. Ağ gerekmez.
 

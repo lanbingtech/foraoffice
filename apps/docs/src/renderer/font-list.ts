@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { Lang } from '@genoffice/i18n'
 
 /**

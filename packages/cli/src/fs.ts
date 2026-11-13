@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { randomBytes } from 'node:crypto'
 import {
   chmodSync,

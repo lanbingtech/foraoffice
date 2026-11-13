@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { getDocsHost, getDocsDocumentHost } from './host/docs-host'
 import { hostedOpenResult } from './host/document-services'
 import { assertDocumentOperation, validateHostedIdentity } from '../shared/document-host'

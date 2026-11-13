@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Docs: معالجة النصوص
+
+> يصف هذا الدليل تطبيق GenOffice المكتبي الموروث في ForaOffice، بما فيه الوكيل والإعدادات المدمجة. توفر التطبيقات التي تضمّن Docs خدماتها وتكامل وكيلها؛ ولا تُعد ميزات سطح المكتب تلقائياً من إمكانات SDK. راجع [دليل Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Docs هو محرّر نصوص شبيه بـ Word: يقرأ ويكتب ملفات .docx حقيقية مع ترقيم صفحات يطابق تمامًا ما يُعرض على الشاشة.
 

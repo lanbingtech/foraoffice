@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Docs: 문서 처리
+
+> 이 설명서는 ForaOffice가 GenOffice에서 이어받은 데스크톱 앱과 내장 에이전트 및 설정을 설명합니다. Docs를 임베드하는 호스트는 자체 서비스와 에이전트 통합을 제공합니다. 데스크톱 기능이 자동으로 SDK 기능이 되지는 않습니다. [Docs SDK 안내](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md)를 확인하세요.
 
 Docs는 Word와 비슷한 문서 편집기입니다. 진짜 .docx를 읽고 쓰며, 쪽나누기를 WYSIWYG로 처리합니다.
 

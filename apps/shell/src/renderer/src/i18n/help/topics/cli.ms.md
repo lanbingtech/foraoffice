@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Baris arahan dan ejen
+
+> Manual ini menerangkan aplikasi desktop warisan GenOffice dalam ForaOffice, termasuk ejen dan tetapan terbina dalam. Hos yang membenamkan Docs menyediakan perkhidmatan dan integrasi ejen sendiri; ciri desktop tidak menjadi keupayaan SDK secara automatik. Lihat [panduan Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Setiap pemasangan meliputi satu perintah `genoffice` yang memandu enjin yang sama seperti yang digunakan oleh tetingkap — penghurai yang sama, penulis yang sama, penjana yang sama. Fail yang disimpan aplikasi dan fail yang ditulis oleh perintah itu ialah fail yang sama, dan semakan yang melepasi panel AI aplikasi juga melepasi perintah itu.
 

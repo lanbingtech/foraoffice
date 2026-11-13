@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Docs: procesamiento de texto
+
+> Este manual describe la aplicación de escritorio heredada de GenOffice en ForaOffice, incluidos su agente y ajustes integrados. Los anfitriones de Docs integrado proporcionan sus propios servicios y agentes; las funciones de escritorio no son automáticamente capacidades del SDK. Consulta la [guía de Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Docs es el procesador de texto similar a Word: lee y escribe .docx reales con una paginación WYSIWYG fiel.
 

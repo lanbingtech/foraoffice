@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # لوحة مساعد الذكاء الاصطناعي
+
+> يصف هذا الدليل تطبيق GenOffice المكتبي الموروث في ForaOffice، بما فيه الوكيل والإعدادات المدمجة. توفر التطبيقات التي تضمّن Docs خدماتها وتكامل وكيلها؛ ولا تُعد ميزات سطح المكتب تلقائياً من إمكانات SDK. راجع [دليل Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 يمكن لكل محرّر استدعاء لوحة الذكاء الاصطناعي: حدّد شيئًا، وأعطِ تعليماتك، وشاهد النتيجة وهي تصل.
 

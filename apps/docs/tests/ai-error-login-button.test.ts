@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 // A failed run marks the error bubble with a "Sign in to Genspark" button only
 // when Genspark is the active provider — a BYOK user's failure (their own
 // provider's rate limit, say) must not advertise a Genspark sign-in (genoffice#1948).
