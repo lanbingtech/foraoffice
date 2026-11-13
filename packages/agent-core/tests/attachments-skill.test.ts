@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { describe, expect, it, vi } from 'vitest'
 import { createAttachmentsSkill, type AttachmentInfo } from '../src/attachments-skill'
 import { kbCiteHref } from '../src/knowledge-base-skill'

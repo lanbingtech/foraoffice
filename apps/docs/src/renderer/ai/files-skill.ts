@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { getDocsHost } from '../host/docs-host'
 import { createAttachmentsSkill, type AgentSkill } from '@genoffice/agent-core'
 import type { AttachmentMeta } from '../../shared/ipc'

@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { getDocsHost } from '../host/docs-host'
 /**
  * Print dialog modeled on Word's print sheet (same pattern as the slides app):

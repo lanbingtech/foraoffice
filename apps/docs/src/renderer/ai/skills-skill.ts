@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { createOfficeCliTools } from '../runtime/cli-resource-tools'
 import { getNativeAgentServices } from '../host/docs-host'
 import type { AgentSkill } from '@genoffice/agent-core'

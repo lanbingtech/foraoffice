@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { PAPER_SIZES, LENGTH_HINT } from '../../shared/page-tool-schema'
 export { PAPER_SIZES, PAGE_SETUP_TOOL, SECTION_BREAK_TOOL } from '../../shared/page-tool-schema'
 import {

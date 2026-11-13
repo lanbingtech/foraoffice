@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { protocol } from 'electron'
 import { DOCX_MEDIA_SCHEME_PRIVILEGE } from '@genoffice/electron-utils'
 import { LAZY_MEDIA_SCHEME } from '@genoffice/docx-engine/lazy-media'

@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { STYLE_TYPES, ALIGNS, HIGHLIGHTS, LENGTH_DESC } from '../../shared/style-tool-schema'
 export { DEFINE_STYLE_TOOL, LIST_STYLES_TOOL } from '../../shared/style-tool-schema'
 import type { Node as PmDocNode } from '@tiptap/pm/model'

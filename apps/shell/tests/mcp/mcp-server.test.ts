@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { afterEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { request as httpRequest } from 'node:http'

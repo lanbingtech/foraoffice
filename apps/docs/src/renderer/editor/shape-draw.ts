@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /**
  * Word-parity shape draw mode: picking a shape in the ribbon gallery arms a
  * crosshair on the document instead of inserting immediately. A single click

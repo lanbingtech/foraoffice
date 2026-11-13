@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { getDocsHost } from '../host/docs-host'
 import { createContext, useContext, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'

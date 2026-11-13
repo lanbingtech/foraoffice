@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { clipText } from '../preview'
 import type { Editor } from '@tiptap/core'
 import JSZip from 'jszip'

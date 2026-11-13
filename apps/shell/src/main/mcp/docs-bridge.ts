@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { existsSync } from 'node:fs'
 import { ipcMain, webContents } from 'electron'
 import type { DocsControl, McpEditorCommandName } from './tools/document-tools'

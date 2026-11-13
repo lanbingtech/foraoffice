@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { join } from 'node:path'
 import * as fs from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'

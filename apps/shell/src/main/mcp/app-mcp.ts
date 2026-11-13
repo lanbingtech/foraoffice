@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import {
   McpServerService,
   DEFAULT_MCP_PORT,

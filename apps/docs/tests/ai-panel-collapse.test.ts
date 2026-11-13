@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 // The AI panel stays mounted while collapsed (rail only),
 // so the conversation, draft, and in-flight runs survive collapse/expand.
 import { beforeAll, describe, expect, it, vi } from 'vitest'

@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /**
  * Find & Replace engine: query compilation (literal / Word wildcards / regex),
  * width and case folding, document scanning and replacement expansion. Pure

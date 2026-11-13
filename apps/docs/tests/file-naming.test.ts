@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { suggestFileName } from '@genoffice/ui'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'

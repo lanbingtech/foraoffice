@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { AgentToolDef } from './types'
 import type { AgentSkill } from './skill'
 import { ResourceAccessError } from './resource-access'

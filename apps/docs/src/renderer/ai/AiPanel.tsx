@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { getNativeAgentServices, getOptionalNativeAgentServices } from '../host/docs-host'
 import { getDocsHost, getOptionalDocsHost, getDocsProjects } from '../host/docs-host'
 import { showToast } from '../components/toast-bus'

@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import './editor-styles'
 import { getOptionalDocsHost, getDocsHost } from './host/docs-host'
 import { createRoot } from 'react-dom/client'
