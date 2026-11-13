@@ -1,3 +1,4 @@
+// Modified for ForaOffice: public product names and corresponding behavior expectations.
 import type zh from './zh'
 
 const pt = {
@@ -5,14 +6,14 @@ const pt = {
   filterWord: 'Documentos do Word',
   odtImportMsg: 'Converter este documento .{ext}?',
   odtImportDetail:
-    'O GenOffice edita .docx, não ODF. Texto, títulos, listas, tabelas e imagens são convertidos; notas de rodapé, comentários e caixas de texto não são preservados por completo. O arquivo original nunca é alterado; o .docx convertido é uma cópia independente em que os salvamentos seguintes são gravados.',
+    'O ForaOffice edita .docx, não ODF. Texto, títulos, listas, tabelas e imagens são convertidos; notas de rodapé, comentários e caixas de texto não são preservados por completo. O arquivo original nunca é alterado; o .docx convertido é uma cópia independente em que os salvamentos seguintes são gravados.',
   hwpImportDetail:
-    'O GenOffice edita .docx, não HWP. Texto, tabelas, imagens, cabeçalhos e rodapés são convertidos; equações, notas de rodapé e objetos incorporados não são, e a numeração automática vira texto comum. O arquivo original nunca é alterado; o .docx convertido é uma cópia independente em que os salvamentos seguintes são gravados.',
+    'O ForaOffice edita .docx, não HWP. Texto, tabelas, imagens, cabeçalhos e rodapés são convertidos; equações, notas de rodapé e objetos incorporados não são, e a numeração automática vira texto comum. O arquivo original nunca é alterado; o .docx convertido é uma cópia independente em que os salvamentos seguintes são gravados.',
   odtImportConvertBtn: 'Converter e abrir',
   importSkipConfirm: 'Da próxima vez, converter sem perguntar',
   docImportMsg: 'Converter este documento .{ext}?',
   docImportDetail:
-    'O GenOffice edita .docx, não documentos do Word 97-2003 (.doc). Texto, títulos, listas, tabelas e imagens são convertidos; notas de rodapé, comentários e caixas de texto não são preservados por completo. O arquivo original nunca é alterado; o .docx convertido é uma cópia independente em que os salvamentos seguintes são gravados.',
+    'O ForaOffice edita .docx, não documentos do Word 97-2003 (.doc). Texto, títulos, listas, tabelas e imagens são convertidos; notas de rodapé, comentários e caixas de texto não são preservados por completo. O arquivo original nunca é alterado; o .docx convertido é uma cópia independente em que os salvamentos seguintes são gravados.',
   docImportConvertBtn: 'Converter e abrir',
   dlgSaveAs: 'Salvar Como',
   closeUnsavedMsg: 'Este documento tem alterações não salvas.',

@@ -1,3 +1,4 @@
+// Modified for ForaOffice: public product names and corresponding behavior expectations.
 import type zh from './zh'
 
 const de = {
@@ -5,14 +6,14 @@ const de = {
   filterWord: 'Word-Dokumente',
   odtImportMsg: 'Dieses .{ext}-Dokument konvertieren?',
   odtImportDetail:
-    'GenOffice bearbeitet .docx, nicht ODF. Text, Überschriften, Listen, Tabellen und Bilder werden übernommen; Fußnoten, Kommentare und Textfelder werden nicht vollständig bewahrt. Die Originaldatei bleibt unverändert; die konvertierte .docx-Kopie ist eigenständig, und spätere Speicherungen landen in ihr.',
+    'ForaOffice bearbeitet .docx, nicht ODF. Text, Überschriften, Listen, Tabellen und Bilder werden übernommen; Fußnoten, Kommentare und Textfelder werden nicht vollständig bewahrt. Die Originaldatei bleibt unverändert; die konvertierte .docx-Kopie ist eigenständig, und spätere Speicherungen landen in ihr.',
   hwpImportDetail:
-    'GenOffice bearbeitet .docx, nicht HWP. Text, Tabellen, Bilder sowie Kopf- und Fußzeilen werden übernommen; Formeln, Fußnoten und eingebettete Objekte werden nicht konvertiert, und automatische Nummerierung wird zu normalem Text. Die Originaldatei bleibt unverändert; die konvertierte .docx-Kopie ist eigenständig, und spätere Speicherungen landen in ihr.',
+    'ForaOffice bearbeitet .docx, nicht HWP. Text, Tabellen, Bilder sowie Kopf- und Fußzeilen werden übernommen; Formeln, Fußnoten und eingebettete Objekte werden nicht konvertiert, und automatische Nummerierung wird zu normalem Text. Die Originaldatei bleibt unverändert; die konvertierte .docx-Kopie ist eigenständig, und spätere Speicherungen landen in ihr.',
   odtImportConvertBtn: 'Konvertieren und öffnen',
   importSkipConfirm: 'Nächstes Mal ohne Nachfrage konvertieren',
   docImportMsg: 'Dieses .{ext}-Dokument konvertieren?',
   docImportDetail:
-    'GenOffice bearbeitet .docx, nicht Word 97-2003-Dokumente (.doc). Text, Überschriften, Listen, Tabellen und Bilder werden übernommen; Fußnoten, Kommentare und Textfelder werden nicht vollständig bewahrt. Die Originaldatei bleibt unverändert; die konvertierte .docx-Kopie ist eigenständig, und spätere Speicherungen landen in ihr.',
+    'ForaOffice bearbeitet .docx, nicht Word 97-2003-Dokumente (.doc). Text, Überschriften, Listen, Tabellen und Bilder werden übernommen; Fußnoten, Kommentare und Textfelder werden nicht vollständig bewahrt. Die Originaldatei bleibt unverändert; die konvertierte .docx-Kopie ist eigenständig, und spätere Speicherungen landen in ihr.',
   docImportConvertBtn: 'Konvertieren und öffnen',
   dlgSaveAs: 'Speichern unter',
   closeUnsavedMsg: 'Dieses Dokument enthält ungespeicherte Änderungen.',

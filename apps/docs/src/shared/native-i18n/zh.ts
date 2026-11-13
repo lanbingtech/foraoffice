@@ -1,16 +1,17 @@
+// Modified for ForaOffice: public product names and corresponding behavior expectations.
 const zh = {
   dlgOpenDoc: '打开文档',
   filterWord: 'Word 文档',
   odtImportMsg: '转换 .{ext} 文档？',
   odtImportDetail:
-    'GenOffice 只编辑 .docx，不编辑 ODF。正文、标题、列表、表格和图片会转换过来；脚注、批注和文本框不会完整保留。原文件不会被修改，转换出的 .docx 是一份独立副本，之后的保存都写入它。', // public-hygiene: allow
+    'ForaOffice 只编辑 .docx，不编辑 ODF。正文、标题、列表、表格和图片会转换过来；脚注、批注和文本框不会完整保留。原文件不会被修改，转换出的 .docx 是一份独立副本，之后的保存都写入它。', // public-hygiene: allow
   hwpImportDetail:
-    'GenOffice 只编辑 .docx，不编辑 HWP。正文、表格、图片、页眉和页脚会转换过来；公式、脚注和嵌入对象不会转换，自动编号会变成普通文本。原文件不会被修改，转换出的 .docx 是一份独立副本，之后的保存都写入它。', // public-hygiene: allow
+    'ForaOffice 只编辑 .docx，不编辑 HWP。正文、表格、图片、页眉和页脚会转换过来；公式、脚注和嵌入对象不会转换，自动编号会变成普通文本。原文件不会被修改，转换出的 .docx 是一份独立副本，之后的保存都写入它。', // public-hygiene: allow
   odtImportConvertBtn: '转换并打开',
   importSkipConfirm: '下次直接转换，不再提示',
   docImportMsg: '转换 .{ext} 文档？',
   docImportDetail:
-    'GenOffice 只编辑 .docx，不编辑 Word 97-2003 旧版 .doc。正文、标题、列表、表格和图片会转换过来；脚注、批注和文本框不会完整保留。原文件不会被修改，转换出的 .docx 是一份独立副本，之后的保存都写入它。', // public-hygiene: allow
+    'ForaOffice 只编辑 .docx，不编辑 Word 97-2003 旧版 .doc。正文、标题、列表、表格和图片会转换过来；脚注、批注和文本框不会完整保留。原文件不会被修改，转换出的 .docx 是一份独立副本，之后的保存都写入它。', // public-hygiene: allow
   docImportConvertBtn: '转换并打开',
   dlgSaveAs: '另存为',
   closeUnsavedMsg: '此文档有未保存的更改。',

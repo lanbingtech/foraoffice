@@ -1,3 +1,4 @@
+// Modified for ForaOffice: public product names and corresponding behavior expectations.
 import type zh from './zh'
 
 const fr = {
@@ -5,14 +6,14 @@ const fr = {
   filterWord: 'Documents Word',
   odtImportMsg: 'Convertir ce document .{ext} ?',
   odtImportDetail:
-    'GenOffice modifie des .docx, pas de l’ODF. Le texte, les titres, les listes, les tableaux et les images sont convertis ; les notes de bas de page, les commentaires et les zones de texte ne sont pas entièrement conservés. Le fichier d’origine n’est jamais modifié ; le .docx converti est une copie distincte où s’effectuent les enregistrements suivants.',
+    'ForaOffice modifie des .docx, pas de l’ODF. Le texte, les titres, les listes, les tableaux et les images sont convertis ; les notes de bas de page, les commentaires et les zones de texte ne sont pas entièrement conservés. Le fichier d’origine n’est jamais modifié ; le .docx converti est une copie distincte où s’effectuent les enregistrements suivants.',
   hwpImportDetail:
-    'GenOffice modifie des .docx, pas des fichiers HWP. Le texte, les tableaux, les images, les en-têtes et les pieds de page sont convertis ; les équations, les notes de bas de page et les objets incorporés ne le sont pas, et la numérotation automatique devient du texte simple. Le fichier d’origine n’est jamais modifié ; le .docx converti est une copie distincte où s’effectuent les enregistrements suivants.',
+    'ForaOffice modifie des .docx, pas des fichiers HWP. Le texte, les tableaux, les images, les en-têtes et les pieds de page sont convertis ; les équations, les notes de bas de page et les objets incorporés ne le sont pas, et la numérotation automatique devient du texte simple. Le fichier d’origine n’est jamais modifié ; le .docx converti est une copie distincte où s’effectuent les enregistrements suivants.',
   odtImportConvertBtn: 'Convertir et ouvrir',
   importSkipConfirm: 'La prochaine fois, convertir sans demander',
   docImportMsg: 'Convertir ce document .{ext} ?',
   docImportDetail:
-    'GenOffice modifie des .docx, pas de documents Word 97-2003 (.doc). Le texte, les titres, les listes, les tableaux et les images sont convertis ; les notes de bas de page, les commentaires et les zones de texte ne sont pas entièrement conservés. Le fichier d’origine n’est jamais modifié ; le .docx converti est une copie distincte où s’effectuent les enregistrements suivants.',
+    'ForaOffice modifie des .docx, pas de documents Word 97-2003 (.doc). Le texte, les titres, les listes, les tableaux et les images sont convertis ; les notes de bas de page, les commentaires et les zones de texte ne sont pas entièrement conservés. Le fichier d’origine n’est jamais modifié ; le .docx converti est une copie distincte où s’effectuent les enregistrements suivants.',
   docImportConvertBtn: 'Convertir et ouvrir',
   dlgSaveAs: 'Enregistrer sous',
   closeUnsavedMsg: 'Ce document contient des modifications non enregistrées.',

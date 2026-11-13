@@ -9,6 +9,13 @@ import reactHooks from 'eslint-plugin-react-hooks'
 export default tseslint.config(
   {
     ignores: [
+      // Private local tooling and investigation trees are not project source.
+      '.agents/**',
+      '.scratch/**',
+      '.task/**',
+      '.claude/**',
+      '.codex/**',
+      '.cursor/**',
       '**/node_modules/**',
       '**/dist/**',
       '**/out/**',

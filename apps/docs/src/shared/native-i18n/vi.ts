@@ -1,3 +1,4 @@
+// Modified for ForaOffice: public product names and corresponding behavior expectations.
 import type zh from './zh'
 
 const vi = {
@@ -5,14 +6,14 @@ const vi = {
   filterWord: 'Tài liệu Word',
   odtImportMsg: 'Chuyển đổi tài liệu .{ext} này?',
   odtImportDetail:
-    'GenOffice chỉnh sửa .docx chứ không chỉnh sửa ODF. Nội dung, tiêu đề, danh sách, bảng và hình ảnh được chuyển đổi; chú thích cuối trang, bình luận và hộp văn bản không được giữ đầy đủ. Tệp gốc không bao giờ bị sửa; bản .docx sau chuyển đổi là một bản sao độc lập để tiếp tục chỉnh sửa và lưu.',
+    'ForaOffice chỉnh sửa .docx chứ không chỉnh sửa ODF. Nội dung, tiêu đề, danh sách, bảng và hình ảnh được chuyển đổi; chú thích cuối trang, bình luận và hộp văn bản không được giữ đầy đủ. Tệp gốc không bao giờ bị sửa; bản .docx sau chuyển đổi là một bản sao độc lập để tiếp tục chỉnh sửa và lưu.',
   hwpImportDetail:
-    'GenOffice chỉnh sửa .docx chứ không chỉnh sửa HWP. Nội dung, bảng, hình ảnh, đầu trang và chân trang được chuyển đổi; công thức, chú thích cuối trang và đối tượng nhúng không được chuyển đổi, còn đánh số tự động trở thành văn bản thường. Tệp gốc không bao giờ bị sửa; bản .docx sau chuyển đổi là một bản sao độc lập để tiếp tục chỉnh sửa và lưu.',
+    'ForaOffice chỉnh sửa .docx chứ không chỉnh sửa HWP. Nội dung, bảng, hình ảnh, đầu trang và chân trang được chuyển đổi; công thức, chú thích cuối trang và đối tượng nhúng không được chuyển đổi, còn đánh số tự động trở thành văn bản thường. Tệp gốc không bao giờ bị sửa; bản .docx sau chuyển đổi là một bản sao độc lập để tiếp tục chỉnh sửa và lưu.',
   odtImportConvertBtn: 'Chuyển đổi và mở',
   importSkipConfirm: 'Lần sau chuyển đổi ngay, không hỏi lại',
   docImportMsg: 'Chuyển đổi tài liệu .{ext} này?',
   docImportDetail:
-    'GenOffice chỉnh sửa .docx chứ không chỉnh sửa tài liệu Word 97-2003 (.doc). Nội dung, tiêu đề, danh sách, bảng và hình ảnh được chuyển đổi; chú thích cuối trang, bình luận và hộp văn bản không được giữ đầy đủ. Tệp gốc không bao giờ bị sửa; bản .docx sau chuyển đổi là một bản sao độc lập để tiếp tục chỉnh sửa và lưu.',
+    'ForaOffice chỉnh sửa .docx chứ không chỉnh sửa tài liệu Word 97-2003 (.doc). Nội dung, tiêu đề, danh sách, bảng và hình ảnh được chuyển đổi; chú thích cuối trang, bình luận và hộp văn bản không được giữ đầy đủ. Tệp gốc không bao giờ bị sửa; bản .docx sau chuyển đổi là một bản sao độc lập để tiếp tục chỉnh sửa và lưu.',
   docImportConvertBtn: 'Chuyển đổi và mở',
   dlgSaveAs: 'Lưu dưới dạng',
   closeUnsavedMsg: 'Tài liệu này có những thay đổi chưa được lưu.',

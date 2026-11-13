@@ -1,3 +1,4 @@
+// Modified for ForaOffice: public product names and corresponding behavior expectations.
 /**
  * @vitest-environment jsdom
  */
@@ -106,7 +107,7 @@ describe('Settings default-app row', () => {
 
     await click(button)
     expect(set).toHaveBeenCalledTimes(1)
-    expect(row()?.textContent).toContain('GenOffice is already the default.')
+    expect(row()?.textContent).toContain('ForaOffice is already the default.')
     expect(row()!.querySelector<HTMLButtonElement>('button')!.disabled).toBe(true)
   })
 
@@ -115,7 +116,7 @@ describe('Settings default-app row', () => {
       getDefaultAppStatus: async () => ({ state: 'other', others: [], manualOnly: false }),
     })
     const field = row()!
-    expect(field.textContent).toContain('Open .docx, .xlsx and .pptx files in GenOffice')
+    expect(field.textContent).toContain('Open .docx, .xlsx and .pptx files in ForaOffice')
     expect(field.querySelector<HTMLButtonElement>('button')!.disabled).toBe(false)
   })
 

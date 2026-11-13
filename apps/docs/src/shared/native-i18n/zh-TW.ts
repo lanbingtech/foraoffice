@@ -1,3 +1,4 @@
+// Modified for ForaOffice: public product names and corresponding behavior expectations.
 import type zh from './zh'
 
 const zhTW = {
@@ -5,14 +6,14 @@ const zhTW = {
   filterWord: 'Word 文件',
   odtImportMsg: '轉換這個 .{ext} 文件？',
   odtImportDetail:
-    'GenOffice 只編輯 .docx，不編輯 ODF。內文、標題、清單、表格與圖片會轉換過來；註腳、註解與文字方塊不會完整保留。原始檔案不會被修改，轉換後的 .docx 是獨立副本，之後的儲存都寫入它。', // public-hygiene: allow
+    'ForaOffice 只編輯 .docx，不編輯 ODF。內文、標題、清單、表格與圖片會轉換過來；註腳、註解與文字方塊不會完整保留。原始檔案不會被修改，轉換後的 .docx 是獨立副本，之後的儲存都寫入它。', // public-hygiene: allow
   hwpImportDetail:
-    'GenOffice 只編輯 .docx，不編輯 HWP。內文、表格、圖片、頁首與頁尾會轉換過來；方程式、註腳與內嵌物件不會轉換，自動編號會變成一般文字。原始檔案不會被修改，轉換後的 .docx 是獨立副本，之後的儲存都寫入它。', // public-hygiene: allow
+    'ForaOffice 只編輯 .docx，不編輯 HWP。內文、表格、圖片、頁首與頁尾會轉換過來；方程式、註腳與內嵌物件不會轉換，自動編號會變成一般文字。原始檔案不會被修改，轉換後的 .docx 是獨立副本，之後的儲存都寫入它。', // public-hygiene: allow
   odtImportConvertBtn: '轉換並開啟',
   importSkipConfirm: '下次直接轉換，不再提示',
   docImportMsg: '轉換這個 .{ext} 文件？',
   docImportDetail:
-    'GenOffice 只編輯 .docx，不編輯 Word 97-2003 舊版 .doc。內文、標題、清單、表格與圖片會轉換過來；註腳、註解與文字方塊不會完整保留。原始檔案不會被修改，轉換後的 .docx 是獨立副本，之後的儲存都寫入它。', // public-hygiene: allow
+    'ForaOffice 只編輯 .docx，不編輯 Word 97-2003 舊版 .doc。內文、標題、清單、表格與圖片會轉換過來；註腳、註解與文字方塊不會完整保留。原始檔案不會被修改，轉換後的 .docx 是獨立副本，之後的儲存都寫入它。', // public-hygiene: allow
   docImportConvertBtn: '轉換並開啟',
   dlgSaveAs: '另存新檔',
   closeUnsavedMsg: '此文件有未儲存的變更。',

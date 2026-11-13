@@ -1,3 +1,4 @@
+// Modified for ForaOffice: public product names and corresponding behavior expectations.
 import type zh from './zh'
 
 const tr = {
@@ -5,14 +6,14 @@ const tr = {
   filterWord: 'Word Belgeleri',
   odtImportMsg: 'Bu .{ext} belgesi dönüştürülsün mü?',
   odtImportDetail:
-    'GenOffice ODF değil .docx düzenler. Gövde metni, başlıklar, listeler, tablolar ve resimler aktarılır; dipnotlar, açıklamalar ve metin kutuları tam olarak korunmaz. Özgün dosya hiçbir zaman değiştirilmez; dönüştürülen .docx, sonraki kaydetmelerin yazıldığı ayrı bir kopyadır.',
+    'ForaOffice ODF değil .docx düzenler. Gövde metni, başlıklar, listeler, tablolar ve resimler aktarılır; dipnotlar, açıklamalar ve metin kutuları tam olarak korunmaz. Özgün dosya hiçbir zaman değiştirilmez; dönüştürülen .docx, sonraki kaydetmelerin yazıldığı ayrı bir kopyadır.',
   hwpImportDetail:
-    'GenOffice HWP değil .docx düzenler. Gövde metni, tablolar, resimler, üst bilgiler ve alt bilgiler aktarılır; denklemler, dipnotlar ve gömülü nesneler dönüştürülmez, otomatik numaralandırma düz metne dönüşür. Özgün dosya hiçbir zaman değiştirilmez; dönüştürülen .docx, sonraki kaydetmelerin yazıldığı ayrı bir kopyadır.',
+    'ForaOffice HWP değil .docx düzenler. Gövde metni, tablolar, resimler, üst bilgiler ve alt bilgiler aktarılır; denklemler, dipnotlar ve gömülü nesneler dönüştürülmez, otomatik numaralandırma düz metne dönüşür. Özgün dosya hiçbir zaman değiştirilmez; dönüştürülen .docx, sonraki kaydetmelerin yazıldığı ayrı bir kopyadır.',
   odtImportConvertBtn: 'Dönüştür ve aç',
   importSkipConfirm: 'Bir dahaki sefere sormadan dönüştür',
   docImportMsg: 'Bu .{ext} belgesi dönüştürülsün mü?',
   docImportDetail:
-    'GenOffice Word 97-2003 (.doc) belgelerini değil .docx düzenler. Gövde metni, başlıklar, listeler, tablolar ve resimler aktarılır; dipnotlar, açıklamalar ve metin kutuları tam olarak korunmaz. Özgün dosya hiçbir zaman değiştirilmez; dönüştürülen .docx, sonraki kaydetmelerin yazıldığı ayrı bir kopyadır.',
+    'ForaOffice Word 97-2003 (.doc) belgelerini değil .docx düzenler. Gövde metni, başlıklar, listeler, tablolar ve resimler aktarılır; dipnotlar, açıklamalar ve metin kutuları tam olarak korunmaz. Özgün dosya hiçbir zaman değiştirilmez; dönüştürülen .docx, sonraki kaydetmelerin yazıldığı ayrı bir kopyadır.',
   docImportConvertBtn: 'Dönüştür ve aç',
   dlgSaveAs: 'Farklı Kaydet',
   closeUnsavedMsg: 'Bu belgede kaydedilmemiş değişiklikler var.',

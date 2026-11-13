@@ -1,3 +1,4 @@
+// Modified for ForaOffice: public product names and corresponding behavior expectations.
 import type zh from './zh'
 
 const id = {
@@ -5,14 +6,14 @@ const id = {
   filterWord: 'Dokumen Word',
   odtImportMsg: 'Konversi dokumen .{ext} ini?',
   odtImportDetail:
-    'GenOffice mengedit .docx, bukan ODF. Teks isi, judul, daftar, tabel, dan gambar ikut dikonversi; catatan kaki, komentar, dan kotak teks tidak sepenuhnya dipertahankan. File asli tidak pernah diubah; salinan .docx hasil konversi berdiri sendiri dan penyimpanan berikutnya ditulis ke sana.',
+    'ForaOffice mengedit .docx, bukan ODF. Teks isi, judul, daftar, tabel, dan gambar ikut dikonversi; catatan kaki, komentar, dan kotak teks tidak sepenuhnya dipertahankan. File asli tidak pernah diubah; salinan .docx hasil konversi berdiri sendiri dan penyimpanan berikutnya ditulis ke sana.',
   hwpImportDetail:
-    'GenOffice mengedit .docx, bukan HWP. Teks isi, tabel, gambar, header, dan footer ikut dikonversi; persamaan, catatan kaki, dan objek tersemat tidak dikonversi, dan penomoran otomatis menjadi teks biasa. File asli tidak pernah diubah; salinan .docx hasil konversi berdiri sendiri dan penyimpanan berikutnya ditulis ke sana.',
+    'ForaOffice mengedit .docx, bukan HWP. Teks isi, tabel, gambar, header, dan footer ikut dikonversi; persamaan, catatan kaki, dan objek tersemat tidak dikonversi, dan penomoran otomatis menjadi teks biasa. File asli tidak pernah diubah; salinan .docx hasil konversi berdiri sendiri dan penyimpanan berikutnya ditulis ke sana.',
   odtImportConvertBtn: 'Konversi dan buka',
   importSkipConfirm: 'Lain kali langsung konversi tanpa bertanya',
   docImportMsg: 'Konversi dokumen .{ext} ini?',
   docImportDetail:
-    'GenOffice mengedit .docx, bukan dokumen Word 97-2003 (.doc). Teks isi, judul, daftar, tabel, dan gambar ikut dikonversi; catatan kaki, komentar, dan kotak teks tidak sepenuhnya dipertahankan. File asli tidak pernah diubah; salinan .docx hasil konversi berdiri sendiri dan penyimpanan berikutnya ditulis ke sana.',
+    'ForaOffice mengedit .docx, bukan dokumen Word 97-2003 (.doc). Teks isi, judul, daftar, tabel, dan gambar ikut dikonversi; catatan kaki, komentar, dan kotak teks tidak sepenuhnya dipertahankan. File asli tidak pernah diubah; salinan .docx hasil konversi berdiri sendiri dan penyimpanan berikutnya ditulis ke sana.',
   docImportConvertBtn: 'Konversi dan buka',
   dlgSaveAs: 'Simpan Sebagai',
   closeUnsavedMsg: 'Dokumen ini memiliki perubahan yang belum disimpan.',

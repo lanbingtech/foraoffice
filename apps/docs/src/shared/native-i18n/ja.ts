@@ -1,3 +1,4 @@
+// Modified for ForaOffice: public product names and corresponding behavior expectations.
 import type zh from './zh'
 
 const ja = {
@@ -5,14 +6,14 @@ const ja = {
   filterWord: 'Word 文書',
   odtImportMsg: 'この .{ext} 文書を変換しますか？',
   odtImportDetail:
-    'GenOffice は ODF ではなく .docx を編集します。本文・見出し・リスト・表・画像は変換されますが、脚注・コメント・テキストボックスは完全には保持されません。元のファイルは変更されず、変換後の .docx は独立したコピーとして以後の保存先になります。',
+    'ForaOffice は ODF ではなく .docx を編集します。本文・見出し・リスト・表・画像は変換されますが、脚注・コメント・テキストボックスは完全には保持されません。元のファイルは変更されず、変換後の .docx は独立したコピーとして以後の保存先になります。',
   hwpImportDetail:
-    'GenOffice は HWP ではなく .docx を編集します。本文・表・画像・ヘッダー・フッターは変換されますが、数式・脚注・埋め込みオブジェクトは変換されず、自動番号は通常のテキストになります。元のファイルは変更されず、変換後の .docx は独立したコピーとして以後の保存先になります。',
+    'ForaOffice は HWP ではなく .docx を編集します。本文・表・画像・ヘッダー・フッターは変換されますが、数式・脚注・埋め込みオブジェクトは変換されず、自動番号は通常のテキストになります。元のファイルは変更されず、変換後の .docx は独立したコピーとして以後の保存先になります。',
   odtImportConvertBtn: '変換して開く',
   importSkipConfirm: '次回から確認せずに変換する',
   docImportMsg: 'この .{ext} 文書を変換しますか？',
   docImportDetail:
-    'GenOffice は Word 97-2003 形式（.doc）ではなく .docx を編集します。本文・見出し・リスト・表・画像は変換されますが、脚注・コメント・テキストボックスは完全には保持されません。元のファイルは変更されず、変換後の .docx は独立したコピーとして以後の保存先になります。',
+    'ForaOffice は Word 97-2003 形式（.doc）ではなく .docx を編集します。本文・見出し・リスト・表・画像は変換されますが、脚注・コメント・テキストボックスは完全には保持されません。元のファイルは変更されず、変換後の .docx は独立したコピーとして以後の保存先になります。',
   docImportConvertBtn: '変換して開く',
   dlgSaveAs: '名前を付けて保存',
   closeUnsavedMsg: 'このドキュメントに未保存の変更があります。',

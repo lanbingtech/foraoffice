@@ -33,7 +33,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -203,6 +203,11 @@ jobs:
           # the sidecar-gated CLI tests read the generated compatibility fixture
           # (gitignored, normally produced by the sheets gate below)
           npm run fixtures -w @genoffice/sheets
+
+      # The Docs file-grant suite starts the packaged Node backend directly.
+      # Jobs do not share the SDK artifacts built by the separate E2E job.
+      - name: Build SDK required by unit tests
+        run: npm run build:sdk
 
       - name: Test
         run: npm test

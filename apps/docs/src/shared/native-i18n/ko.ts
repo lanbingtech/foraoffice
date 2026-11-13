@@ -1,3 +1,4 @@
+// Modified for ForaOffice: public product names and corresponding behavior expectations.
 import type zh from './zh'
 
 const ko = {
@@ -5,14 +6,14 @@ const ko = {
   filterWord: 'Word 문서',
   odtImportMsg: '이 .{ext} 문서를 변환할까요?',
   odtImportDetail:
-    'GenOffice은 ODF가 아니라 .docx를 편집합니다. 본문, 제목, 목록, 표, 이미지는 변환되지만 각주, 메모, 텍스트 상자는 완전히 유지되지 않습니다. 원본 파일은 변경되지 않으며, 변환된 .docx는 이후 저장이 기록되는 독립적인 사본입니다.',
+    'ForaOffice은 ODF가 아니라 .docx를 편집합니다. 본문, 제목, 목록, 표, 이미지는 변환되지만 각주, 메모, 텍스트 상자는 완전히 유지되지 않습니다. 원본 파일은 변경되지 않으며, 변환된 .docx는 이후 저장이 기록되는 독립적인 사본입니다.',
   hwpImportDetail:
-    'GenOffice은 HWP가 아니라 .docx를 편집합니다. 본문, 표, 그림, 머리말, 꼬리말은 변환되지만 수식, 각주, 삽입 개체는 변환되지 않으며 자동 번호는 일반 텍스트로 바뀝니다. 원본 파일은 변경되지 않으며, 변환된 .docx는 이후 저장이 기록되는 독립적인 사본입니다.',
+    'ForaOffice은 HWP가 아니라 .docx를 편집합니다. 본문, 표, 그림, 머리말, 꼬리말은 변환되지만 수식, 각주, 삽입 개체는 변환되지 않으며 자동 번호는 일반 텍스트로 바뀝니다. 원본 파일은 변경되지 않으며, 변환된 .docx는 이후 저장이 기록되는 독립적인 사본입니다.',
   odtImportConvertBtn: '변환 후 열기',
   importSkipConfirm: '다음부터 묻지 않고 변환',
   docImportMsg: '이 .{ext} 문서를 변환할까요?',
   docImportDetail:
-    'GenOffice은 Word 97-2003(.doc) 문서가 아니라 .docx를 편집합니다. 본문, 제목, 목록, 표, 이미지는 변환되지만 각주, 메모, 텍스트 상자는 완전히 유지되지 않습니다. 원본 파일은 변경되지 않으며, 변환된 .docx는 이후 저장이 기록되는 독립적인 사본입니다.',
+    'ForaOffice은 Word 97-2003(.doc) 문서가 아니라 .docx를 편집합니다. 본문, 제목, 목록, 표, 이미지는 변환되지만 각주, 메모, 텍스트 상자는 완전히 유지되지 않습니다. 원본 파일은 변경되지 않으며, 변환된 .docx는 이후 저장이 기록되는 독립적인 사본입니다.',
   docImportConvertBtn: '변환 후 열기',
   dlgSaveAs: '다른 이름으로 저장',
   closeUnsavedMsg: '이 문서에 저장하지 않은 변경 사항이 있습니다.',
