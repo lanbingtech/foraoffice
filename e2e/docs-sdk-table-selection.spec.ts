@@ -1,14 +1,16 @@
 import { test, expect } from '@playwright/test'
 import { launchSdkTestHost, sdkHostIsElectron, type SdkTestHost } from './sdk-host'
 import { createServer } from 'node:http'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
 import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
+import { inlinePictureDrawingXml } from '../packages/docx-engine/src'
+import JSZip from 'jszip'
 import type { DocsEditorHandle } from '../apps/docs/src/renderer/embedded'
 
 type FixtureWindow = Window & { editor: DocsEditorHandle; sdkReady: boolean; saved: number[] }
 
-test('embedded SDK polishes only selected cell text with pending whole-table revisions', async () => {
+test('embedded SDK preserves table-cell revisions and template structures through public editing', async () => {
   test.setTimeout(120_000)
   const bytes = await buildDocx({
     bodyXml:
@@ -205,6 +207,244 @@ test('embedded SDK polishes only selected cell text with pending whole-table rev
     expect(reloaded.result.output).not.toContain('old cracks')
     expect(reloaded.result.output).not.toContain('fine cracks')
     await page.screenshot({ path: test.info().outputPath('sdk-cell-polish.png') })
+
+    const template = await buildDocx({
+      withImage: true,
+      bodyXml:
+        '<w:p><w:r><w:t>Historical description</w:t></w:r></w:p>' +
+        '<w:p/><w:p/>' +
+        '<w:p><w:r><w:t>Before protected structures</w:t></w:r></w:p>' +
+        '<w:p><w:pPr><w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr></w:p>' +
+        '<w:p><w:fldSimple w:instr="DATE"><w:r><w:t>2020-01-01</w:t></w:r></w:fldSimple></w:p>' +
+        `<w:p><w:r>${inlinePictureDrawingXml({ rId: 'rId10', docPrId: 1, widthPx: 100, heightPx: 80 })}</w:r></w:p>` +
+        '<w:p><w:r><w:t>Final paragraph</w:t></w:r></w:p>',
+    })
+    expect(
+      await page.evaluate(async (bytes) => {
+        const fixture = window as unknown as FixtureWindow
+        fixture.saved = bytes
+        return fixture.editor.documents.open()
+      }, Array.from(template)),
+    ).toBe(true)
+    // Use the same public storage and runtime as an embedding application.
+    const contract = await page.evaluate(async () => {
+      const { editor } = window as unknown as FixtureWindow
+      const client = editor.runtime.connect({ id: 'template-contract' })
+      const execute = (name: string, input: Record<string, unknown>) =>
+        client.execute({ id: crypto.randomUUID(), name, input })
+      try {
+        const context = client.context().text
+        const emptyBefore = await execute('read_blocks', { startBlockIndex: 0, endBlockIndex: 3 })
+        const roundtrip = await execute('replace_blocks', {
+          startBlockIndex: 0,
+          endBlockIndex: 3,
+          html: emptyBefore.output,
+        })
+        const emptyAfter = await execute('read_blocks', { startBlockIndex: 0, endBlockIndex: 3 })
+        const before = await execute('read_blocks', { startBlockIndex: 0, endBlockIndex: 7 })
+        const refused = await execute('replace_blocks', {
+          startBlockIndex: 0,
+          endBlockIndex: 7,
+          html: before.output.replace('Historical description', '{{description}}'),
+        })
+        const after = await execute('read_blocks', { startBlockIndex: 0, endBlockIndex: 7 })
+        return {
+          context,
+          emptyBefore,
+          roundtrip,
+          emptyAfter,
+          before,
+          refused,
+          after,
+          modules: performance
+            .getEntriesByType('resource')
+            .map((entry) => entry.name)
+            .filter((name) => /App-|embedded-/.test(name)),
+        }
+      } finally {
+        client.close()
+      }
+    })
+    await writeFile(
+      test.info().outputPath('sdk-template-contract.json'),
+      JSON.stringify(contract, null, 2),
+    )
+    expect(contract.emptyBefore.isError, contract.emptyBefore.output).not.toBe(true)
+    expect(contract.emptyBefore.output.match(/<p><\/p>/g)).toHaveLength(2)
+    expect(contract.roundtrip.isError, contract.roundtrip.output).not.toBe(true)
+    expect(
+      contract.emptyAfter.output.match(/<p><\/p>/g) ?? [],
+      contract.emptyAfter.output,
+    ).toHaveLength(2)
+    expect(contract.before.output).toContain('data-doc-readonly="field"')
+    expect(contract.before.output.match(/data-doc-readonly=/g)).toHaveLength(3)
+    expect(contract.refused).toMatchObject({ isError: true, mutated: false })
+    expect(contract.refused.output).toMatch(/read-only/i)
+    expect(contract.after.output).toBe(contract.before.output)
+
+    const saveTemplate = () =>
+      page.evaluate(async () => {
+        const fixture = window as unknown as FixtureWindow
+        if (!(await fixture.editor.documents.save())) throw new Error('Template save failed')
+        return fixture.saved
+      })
+    const beforeEdit = await saveTemplate()
+    const inPlace = await page.evaluate(async () => {
+      const { editor } = window as unknown as FixtureWindow
+      const client = editor.runtime.connect({ id: 'template-in-place' })
+      try {
+        client.context()
+        return await client.execute({
+          id: 'template-placeholder',
+          name: 'apply_ops',
+          input: {
+            ops: [
+              {
+                op: 'findReplace',
+                find: 'Historical description',
+                replace: '{{description}}',
+                target: { blockIndexes: [0] },
+              },
+            ],
+          },
+        })
+      } finally {
+        client.close()
+      }
+    })
+    expect(inPlace.isError, inPlace.output).not.toBe(true)
+    const afterEdit = await saveTemplate()
+    const structure = async (bytes: number[]) => {
+      const zip = await JSZip.loadAsync(Uint8Array.from(bytes))
+      const xml = await zip.file('word/document.xml')!.async('string')
+      return {
+        sections: xml.match(/<w:sectPr[\s>][\s\S]*?<\/w:sectPr>/g),
+        fields: xml.match(/<w:fldSimple[\s>][\s\S]*?<\/w:fldSimple>/g),
+        drawings: xml.match(/<w:drawing[\s>][\s\S]*?<\/w:drawing>/g),
+        image: await zip.file('word/media/image1.png')!.async('base64'),
+      }
+    }
+    const originalStructure = await structure(beforeEdit)
+    expect(originalStructure.sections).toHaveLength(2)
+    expect(originalStructure.fields).toHaveLength(1)
+    expect(originalStructure.drawings).toHaveLength(1)
+    expect(await structure(afterEdit)).toEqual(originalStructure)
+    const templateReload = await page.evaluate(async () => {
+      const { editor } = window as unknown as FixtureWindow
+      const reopened = await editor.documents.open()
+      const client = editor.runtime.connect({ id: 'template-reopened' })
+      try {
+        client.context()
+        return {
+          reopened,
+          read: await client.execute({
+            id: 'read',
+            name: 'read_blocks',
+            input: { startBlockIndex: 0, endBlockIndex: 7 },
+          }),
+        }
+      } finally {
+        client.close()
+      }
+    })
+    expect(templateReload.reopened).toBe(true)
+    expect(templateReload.read.isError, templateReload.read.output).not.toBe(true)
+    expect(templateReload.read.output).toContain('{{description}}')
+    expect(templateReload.read.output.match(/<p><\/p>/g)).toHaveLength(2)
+    expect(templateReload.read.output.match(/data-doc-readonly=/g)).toHaveLength(3)
+    expect(await structure(await saveTemplate())).toEqual(originalStructure)
+
+    const freshness = await page.evaluate(async () => {
+      const { editor } = window as unknown as FixtureWindow
+      const reader = editor.runtime.connect({ id: 'template-stale-reader' })
+      const writer = editor.runtime.connect({ id: 'template-concurrent-writer' })
+      const edit = {
+        id: 'reader-edit',
+        name: 'replace_blocks',
+        input: { startBlockIndex: 0, endBlockIndex: 0, html: '<p>{{description}}</p>' },
+      }
+      const read = {
+        id: 'reader-blocks',
+        name: 'read_blocks',
+        input: { startBlockIndex: 0, endBlockIndex: 0 },
+      }
+      try {
+        reader.context()
+        writer.context()
+        const bodyEdit = await writer.execute({
+          id: 'concurrent-body',
+          name: 'apply_ops',
+          input: {
+            ops: [
+              {
+                op: 'findReplace',
+                find: 'Final paragraph',
+                replace: 'Final amended paragraph',
+                target: { blockIndexes: [7] },
+              },
+            ],
+          },
+        })
+        const bodyStale = await reader.execute(edit)
+        const bodyRead = await reader.execute(read)
+        const bodyRecovered = await reader.execute(edit)
+        reader.context()
+        writer.context()
+        const comment = await writer.execute({
+          id: 'concurrent-comment',
+          name: 'add_comment',
+          input: { blockIndex: 0, comment: 'Review the template placeholder.' },
+        })
+        const sideRead = await reader.execute(read)
+        const sideStale = await reader.execute(edit)
+        const fullRead = await reader.execute({
+          id: 'reader-context',
+          name: 'get_document_context',
+          input: {},
+        })
+        const sideRecovered = await reader.execute(edit)
+        return {
+          bodyEdit,
+          bodyStale,
+          bodyRead,
+          bodyRecovered,
+          comment,
+          sideRead,
+          sideStale,
+          fullRead,
+          sideRecovered,
+        }
+      } finally {
+        reader.close()
+        writer.close()
+      }
+    })
+    for (const result of [
+      freshness.bodyEdit,
+      freshness.bodyRead,
+      freshness.bodyRecovered,
+      freshness.comment,
+      freshness.sideRead,
+      freshness.fullRead,
+      freshness.sideRecovered,
+    ])
+      expect(result.isError, result.output).not.toBe(true)
+    expect(freshness.bodyStale).toMatchObject({
+      isError: true,
+      errorCode: 'stale_target',
+      committed: false,
+    })
+    expect(freshness.bodyStale.output).toBe(
+      'The document body changed since this caller read it; use read_blocks, read_document or get_document_context before retrying.',
+    )
+    expect(freshness.sideStale).toMatchObject({
+      isError: true,
+      errorCode: 'stale_target',
+      committed: false,
+    })
+    expect(freshness.sideStale.output).toBe(
+      'Document-side state changed since this caller read it; use read_document or get_document_context for fresh full context. read_blocks does not refresh document-side state.',
+    )
   } finally {
     await browser?.close()
     await new Promise<void>((done) => server.close(() => done()))

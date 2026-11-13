@@ -2,7 +2,8 @@ import { expect, test, type Page } from '@playwright/test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import JSZip from 'jszip'
 import type { Editor } from '@tiptap/core'
 import { buildDocx, TINY_PNG_BASE64 } from '../packages/docx-engine/tests/helpers/build-docx'
@@ -13,7 +14,7 @@ type NativeWindow = Window & {
 }
 
 async function launchNative(name: string) {
-  const root = resolve(__dirname, '../apps/docs/out/diagnostics/electron-parity')
+  const root = join(tmpdir(), 'foraoffice-host-tests', 'electron-parity')
   await mkdir(root, { recursive: true })
   const directory = await mkdtemp(join(root, `${name}-`))
   const userDataDir = join(directory, 'user-data')

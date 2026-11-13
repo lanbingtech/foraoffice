@@ -3,6 +3,7 @@ import { launchSdkTestHost, sdkHostIsElectron, type SdkTestHost } from './sdk-ho
 import { createServer } from 'node:http'
 import { readFile, mkdir, writeFile } from 'node:fs/promises'
 import { extname, resolve, sep } from 'node:path'
+import { tmpdir } from 'node:os'
 import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
 import type { DocsEditorHandle } from '../apps/docs/src/renderer/embedded'
 import type { DocsEditorAction, DocsAiInstructionRequest } from '../apps/docs/src/renderer/embedded'
@@ -24,7 +25,8 @@ type Fixture = Window & {
   }
 }
 const output = resolve(
-  'apps/docs/out/diagnostics',
+  tmpdir(),
+  'foraoffice-host-tests',
   sdkHostIsElectron ? 'electron-parity/ai-operations' : 'ai-operations',
 )
 for (const language of ['en', 'zh'] as const)

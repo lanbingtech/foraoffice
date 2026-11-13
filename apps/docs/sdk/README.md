@@ -51,6 +51,12 @@ Await both the mount promise and `editor.ready` before using `editor.runtime` or
 `editor.commands`. Call `editor.dispose()` when removing the view. One mounted
 host/editor is supported per renderer window.
 
+Successful `editor.documents.open()` and `editor.documents.new()` completion
+publishes the replacement body, document metadata and runtime identity together.
+The next awaited call can read or edit that document immediately, including its
+revision settings; no render delay or UI interaction is required. Existing
+document bindings are invalidated by replacement.
+
 Mounted editors use the native ribbon's normal 10px side insets on macOS,
 Windows and Linux, with File immediately before Save. They do not reserve space
 for window buttons or turn the ribbon into a window drag region; the embedding
@@ -169,6 +175,60 @@ an independent file operation's outcome. Cancellation does not imply that a file
 write was rolled back. An outstanding draft must be finalized, retained or
 discarded before saving. A stale target is refused; obtain fresh context and
 reassess the intended operation before submitting a new call.
+
+Freshness checks distinguish the body, revision decisions and document-side
+state (comments, notes, headers/footers, sections, styles and other authored
+stores). `revision` can advance for either body or document-side changes. A
+successful `read_blocks` refreshes only the body baseline. If the error says
+document-side state is stale, call `read_document` or `get_document_context` on
+the same caller/binding before reassessing and retrying; repeating a partial
+read is insufficient. Revision decisions can refresh with `read_revisions` or
+either full-context read. Full reads retain the existing authorization and
+captured selection; they do not retarget the operation.
+
+### Restricted HTML editing and structure preservation
+
+An explicit `<p></p>` creates an empty paragraph and survives a read/write
+round trip. `<p><br></p>` contains a real line break instead; it is not an
+equivalent representation of an empty paragraph. Empty wrapper `<div>` elements
+are ignored. These rules are also returned by `get_editor_capabilities`.
+
+`read_blocks` returns a projection for editing, not a complete DOCX serialization.
+Elements carrying the reserved `data-doc-readonly` attribute describe objects
+that cannot be reconstructed from that HTML, such as protected block images,
+independent section-break blocks, unsupported formulas and Word field results:
+
+```html
+<p data-doc-readonly="protected">
+  [Protected content: Image, read-only representation; exclude from HTML replacement]
+</p>
+<span data-doc-readonly="field">2020-01-01</span>
+```
+
+They are read-only metadata, not preservation references. Content insertion,
+range/selection replacement and HTML-based document creation reject such input
+before editing or invoking the host. Old diagnostic descriptions are also
+refused when echoed over a protected target. Ordinary authored text discussing
+that old wording remains valid; literal HTML examples must escape their markup.
+Markdown document creation remains plain Markdown, not an HTML write.
+
+For ordinary inline images, the existing `<img src="doc:B.I">` reference is
+writable: copy the exact reference from the current read to preserve that image.
+Omitting it removes the image, as reported by the tool. Protected block objects
+and Word fields have no equivalent generic HTML preservation reference; keep
+them outside replacement ranges. Use `apply_ops/findReplace` on a known text
+range, or `replace_selection` for text within a single paragraph/cell, when
+surrounding objects and boundaries must remain intact.
+
+`replace_blocks` deliberately replaces the addressed blocks. It inherits
+compatible paragraph/text formatting by block role and can preserve an ordinary
+paragraph's section properties through its original anchor; it does not promise
+that a larger rewrite preserves every section boundary, field instruction,
+bookmark or object. Successful replacements describe protected blocks and fields
+in the affected range and distinguish tracked deletion from immediate replacement.
+Explicit structure deletion remains available. To preserve a complex template,
+edit its text in place or split the operation into ranges that exclude read-only
+structures rather than echoing the complete projected HTML.
 
 ## Hosted documents, inspection and view annotations
 

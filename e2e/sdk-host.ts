@@ -2,6 +2,7 @@ import { _electron as electron, chromium, test, type Page } from '@playwright/te
 import type { BrowserWindow } from 'electron'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 export const sdkHostIsElectron = process.env.FORAOFFICE_SDK_TEST_HOST === 'electron'
@@ -20,15 +21,32 @@ export interface SdkTestHost {
 
 export async function launchSdkTestHost(): Promise<SdkTestHost> {
   if (!sdkHostIsElectron) {
-    return chromium.launch({
+    const browser = await chromium.launch({
       headless: true,
       channel:
         process.env.FORAOFFICE_BROWSER_CHANNEL ??
         (process.platform === 'win32' ? 'chrome' : undefined),
     })
+    const evidence = {
+      host: 'browser',
+      platform: process.platform,
+      version: browser.version(),
+      channel:
+        process.env.FORAOFFICE_BROWSER_CHANNEL ??
+        (process.platform === 'win32' ? 'chrome' : 'chromium'),
+    }
+    await writeFile(
+      test.info().outputPath('sdk-host-engine.json'),
+      JSON.stringify(evidence, null, 2),
+    )
+    await test.info().attach('SDK host engine', {
+      body: JSON.stringify(evidence, null, 2),
+      contentType: 'application/json',
+    })
+    return browser
   }
 
-  const artifacts = resolve(__dirname, '../apps/docs/out/diagnostics/electron-parity')
+  const artifacts = join(tmpdir(), 'foraoffice-host-tests', 'electron-parity')
   await mkdir(artifacts, { recursive: true })
   const workspace = await mkdtemp(join(artifacts, 'sdk-electron-'))
   const main = join(workspace, 'main.cjs')

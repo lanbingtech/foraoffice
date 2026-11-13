@@ -6,6 +6,7 @@ import {
   insertBlocksAfter,
   isBlankDocument,
   parseHtmlFragment,
+  readOnlyHtmlError,
   replaceBlockRange,
   resolveImageRefs,
   type AiTrack,
@@ -80,6 +81,8 @@ export class DocumentDraft {
       throw new Error('Draft updates must use increasing positive sequence numbers')
     if (html.length > DOC_MAX_CHARS)
       throw new Error(`The draft exceeds ${DOC_MAX_CHARS} characters`)
+    const readOnly = readOnlyHtmlError(html)
+    if (readOnly) throw new Error(readOnly)
     if (sequence === this.sequence) {
       if (html !== this.html) throw new Error('A replayed draft update has different content')
       return
@@ -121,6 +124,8 @@ export class DocumentDraft {
         'The draft was edited manually; those edits were kept and automatic finalization was refused',
       )
     if (!this.html.trim()) return fail('The draft is empty; the document is unchanged')
+    const readOnly = readOnlyHtmlError(this.html)
+    if (readOnly) return fail(readOnly)
     let nodes: ReturnType<typeof parseHtmlFragment>
     try {
       nodes = parseHtmlFragment(this.html, this.numIds)

@@ -999,46 +999,61 @@ describe('shared Docs runtime', () => {
     runtime.dispose()
   })
 
-  it('allows freshly read revision decisions without granting stale block edits', async () => {
-    const editor = await documentWith('Original')
-    const runtime = createDocsRuntime({
-      current: () => ({ editor, identity: editor, numIds: { bullet: null, ordered: null } }),
-    })
-    const client = runtime.connect({ id: 'revision-reviewer' })
-    client.context()
-    const { executeTool } = await import('../src/renderer/ai/tools')
-    const tracked = await executeTool(
-      editor,
-      {
-        id: 'other-edit',
-        name: 'replace_blocks',
-        input: { startBlockIndex: 0, endBlockIndex: 0, html: '<p>Changed</p>' },
-      },
-      { bullet: null, ordered: null },
-      { author: 'Other author' },
-    )
-    expect(tracked.isError).not.toBe(true)
-    expect(
-      (await client.execute({ id: 'read', name: 'read_revisions', input: {} })).isError,
-    ).not.toBe(true)
-    const accepted = await client.execute({
-      id: 'accept',
-      name: 'accept_changes',
-      input: { all: true },
-    })
-    expect(accepted.isError, accepted.output).not.toBe(true)
-    expect(editor.getText()).toBe('Changed')
-    expect(
-      (
-        await client.execute({
-          id: 'stale-edit',
-          name: 'insert_content',
-          input: { afterBlockIndex: 0, html: '<p>Wrong</p>' },
-        })
-      ).isError,
-    ).toBe(true)
-    runtime.dispose()
-  })
+  it.each(['accept_changes', 'reject_changes'])(
+    'allows freshly read %s without granting stale block edits or document-side writes',
+    async (name) => {
+      const editor = await documentWith('Original')
+      let stateVersion = {}
+      const runtime = createDocsRuntime({
+        current: () => ({
+          editor,
+          identity: editor,
+          stateVersion,
+          numIds: { bullet: null, ordered: null },
+        }),
+      })
+      const client = runtime.connect({ id: 'revision-reviewer' })
+      client.context()
+      const { executeTool } = await import('../src/renderer/ai/tools')
+      const tracked = await executeTool(
+        editor,
+        {
+          id: 'other-edit',
+          name: 'replace_blocks',
+          input: { startBlockIndex: 0, endBlockIndex: 0, html: '<p>Changed</p>' },
+        },
+        { bullet: null, ordered: null },
+        { author: 'Other author' },
+      )
+      expect(tracked.isError).not.toBe(true)
+      stateVersion = {}
+      const stale = await client.execute({ id: 'stale-decision', name, input: { all: true } })
+      expect(stale).toMatchObject({ isError: true, errorCode: 'stale_target', committed: false })
+      expect(stale.output).toBe(
+        'Document revisions or document-side state changed since this caller read them; use read_revisions before accepting or rejecting changes, or read_document or get_document_context for fresh full context.',
+      )
+      expect(
+        (await client.execute({ id: 'read', name: 'read_revisions', input: {} })).isError,
+      ).not.toBe(true)
+      const accepted = await client.execute({
+        id: 'accept',
+        name,
+        input: { all: true },
+      })
+      expect(accepted.isError, accepted.output).not.toBe(true)
+      expect(editor.getText()).toBe(name === 'accept_changes' ? 'Changed' : 'Original')
+      expect(
+        (
+          await client.execute({
+            id: 'stale-edit',
+            name: 'insert_content',
+            input: { afterBlockIndex: 0, html: '<p>Wrong</p>' },
+          })
+        ).isError,
+      ).toBe(true)
+      runtime.dispose()
+    },
+  )
 
   it('does not treat a revisions-only read as fresh block context', async () => {
     const editor = await documentWith('Original')
@@ -1563,6 +1578,103 @@ describe('shared Docs runtime', () => {
       input: { startBlockIndex: 0, endBlockIndex: 0, html: '<p>After refresh</p>' },
     })
     expect(edited.isError).not.toBe(true)
+    expect(editor.getText()).toBe('After refresh')
+    runtime.dispose()
+  })
+
+  it('lets a caller recover from body changes by reading blocks', async () => {
+    const editor = await documentWith('Original')
+    const runtime = createDocsRuntime({
+      current: () => ({ editor, identity: editor, numIds: { bullet: null, ordered: null } }),
+    })
+    const caller = runtime.connect({ id: 'body-reader' })
+    caller.context()
+    editor.commands.setContent('<p>Manual change</p>')
+    const call = {
+      id: 'edit',
+      name: 'replace_blocks',
+      input: { startBlockIndex: 0, endBlockIndex: 0, html: '<p>After block refresh</p>' },
+    }
+    const stale = await caller.execute(call)
+    expect(stale).toMatchObject({ isError: true, errorCode: 'stale_target', committed: false })
+    expect(stale.output).toBe(
+      'The document body changed since this caller read it; use read_blocks, read_document or get_document_context before retrying.',
+    )
+    const read = await caller.execute({
+      id: 'read-blocks',
+      name: 'read_blocks',
+      input: { startBlockIndex: 0, endBlockIndex: 0 },
+    })
+    expect(read.isError, read.output).not.toBe(true)
+    const edited = await caller.execute(call)
+    expect(edited.isError, edited.output).not.toBe(true)
+    expect(edited.committed).toBe(true)
+    expect(editor.getText()).toBe('After block refresh')
+    runtime.dispose()
+  })
+
+  it('requires full context after document-side state changes even after reading blocks', async () => {
+    const editor = await documentWith('Original')
+    let stateVersion = {}
+    const runtime = createDocsRuntime({
+      current: () => ({
+        editor,
+        identity: editor,
+        stateVersion,
+        numIds: { bullet: null, ordered: null },
+      }),
+    })
+    const caller = runtime.connect({ id: 'side-state-reader' })
+    const before = caller.context()
+    stateVersion = {}
+    const read = await caller.execute({
+      id: 'read-blocks',
+      name: 'read_blocks',
+      input: { startBlockIndex: 0, endBlockIndex: 0 },
+    })
+    expect(read.isError, read.output).not.toBe(true)
+    expect(read.documentId).toBe(before.documentId)
+    expect(read.revision).toBeGreaterThan(before.revision)
+    for (const call of [
+      {
+        id: 'replace',
+        name: 'replace_blocks',
+        input: { startBlockIndex: 0, endBlockIndex: 0, html: '<p>Wrong</p>' },
+      },
+      {
+        id: 'ops',
+        name: 'apply_ops',
+        input: { ops: [{ op: 'findReplace', find: 'Original', replace: 'Wrong' }] },
+      },
+    ]) {
+      const stale = await caller.execute(call)
+      expect(stale).toMatchObject({
+        isError: true,
+        errorCode: 'stale_target',
+        committed: false,
+        documentId: before.documentId,
+        revision: read.revision,
+      })
+      expect(stale.output).toBe(
+        'Document-side state changed since this caller read it; use read_document or get_document_context for fresh full context. read_blocks does not refresh document-side state.',
+      )
+    }
+    expect(editor.getText()).toBe('Original')
+    const refreshed = await caller.execute({
+      id: 'full-context',
+      name: 'get_document_context',
+      input: {},
+    })
+    expect(refreshed).toMatchObject({ documentId: before.documentId, revision: read.revision })
+    expect(refreshed.isError, refreshed.output).not.toBe(true)
+    const edited = await caller.execute({
+      id: 'fresh-edit',
+      name: 'replace_blocks',
+      input: { startBlockIndex: 0, endBlockIndex: 0, html: '<p>After refresh</p>' },
+    })
+    expect(edited.isError, edited.output).not.toBe(true)
+    expect(edited.documentId).toBe(before.documentId)
+    expect(edited.committed).toBe(true)
     expect(editor.getText()).toBe('After refresh')
     runtime.dispose()
   })

@@ -90,7 +90,12 @@ import {
   type InkTool,
 } from './editor/ink'
 import { t, getLang } from './i18n/locale'
-import { isBlankDocument, parseHtmlFragment, replaceBlockRange } from './ai/protocol'
+import {
+  isBlankDocument,
+  parseHtmlFragment,
+  readOnlyHtmlError,
+  replaceBlockRange,
+} from './ai/protocol'
 import { carryDocSeen } from './ai/tools'
 import { isDocDirty, resetCrossDocEditState } from './doc-dirty'
 import { pruneUnreferencedNumbering } from './numbering-actions'
@@ -125,6 +130,8 @@ export type PendingPdfExport = {
 /** The App state the file actions need; built fresh per call. */
 export interface FileActionContext {
   beforeDocumentReplace?(): void
+  /** Publish a replacement body and its authored stores before lifecycle completion. */
+  commitDocumentState?(operation: () => void): void
   editor: Editor | null
   doc: DocState | null
   dirtyRef: { current: boolean }
@@ -506,6 +513,11 @@ function focusDocumentStart(editor: Editor): void {
 /** bumped when a document replacement starts; a slower one still parsing must not land */
 let openGeneration = 0
 
+function commitDocumentState(ctx: FileActionContext, operation: () => void): void {
+  if (ctx.commitDocumentState) ctx.commitDocumentState(operation)
+  else operation()
+}
+
 export async function loadFile(
   ctx: FileActionContext,
   result: OpenDocxResult,
@@ -554,122 +566,124 @@ export async function loadFile(
     await prefetchFaces(collectDocFonts(parsed))
     await loadBundledStandIns(collectDocFonts(parsed))
     if (!currentOpen()) return 'superseded'
-    ctx.editor.storage.listNumbering.styles = parsed.styles
-    ctx.editor.storage.listNumbering.docDefaults = parsed.docDefaults
-    ctx.editor.storage.listNumbering.defs = parsed.numbering
-    applyDocLayoutSettings(ctx.editor, parsed)
     ctx.beforeDocumentReplace?.()
     if (!currentOpen()) return 'superseded'
-    setContentPhased(
-      phasedHostFor(ctx),
-      blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)),
-    )
-    resetEditorHistory(ctx.editor)
-    if (tier !== 'readOnly') focusDocumentStart(ctx.editor)
-    noteDocumentSwapped()
-    ctx.setDoc({
-      parsed,
-      filePath: result.hosted ? null : result.path,
-      hosted: result.hosted,
-      fileName: result.name,
-      hash: result.hash,
-      encrypted: result.encrypted,
+    commitDocumentState(ctx, () => {
+      ctx.editor!.storage.listNumbering.styles = parsed.styles
+      ctx.editor!.storage.listNumbering.docDefaults = parsed.docDefaults
+      ctx.editor!.storage.listNumbering.defs = parsed.numbering
+      applyDocLayoutSettings(ctx.editor!, parsed)
+      setContentPhased(
+        phasedHostFor(ctx),
+        blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)),
+      )
+      resetEditorHistory(ctx.editor!)
+      if (tier !== 'readOnly') focusDocumentStart(ctx.editor!)
+      noteDocumentSwapped()
+      ctx.setDoc({
+        parsed,
+        filePath: result.hosted ? null : result.path,
+        hosted: result.hosted,
+        fileName: result.name,
+        hash: result.hash,
+        encrypted: result.encrypted,
+      })
+      // this tab's document was replaced: a password parked for the previous
+      // unsaved draft is stale and must not encrypt this document's saves.
+      // Done here, not in the main process's loadDocx — Review > Compare also
+      // opens files without replacing the current document.
+      discardStalePasswordIntents()
+      ctx.setAiPanelKey((k) => k + 1)
+      ctx.setDocCss(docStyleCss(parsed))
+      ctx.setSection(readSectionSettings(parsed))
+      ctx.setSections(readSections(parsed))
+      ctx.setSectionDirty(false)
+      ctx.setPageColor(readPageColor(parsed))
+      ctx.setPageColorDirty(false)
+      ctx.setHeader(
+        parsed.headerText || parsed.headerHasPageNumber || parsed.headerParas?.length
+          ? {
+              text: parsed.headerText ?? '',
+              pageNumber: parsed.headerHasPageNumber,
+              paras: parsed.headerParas ?? undefined,
+            }
+          : null,
+      )
+      ctx.setHeaderDirty(false)
+      ctx.setFooter(
+        parsed.footerText || parsed.footerHasPageNumber || parsed.footerParas?.length
+          ? {
+              text: parsed.footerText ?? '',
+              pageNumber: parsed.footerHasPageNumber,
+              paras: parsed.footerParas ?? undefined,
+            }
+          : null,
+      )
+      ctx.setFooterDirty(false)
+      ctx.setHfVariants(hfVariantsFromParsed(parsed))
+      ctx.setHfVariantsDirty([])
+      resetCrossDocEditState(ctx)
+      ctx.setTitlePg(parsed.titlePg ?? false)
+      ctx.setTitlePgDirty(false)
+      ctx.setEvenOddHf(parsed.evenAndOddHeaders ?? false)
+      ctx.setEvenOddHfDirty(false)
+      ctx.setMirrorMargins(parsed.mirrorMargins ?? false)
+      ctx.setMirrorMarginsDirty(false)
+      ctx.setShowComments(true)
+      ctx.setCommentPanelOpen(hasUnanchoredComments(parsed.comments, parsed.blocks))
+      ctx.setCommentPopup(null)
+      ctx.setReadMode(tier === 'readOnly')
+      ctx.setLargeDocSpellOff(tier !== 'normal')
+      ctx.setComments(parsed.comments)
+      ctx.setCommentsDirty(false)
+      ctx.setWatermark(parsed.watermarkText ?? null)
+      ctx.setWatermarkDirty(false)
+      ctx.setWatermarkStyle(null)
+      ctx.setWatermarkPicture(null)
+      ctx.setInkAnnotations(annotationsFromParsed(parsed.inks))
+      ctx.setInksDirty(false)
+      ctx.setInkTool('select')
+      ctx.setFootnotes(parsed.footnotes)
+      ctx.setEndnotes(parsed.endnotes)
+      ctx.setNotesDirty(false)
+      ctx.setSources(parsed.sources)
+      ctx.setSourcesDirty(false)
+      ctx.setZoteroDocumentData(parsed.zoteroDocumentData)
+      ctx.setZoteroDocumentDataDirty(false)
+      ctx.setThemeFonts(parsed.themeFonts ?? null)
+      ctx.setThemeFontsDirty(false)
+      ctx.setThemeColors(parsed.themeColors ?? null)
+      ctx.setThemeColorsDirty(false)
+      ctx.setCommentComposing(false)
+      ctx.setTrackChanges(parsed.trackRevisions ?? false)
+      ctx.setTrackRevisionsDirty(false)
+      ctx.setProtection(parsed.protection)
+      ctx.setProtectionDirty(false)
+      ctx.setWriteProtection(parsed.writeProtection)
+      ctx.setWriteProtectionDirty(false)
+      ctx.setRemovePersonalInfo(parsed.removePersonalInfo)
+      ctx.setRemovePersonalInfoDirty(false)
+      ctx.onWriteProtectionLoaded(parsed.writeProtection)
+      ctx.setCompareResult(null)
+      // Recovery content still only exists in the autosave copy. Keep it dirty
+      // until an explicit/automatic save lands it on the original path.
+      ctx.dirtyRef.current = openedFileStartsDirty(result)
+      const missing = checkMissingFonts(collectDocFonts(parsed))
+      // one status line per open: the Read Mode explanation outranks the rest
+      if (tier === 'readOnly') {
+        ctx.setStatus(t('appDocLargeReadOnly', { blocks: parsed.blocks.length }))
+      } else if (tier === 'lite') {
+        ctx.setStatus(t('appDocLargeSpellOff', { blocks: parsed.blocks.length }))
+      } else if (missing.length > 0) {
+        const names = missing
+          .slice(0, 3)
+          .map((m) => (m.substitute ? `${m.name} → ${m.substitute}` : m.name))
+          .join(', ')
+        ctx.setStatus(t('appFontsMissing', { names: missing.length > 3 ? `${names}…` : names }))
+      } else {
+        ctx.setStatus(t('appOpenedFile', { name: result.name }))
+      }
     })
-    // this tab's document was replaced: a password parked for the previous
-    // unsaved draft is stale and must not encrypt this document's saves.
-    // Done here, not in the main process's loadDocx — Review > Compare also
-    // opens files without replacing the current document.
-    discardStalePasswordIntents()
-    ctx.setAiPanelKey((k) => k + 1)
-    ctx.setDocCss(docStyleCss(parsed))
-    ctx.setSection(readSectionSettings(parsed))
-    ctx.setSections(readSections(parsed))
-    ctx.setSectionDirty(false)
-    ctx.setPageColor(readPageColor(parsed))
-    ctx.setPageColorDirty(false)
-    ctx.setHeader(
-      parsed.headerText || parsed.headerHasPageNumber || parsed.headerParas?.length
-        ? {
-            text: parsed.headerText ?? '',
-            pageNumber: parsed.headerHasPageNumber,
-            paras: parsed.headerParas ?? undefined,
-          }
-        : null,
-    )
-    ctx.setHeaderDirty(false)
-    ctx.setFooter(
-      parsed.footerText || parsed.footerHasPageNumber || parsed.footerParas?.length
-        ? {
-            text: parsed.footerText ?? '',
-            pageNumber: parsed.footerHasPageNumber,
-            paras: parsed.footerParas ?? undefined,
-          }
-        : null,
-    )
-    ctx.setFooterDirty(false)
-    ctx.setHfVariants(hfVariantsFromParsed(parsed))
-    ctx.setHfVariantsDirty([])
-    resetCrossDocEditState(ctx)
-    ctx.setTitlePg(parsed.titlePg ?? false)
-    ctx.setTitlePgDirty(false)
-    ctx.setEvenOddHf(parsed.evenAndOddHeaders ?? false)
-    ctx.setEvenOddHfDirty(false)
-    ctx.setMirrorMargins(parsed.mirrorMargins ?? false)
-    ctx.setMirrorMarginsDirty(false)
-    ctx.setShowComments(true)
-    ctx.setCommentPanelOpen(hasUnanchoredComments(parsed.comments, parsed.blocks))
-    ctx.setCommentPopup(null)
-    ctx.setReadMode(tier === 'readOnly')
-    ctx.setLargeDocSpellOff(tier !== 'normal')
-    ctx.setComments(parsed.comments)
-    ctx.setCommentsDirty(false)
-    ctx.setWatermark(parsed.watermarkText ?? null)
-    ctx.setWatermarkDirty(false)
-    ctx.setWatermarkStyle(null)
-    ctx.setWatermarkPicture(null)
-    ctx.setInkAnnotations(annotationsFromParsed(parsed.inks))
-    ctx.setInksDirty(false)
-    ctx.setInkTool('select')
-    ctx.setFootnotes(parsed.footnotes)
-    ctx.setEndnotes(parsed.endnotes)
-    ctx.setNotesDirty(false)
-    ctx.setSources(parsed.sources)
-    ctx.setSourcesDirty(false)
-    ctx.setZoteroDocumentData(parsed.zoteroDocumentData)
-    ctx.setZoteroDocumentDataDirty(false)
-    ctx.setThemeFonts(parsed.themeFonts ?? null)
-    ctx.setThemeFontsDirty(false)
-    ctx.setThemeColors(parsed.themeColors ?? null)
-    ctx.setThemeColorsDirty(false)
-    ctx.setCommentComposing(false)
-    ctx.setTrackChanges(parsed.trackRevisions ?? false)
-    ctx.setTrackRevisionsDirty(false)
-    ctx.setProtection(parsed.protection)
-    ctx.setProtectionDirty(false)
-    ctx.setWriteProtection(parsed.writeProtection)
-    ctx.setWriteProtectionDirty(false)
-    ctx.setRemovePersonalInfo(parsed.removePersonalInfo)
-    ctx.setRemovePersonalInfoDirty(false)
-    ctx.onWriteProtectionLoaded(parsed.writeProtection)
-    ctx.setCompareResult(null)
-    // Recovery content still only exists in the autosave copy. Keep it dirty
-    // until an explicit/automatic save lands it on the original path.
-    ctx.dirtyRef.current = openedFileStartsDirty(result)
-    const missing = checkMissingFonts(collectDocFonts(parsed))
-    // one status line per open: the Read Mode explanation outranks the rest
-    if (tier === 'readOnly') {
-      ctx.setStatus(t('appDocLargeReadOnly', { blocks: parsed.blocks.length }))
-    } else if (tier === 'lite') {
-      ctx.setStatus(t('appDocLargeSpellOff', { blocks: parsed.blocks.length }))
-    } else if (missing.length > 0) {
-      const names = missing
-        .slice(0, 3)
-        .map((m) => (m.substitute ? `${m.name} → ${m.substitute}` : m.name))
-        .join(', ')
-      ctx.setStatus(t('appFontsMissing', { names: missing.length > 3 ? `${names}…` : names }))
-    } else {
-      ctx.setStatus(t('appOpenedFile', { name: result.name }))
-    }
     void getDocsHost().getRecentFiles().then(ctx.setRecent)
     return 'ok'
   } catch (err) {
@@ -726,85 +740,95 @@ export async function newFile(ctx: FileActionContext): Promise<boolean | undefin
     await prefetchFaces(collectDocFonts(parsed))
     await loadBundledStandIns(collectDocFonts(parsed))
     if (!currentNew()) return
-    ctx.editor.storage.listNumbering.styles = parsed.styles
-    ctx.editor.storage.listNumbering.docDefaults = parsed.docDefaults
-    ctx.editor.storage.listNumbering.defs = parsed.numbering
-    applyDocLayoutSettings(ctx.editor, parsed)
     // a tail still streaming for the previous document must never land in this one
     cancelPhasedContent()
     ctx.beforeDocumentReplace?.()
     if (!currentNew()) return
-    ctx.editor.commands.setContent(
-      blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)) as never,
-    )
-    resetEditorHistory(ctx.editor)
-    focusDocumentStart(ctx.editor)
-    noteDocumentSwapped()
-    ctx.setDoc({
-      parsed,
-      filePath: null,
-      fileName: hosted?.name ?? t('appUntitledDocx'),
-      hash: '',
-      isBlank: true,
-      hosted,
+    commitDocumentState(ctx, () => {
+      ctx.editor!.storage.listNumbering.styles = parsed.styles
+      ctx.editor!.storage.listNumbering.docDefaults = parsed.docDefaults
+      ctx.editor!.storage.listNumbering.defs = parsed.numbering
+      applyDocLayoutSettings(ctx.editor!, parsed)
+      ctx.editor!.commands.setContent(
+        blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)) as never,
+      )
+      resetEditorHistory(ctx.editor!)
+      focusDocumentStart(ctx.editor!)
+      noteDocumentSwapped()
+      ctx.setDoc({
+        parsed,
+        filePath: null,
+        fileName: hosted?.name ?? t('appUntitledDocx'),
+        hash: '',
+        isBlank: true,
+        hosted,
+      })
+      // a very large document opened in Read Mode must not leave it on for the new one
+      ctx.setReadMode(false)
+      ctx.setLargeDocSpellOff(false)
+      ctx.setDocLoading(false)
+      // a fresh blank draft starts unencrypted: drop any pending password left by
+      // the previous draft (its DocState, including the encrypted flag, is gone)
+      discardStalePasswordIntents()
+      ctx.setAiPanelKey((k) => k + 1)
+      ctx.setDocCss(docStyleCss(parsed))
+      ctx.setSection(readSectionSettings(parsed))
+      ctx.setSections(readSections(parsed))
+      ctx.setSectionDirty(false)
+      ctx.setPageColor(readPageColor(parsed))
+      ctx.setPageColorDirty(false)
+      ctx.setHeader(null)
+      ctx.setHeaderDirty(false)
+      ctx.setFooter(null)
+      ctx.setFooterDirty(false)
+      ctx.setHfVariants(hfVariantsFromParsed(parsed))
+      ctx.setHfVariantsDirty([])
+      resetCrossDocEditState(ctx)
+      ctx.setTitlePg(parsed.titlePg ?? false)
+      ctx.setTitlePgDirty(false)
+      ctx.setEvenOddHf(parsed.evenAndOddHeaders ?? false)
+      ctx.setEvenOddHfDirty(false)
+      ctx.setMirrorMargins(parsed.mirrorMargins ?? false)
+      ctx.setMirrorMarginsDirty(false)
+      ctx.setShowComments(true)
+      ctx.setCommentPanelOpen(false)
+      ctx.setCommentPopup(null)
+      ctx.setComments([])
+      ctx.setCommentsDirty(false)
+      ctx.setWatermark(null)
+      ctx.setWatermarkDirty(false)
+      ctx.setWatermarkStyle(null)
+      ctx.setWatermarkPicture(null)
+      ctx.setInkAnnotations([])
+      ctx.setInksDirty(false)
+      ctx.setInkTool('select')
+      ctx.setFootnotes(parsed.footnotes)
+      ctx.setEndnotes(parsed.endnotes)
+      ctx.setNotesDirty(false)
+      ctx.setSources([])
+      ctx.setSourcesDirty(false)
+      ctx.setZoteroDocumentData(parsed.zoteroDocumentData)
+      ctx.setZoteroDocumentDataDirty(false)
+      ctx.setThemeFonts(parsed.themeFonts ?? null)
+      ctx.setThemeFontsDirty(false)
+      ctx.setThemeColors(parsed.themeColors ?? null)
+      ctx.setThemeColorsDirty(false)
+      ctx.setCommentComposing(false)
+      ctx.setTrackChanges(false)
+      ctx.setTrackRevisionsDirty(false)
+      ctx.setProtection(null)
+      ctx.setProtectionDirty(false)
+      ctx.setWriteProtection(null)
+      ctx.setWriteProtectionDirty(false)
+      ctx.setRemovePersonalInfo(false)
+      ctx.setRemovePersonalInfoDirty(false)
+      ctx.onWriteProtectionLoaded(null)
+      ctx.setCompareResult(null)
+      ctx.dirtyRef.current = false
+      // same rule as the first render, so the "open in new documents" setting holds for Cmd+N too
+      ctx.setShowAi(aiPanelInitiallyOpen('aidocs.showAi'))
+      ctx.setStatus(t('appNewDocCreated'))
     })
-    // a very large document opened in Read Mode must not leave it on for the new one
-    ctx.setReadMode(false)
-    ctx.setLargeDocSpellOff(false)
-    // a fresh blank draft starts unencrypted: drop any pending password left by
-    // the previous draft (its DocState, including the encrypted flag, is gone)
-    discardStalePasswordIntents()
-    ctx.setAiPanelKey((k) => k + 1)
-    ctx.setDocCss(docStyleCss(parsed))
-    ctx.setSection(readSectionSettings(parsed))
-    ctx.setSections(readSections(parsed))
-    ctx.setSectionDirty(false)
-    ctx.setPageColor(readPageColor(parsed))
-    ctx.setPageColorDirty(false)
-    ctx.setHeader(null)
-    ctx.setHeaderDirty(false)
-    ctx.setFooter(null)
-    ctx.setFooterDirty(false)
-    ctx.setHfVariants(hfVariantsFromParsed(parsed))
-    ctx.setHfVariantsDirty([])
-    resetCrossDocEditState(ctx)
-    ctx.setShowComments(true)
-    ctx.setCommentPanelOpen(false)
-    ctx.setCommentPopup(null)
-    ctx.setComments([])
-    ctx.setCommentsDirty(false)
-    ctx.setWatermark(null)
-    ctx.setWatermarkDirty(false)
-    ctx.setWatermarkPicture(null)
-    ctx.setInkAnnotations([])
-    ctx.setInksDirty(false)
-    ctx.setInkTool('select')
-    ctx.setFootnotes(parsed.footnotes)
-    ctx.setEndnotes(parsed.endnotes)
-    ctx.setNotesDirty(false)
-    ctx.setSources([])
-    ctx.setSourcesDirty(false)
-    ctx.setZoteroDocumentData(parsed.zoteroDocumentData)
-    ctx.setZoteroDocumentDataDirty(false)
-    ctx.setThemeFonts(parsed.themeFonts ?? null)
-    ctx.setThemeFontsDirty(false)
-    ctx.setThemeColors(parsed.themeColors ?? null)
-    ctx.setThemeColorsDirty(false)
-    ctx.setCommentComposing(false)
-    ctx.setTrackChanges(false)
-    ctx.setTrackRevisionsDirty(false)
-    ctx.setProtection(null)
-    ctx.setProtectionDirty(false)
-    ctx.setWriteProtection(null)
-    ctx.setWriteProtectionDirty(false)
-    ctx.setRemovePersonalInfo(false)
-    ctx.setRemovePersonalInfoDirty(false)
-    ctx.onWriteProtectionLoaded(null)
-    ctx.setCompareResult(null)
-    ctx.dirtyRef.current = false
-    // same rule as the first render, so the "open in new documents" setting holds for Cmd+N too
-    ctx.setShowAi(aiPanelInitiallyOpen('aidocs.showAi'))
-    ctx.setStatus(t('appNewDocCreated'))
     return true
   } catch (err) {
     if (generation !== openGeneration) return
@@ -1243,6 +1267,8 @@ function stripAiChanged(node: PmNode): PmNode {
  * silently dropping the content.
  */
 export function aiDocContentNodes(html: string): PmNode[] {
+  const readOnly = readOnlyHtmlError(html)
+  if (readOnly) throw new Error(readOnly)
   const numIds = { bullet: BLANK_BULLET_NUM_ID, ordered: BLANK_ORDERED_NUM_ID }
   try {
     const nodes = parseHtmlFragment(html, numIds)

@@ -9,7 +9,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import JSZip from 'jszip'
 import { PDFDocument } from 'pdf-lib'
-import { buildBlankDocx } from '../packages/docx-engine/src'
+import { buildBlankDocx, inlinePictureDrawingXml } from '../packages/docx-engine/src'
+import { buildDocx, TINY_PNG_BASE64 } from '../packages/docx-engine/tests/helpers/build-docx'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { DocsEditorHandle } from '../apps/docs/src/renderer/embedded'
@@ -139,6 +140,20 @@ test('the packaged Qt host manually edits and shares the same live Word runtime 
       .toBe(true)
     // Qt owns its existing profile and does not implement Chromium context management.
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { noDefaults: true })
+    const qtEngine = {
+      executable,
+      packageRoot,
+      debugger: await (await fetch(`http://127.0.0.1:${port}/json/version`)).json(),
+      root,
+    }
+    await writeFile(
+      test.info().outputPath('qt-host-engine.json'),
+      JSON.stringify(qtEngine, null, 2),
+    )
+    await test.info().attach('Qt host engine', {
+      body: JSON.stringify(qtEngine, null, 2),
+      contentType: 'application/json',
+    })
     const context = browser.contexts()[0]
     await expect
       .poll(() =>
@@ -150,6 +165,13 @@ test('the packaged Qt host manually edits and shares the same live Word runtime 
       diagnostic += `\nRenderer error: ${error.message}`
     })
     const body = page.locator('.ProseMirror').first()
+    const requestGrant = async () => {
+      grant = undefined
+      await page!.locator('.ai-ask-trigger').click()
+      await page!.locator('.ai-ask-pop-input').fill('Review the selected text.')
+      await page!.locator('.ai-ask-confirm').click()
+      await expect.poll(() => !!grant).toBe(true)
+    }
     await expect(body).toHaveText('Qt source text', { timeout: 45_000 })
     const ribbonTabs = page.locator('.ribbon-tabs')
     await expect(ribbonTabs).toHaveCSS('padding-left', '10px')
@@ -230,8 +252,7 @@ test('the packaged Qt host manually edits and shares the same live Word runtime 
     await expect(body).toHaveText('Manual Qt source text')
     await page.keyboard.press('Control+Home')
     for (let i = 0; i < 6; i++) await page.keyboard.press('Shift+ArrowRight')
-    await page.locator('.ai-ask-trigger').click()
-    await expect.poll(() => !!grant).toBe(true)
+    await requestGrant()
     mcp = new Client({ name: 'qt-acceptance', version: '1' }, { capabilities: {} })
     await mcp.connect(
       new StdioClientTransport({
@@ -435,9 +456,7 @@ test('the packaged Qt host manually edits and shares the same live Word runtime 
       await page.keyboard.press('Control+Home')
       for (let index = 0; index < 3; index++) await page.keyboard.press('Shift+ArrowRight')
       await expect.poll(() => page!.evaluate(() => window.getSelection()?.toString())).toBe('MCP')
-      grant = undefined
-      await page.locator('.ai-ask-trigger').click()
-      await expect.poll(() => !!grant).toBe(true)
+      await requestGrant()
       const bridge = grant!
       const cwd = join(root, harness.toLowerCase())
       await mkdir(cwd)
@@ -857,9 +876,7 @@ test('the packaged Qt host manually edits and shares the same live Word runtime 
     await page.keyboard.insertText('Disposable Qt document')
     await page.keyboard.press('Control+Home')
     for (let i = 0; i < 5; i++) await page.keyboard.press('Shift+ArrowRight')
-    grant = undefined
-    await page.locator('.ai-ask-trigger').click()
-    await expect.poll(() => !!grant).toBe(true)
+    await requestGrant()
     await mcp.close()
     mcp = new Client({ name: 'qt-disposal-acceptance', version: '1' }, { capabilities: {} })
     await mcp.connect(
@@ -878,6 +895,114 @@ test('the packaged Qt host manually edits and shares the same live Word runtime 
       }),
     )
     await tool('save_document', { path: join(documents, 'disposed.docx') })
+    const templatePath = join(documents, 'template.docx')
+    await writeFile(
+      templatePath,
+      await buildDocx({
+        withImage: true,
+        bodyXml:
+          '<w:p><w:r><w:t>Historical description</w:t></w:r></w:p><w:p/><w:p/>' +
+          '<w:p><w:r><w:t>Before protected structures</w:t></w:r></w:p>' +
+          '<w:p><w:pPr><w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr></w:p>' +
+          '<w:p><w:fldSimple w:instr="DATE"><w:r><w:t>2020-01-01</w:t></w:r></w:fldSimple></w:p>' +
+          `<w:p><w:r>${inlinePictureDrawingXml({ rId: 'rId10', docPrId: 1, widthPx: 100, heightPx: 80 })}</w:r></w:p>` +
+          '<w:p><w:r><w:t>Final paragraph</w:t></w:r></w:p>',
+      }),
+    )
+    await page.keyboard.press('Control+o')
+    fileDialogOpen = true
+    await promisify(execFile)(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-STA',
+        '-File',
+        resolve(__dirname, 'native-file-dialog.ps1'),
+        '-TargetProcessId',
+        String(child.pid),
+        '-TargetFilePath',
+        templatePath,
+      ],
+      { timeout: 20_000 },
+    )
+    fileDialogOpen = false
+    await expect(body).toContainText('Historical description')
+    await body.click()
+    await page.keyboard.press('Control+Home')
+    for (let i = 0; i < 10; i++) await page.keyboard.press('Shift+ArrowRight')
+    await requestGrant()
+    await mcp.close()
+    mcp = new Client({ name: 'qt-template-contract', version: '1' }, { capabilities: {} })
+    await mcp.connect(
+      new StdioClientTransport({
+        command: process.execPath,
+        args: [join(packageRoot, 'services/mcp-stdio.cjs')],
+        env: {
+          ...Object.fromEntries(
+            Object.entries(process.env).filter(
+              (entry): entry is [string, string] => entry[1] !== undefined,
+            ),
+          ),
+          FORAOFFICE_DOCS_ENDPOINT: grant!.url,
+          FORAOFFICE_DOCS_TOKEN: grant!.token,
+        },
+      }),
+    )
+    const text = (result: Awaited<ReturnType<Client['callTool']>>) => {
+      const structured = result.structuredContent
+      if (
+        !structured ||
+        typeof structured !== 'object' ||
+        !('output' in structured) ||
+        typeof structured.output !== 'string'
+      )
+        throw new Error('Expected MCP structuredContent.output to be a string')
+      return structured.output
+    }
+    const empty = text(await tool('read_blocks', { startBlockIndex: 0, endBlockIndex: 3 }))
+    expect(empty.match(/<p><\/p>/g)).toHaveLength(2)
+    await tool('replace_blocks', { startBlockIndex: 0, endBlockIndex: 3, html: empty })
+    expect(
+      text(await tool('read_blocks', { startBlockIndex: 0, endBlockIndex: 3 })).match(/<p><\/p>/g),
+    ).toHaveLength(2)
+    const mixed = text(await tool('read_blocks', { startBlockIndex: 0, endBlockIndex: 7 }))
+    expect(mixed).toContain('data-doc-readonly="field"')
+    expect(mixed.match(/data-doc-readonly=/g)).toHaveLength(3)
+    const refused = await mcp.callTool({
+      name: 'replace_blocks',
+      arguments: {
+        startBlockIndex: 0,
+        endBlockIndex: 7,
+        html: mixed.replace('Historical description', '{{description}}'),
+      },
+    })
+    expect(refused.isError).toBe(true)
+    expect(text(refused)).toMatch(/read-only/i)
+    expect(text(await tool('read_blocks', { startBlockIndex: 0, endBlockIndex: 7 }))).toBe(mixed)
+    await tool('apply_ops', {
+      ops: [
+        {
+          op: 'findReplace',
+          find: 'Historical description',
+          replace: '{{description}}',
+          target: { blockIndexes: [0] },
+        },
+      ],
+    })
+    const templateSaved = join(documents, 'template-saved.docx')
+    expect((await tool('save_document', { path: templateSaved })).structuredContent).toMatchObject({
+      committed: true,
+      pending: false,
+    })
+    const savedTemplate = await JSZip.loadAsync(await readFile(templateSaved))
+    const templateXml = await savedTemplate.file('word/document.xml')!.async('string')
+    expect(templateXml).toContain('{{description}}')
+    expect(templateXml.match(/<w:sectPr[\s>]/g)).toHaveLength(2)
+    expect(templateXml.match(/<w:fldSimple[\s>]/g)).toHaveLength(1)
+    expect(templateXml).toContain('DATE')
+    expect(templateXml.match(/<w:drawing[\s>]/g)).toHaveLength(1)
+    expect(await savedTemplate.file('word/media/image1.png')!.async('base64')).toBe(TINY_PNG_BASE64)
     await page.screenshot({ path: join(root, 'qt-editor.png') })
     await page.evaluate(() => window.docsEditor!.dispose())
     const disposedRead = await mcp.callTool({ name: 'read_document', arguments: {} }, undefined, {

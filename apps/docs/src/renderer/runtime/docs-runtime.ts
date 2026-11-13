@@ -515,7 +515,11 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
               : !blocksWereCurrent || !stateWasCurrent)
           )
             return failure(
-              'The document changed since this caller read it; read fresh context',
+              reviewsRevisions
+                ? 'Document revisions or document-side state changed since this caller read them; use read_revisions before accepting or rejecting changes, or read_document or get_document_context for fresh full context.'
+                : !stateWasCurrent
+                  ? 'Document-side state changed since this caller read it; use read_document or get_document_context for fresh full context. read_blocks does not refresh document-side state.'
+                  : 'The document body changed since this caller read it; use read_blocks, read_document or get_document_context before retrying.',
               'stale_target',
             )
           const isDraftTool =

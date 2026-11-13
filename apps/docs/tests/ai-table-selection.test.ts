@@ -383,6 +383,8 @@ describe('AI table cell selection through the SDK runtime', () => {
       text(' '),
       text(TARGET),
     ])
-    expect(serializeRangeToHtml(editor, 0, 0)).toContain(`<td>漢字 E=mc2 2 ${TARGET}</td>`)
+    expect(serializeRangeToHtml(editor, 0, 0)).toContain(
+      `<td data-doc-readonly="formula">漢字 E=mc2 2 ${TARGET}</td>`,
+    )
   })
 })

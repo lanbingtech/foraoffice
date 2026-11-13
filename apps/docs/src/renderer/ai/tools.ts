@@ -60,6 +60,7 @@ import {
   liveInlineRanges,
   liveTextBetween,
   parseHtmlFragment,
+  readOnlyHtmlError,
   resolveImageRefs,
   countInlineImages,
   parseInlineFragment,
@@ -199,7 +200,63 @@ function toolEchoError(html: string): string | null {
 function contextMarkerError(html: string): string | null {
   return /<\/?sel\s*>/i.test(html)
     ? 'html contains <sel>: that marker only delimits the selection in the context and is not document content; retry without it'
-    : null
+    : readOnlyHtmlError(html)
+}
+
+/** Old read responses used plain paragraphs; refuse their echo only at protected targets. */
+function legacyProtectedEchoError(
+  editor: Editor,
+  start: number,
+  end: number,
+  html: string,
+): string | null {
+  let protectedTarget = false
+  for (let i = start; i <= end; i++) {
+    const node = editor.state.doc.child(i)
+    if (node.type.name === 'docProtected' && !isTrackedDeleted(node)) protectedTarget = true
+  }
+  if (!protectedTarget) return null
+  const parsed = new DOMParser().parseFromString(html, 'text/html')
+  const legacy = /^\[Protected (?:content|formula):[\s\S]*, kept as is\]$/
+  if (
+    [parsed.body, ...parsed.body.querySelectorAll('p,div')].some((node) =>
+      legacy.test(node.textContent?.trim() ?? ''),
+    )
+  )
+    return 'HTML echoes an old read-only protected-content description, not an object reference. No changes were made. Read the current blocks and edit surrounding text in place, or use explicit structure operations for intentional deletion.'
+  return null
+}
+
+function replacementStructureNote(
+  editor: Editor,
+  start: number,
+  end: number,
+  tracked: boolean,
+): string {
+  const labels: string[] = []
+  let fields = false
+  for (let i = start; i <= end; i++) {
+    const node = editor.state.doc.child(i)
+    if (isTrackedDeleted(node)) continue
+    if (node.type.name === 'docProtected')
+      labels.push(String(node.attrs.label || node.attrs.blockType || 'content'))
+    node.descendants((child) => {
+      if (
+        !child.marks.some((mark) => mark.type.name === 'del') &&
+        child.marks.some((mark) => mark.type.name === 'instrField' || mark.type.name === 'refField')
+      )
+        fields = true
+    })
+  }
+  const objects = labels.length
+    ? ` ${labels.length} protected block(s) (${[...new Set(labels)].join(', ')}) ${tracked ? 'were marked for deletion' : 'were replaced'}; their read-only descriptions do not preserve objects.`
+    : ''
+  return (
+    objects +
+    (fields
+      ? ' The range contained Word fields; visible HTML text does not encode their field instructions.'
+      : '')
+  )
 }
 
 /** the range selection tools act on: the frozen scope when valid, else the live selection; null for a caret */
@@ -381,7 +438,7 @@ async function executeAsyncTool(
       const content = String(call.input.content ?? '')
       if (!content.trim()) return fail(t('aiSumCreateDocument'), 'content must not be empty')
       if (type !== 'md') {
-        const echo = toolEchoError(content)
+        const echo = toolEchoError(content) ?? contextMarkerError(content)
         if (echo) return fail(t('aiSumCreateDocument'), echo)
       }
       if (type === 'docx' || type === 'pdf') {
@@ -793,7 +850,10 @@ function executeSyncTool(
       const range = validRange(editor, call.input.startBlockIndex, call.input.endBlockIndex)
       if (!range) return fail(t('aiSumReplaceContent'), rangeError(editor))
       const html = String(call.input.html ?? '')
-      const echo = toolEchoError(html) ?? contextMarkerError(html)
+      const echo =
+        toolEchoError(html) ??
+        contextMarkerError(html) ??
+        legacyProtectedEchoError(editor, range.start, range.end, html)
       if (echo) return fail(t('aiSumReplaceContent'), echo)
       let nodes: ReturnType<typeof parseHtmlFragment>
       try {
@@ -812,13 +872,14 @@ function executeSyncTool(
           .map((k) => `${k.block}.${k.index}`),
       ).size
       const lost = had - keptInRange
+      const structureNote = replacementStructureNote(editor, range.start, range.end, !!track)
       replaceBlockRange(editor, range.start, range.end, nodes, track)
       const pictureNote =
         lost > 0
           ? ` ${lost} picture(s) that were in the replaced range are not in the new content and have been deleted${track ? ' (as a tracked change the user can reject)' : ' (the user can undo this)'}; tell the user if that was not intended. To keep pictures, include their <img src="doc:B.I"> tags from read_blocks in the new HTML.`
           : ''
       return {
-        output: `Replaced blocks ${range.start}-${range.end} with ${nodes.length} block(s); the new blocks kept the replaced blocks' formatting.${pictureNote} Block indexes have changed; use get_document_context if needed.`,
+        output: `Replaced blocks ${range.start}-${range.end} with ${nodes.length} block(s). Compatible paragraph/text formatting was inherited; this does not guarantee preservation of section boundaries, fields or other document structures.${structureNote}${pictureNote} Block indexes have changed; use get_document_context if needed.`,
         mutated: true,
         summary: t('aiSumReplacedBlocks', { start: range.start, end: range.end }),
       }

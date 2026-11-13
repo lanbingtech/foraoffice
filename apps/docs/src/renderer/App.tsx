@@ -2294,6 +2294,7 @@ export function App({
     null,
   )
   fileCtxRef.current = {
+    commitDocumentState: (operation) => flushSync(operation),
     editor,
     doc,
     dirtyRef,

@@ -15,6 +15,7 @@ import {
   type AiDocWriter,
 } from '../src/renderer/ai/doc-writer'
 import { DraftLanding } from '../src/renderer/runtime/draft-landing'
+import { DocumentDraft } from '../src/renderer/runtime/document-draft'
 import { createDocsRuntime } from '../src/renderer/runtime/docs-runtime'
 import { createNativeDocsWorkflows } from '../src/renderer/ai/native-workflows'
 import type { AgentToolCall } from '@genoffice/agent-core'
@@ -168,6 +169,51 @@ describe('DraftLanding under user edits', () => {
   })
 })
 
+describe('DocumentDraft read-only metadata', () => {
+  it('rejects an update before changing the accepted sequence, content, or preview', async () => {
+    const editor = await createBlankEditor()
+    const draft = new DocumentDraft(editor, NUM_IDS, { kind: 'whole' })
+    const accepted = '<p>Accepted content</p>'
+    draft.update(1, accepted)
+    await tick()
+    const before = draft.inspect()
+    const preview = editor.state.doc
+
+    expect(() =>
+      draft.update(2, '<p>Replacement prefix</p><p data-doc-readonly="field">Field result</p>'),
+    ).toThrow(/read-only document metadata/i)
+    expect(draft.inspect()).toEqual(before)
+    expect(editor.state.doc.eq(preview)).toBe(true)
+    await tick()
+    expect(editor.state.doc.eq(preview)).toBe(true)
+    expect(() => draft.update(1, accepted)).not.toThrow()
+
+    draft.stop()
+    expect(draft.finish(true)).toEqual({ ok: true, blocks: 1, partial: true })
+    expect(texts(editor)).toEqual(['Accepted content'])
+  })
+
+  it.each([false, true])(
+    'cannot commit the prefix of a rejected first update (partial=%s)',
+    async (partial) => {
+      const editor = await createBlankEditor()
+      const original = editor.state.doc
+      const draft = new DocumentDraft(editor, NUM_IDS, { kind: 'whole' })
+
+      expect(() =>
+        draft.update(
+          1,
+          '<p>Unaccepted prefix</p><span data-doc-readonly="protected">Object</span>',
+        ),
+      ).toThrow(/read-only document metadata/i)
+      expect(draft.inspect()).toMatchObject({ sequence: 0, characters: 0 })
+      draft.stop()
+      expect(draft.finish(partial)).toMatchObject({ ok: false, errorCode: 'invalid_input' })
+      expect(editor.state.doc.eq(original)).toBe(true)
+    },
+  )
+})
+
 describe('write_document tool', () => {
   const writerOf = (html: string, truncated = false): AiDocWriter => ({
     write: async (_spec, onProgress) => {
@@ -237,6 +283,27 @@ describe('write_document tool', () => {
     )
     expect(exec.isError).toBeFalsy()
     expect(texts(editor)).toEqual(['ok'])
+  })
+
+  it('refuses a native partial containing read-only metadata instead of committing its preview', async () => {
+    const editor = await createBlankEditor()
+    const original = editor.state.doc
+    const html = '<p>Prefix</p><p data-doc-readonly="field">Field result</p>'
+    const exec = await executeWrite(
+      editor,
+      { id: 'readonly', name: 'write_document', input: { plan: 'p' } },
+      {
+        write: async (_spec, onProgress) => {
+          onProgress.onProgress('<p>Prefix</p>')
+          await tick()
+          onProgress.onProgress(html)
+          return { ok: true, html, truncated: true }
+        },
+      },
+    )
+    expect(exec).toMatchObject({ isError: true, committed: false })
+    expect(exec.output).toMatch(/read-only document metadata/i)
+    expect(editor.state.doc.eq(original)).toBe(true)
   })
 
   it('keeps text the user typed into a blank document while the draft streamed', async () => {

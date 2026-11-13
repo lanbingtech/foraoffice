@@ -33,14 +33,15 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
     {
       name: 'get_document_context',
       description:
-        'Get the latest state of the current document: block list (index|type|content preview), full-text stats (word/character counts) and the current selection. Block indexes change after modifications; call this when you need up-to-date indexes.',
+        'Get the latest state of the current document: block list (index|type|content preview), full-text stats (word/character counts) and the current selection. Refreshes the full caller baseline, including document-side state. Block indexes change after modifications; call this when you need up-to-date indexes or a stale-target error requires full context.',
       inputSchema: { type: 'object', properties: {}, required: [] },
     },
     {
       name: 'read_blocks',
       description:
         'Read the full content of a block range (restricted HTML). Previews in the block list are truncated; you must read the full original text with this tool before rewriting. ' +
-        'Long ranges are paged: a truncated result says which offset to continue from; concatenate the slices in order to get the full HTML.',
+        'Long ranges are paged: a truncated result says which offset to continue from; concatenate the slices in order to get the full HTML. ' +
+        'Read-only data-doc-readonly elements describe protected objects or field results; they are not writable HTML or object references. This read refreshes the body baseline only, not document-side state; use read_document or get_document_context when full context is required.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -82,7 +83,7 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
     {
       name: 'replace_blocks',
       description:
-        "Replace a block range with new content (restricted HTML). For rewriting/translating/condensing/expanding existing content; the new block count may differ from the old. New blocks inherit the replaced blocks' paragraph and text formatting (font, size, color, indent, spacing, alignment) automatically, and a rewritten <table> keeps the old table's column widths, borders, shading and cell formatting (unchanged cells keep their content); never try to restore formatting afterwards.",
+        'Replace a block range with new content (restricted HTML). For rewriting/translating/condensing/expanding existing content; the new block count may differ from the old. Compatible paragraph/text formatting (font, size, color, indent, spacing, alignment) is inherited by block role; this is not a lossless DOCX round trip and does not guarantee section boundaries, fields or protected objects. A rewritten <table> keeps column widths, borders, shading and cell formatting (unchanged cells keep their content). Read-only data-doc-readonly elements are refused before editing; exclude those ranges or edit surrounding text in place. Intentional replacement or explicit deleteBlocks may remove structures. Preserve inline pictures with the exact doc:B.I image references.',
       inputSchema: {
         type: 'object',
         properties: {

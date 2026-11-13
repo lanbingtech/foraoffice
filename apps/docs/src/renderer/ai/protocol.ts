@@ -110,11 +110,13 @@ export const OPS_GUIDE = [
 export const HTML_RULES = [
   'The html tool input is a restricted HTML fragment. Rules:',
   '- Only these tags are allowed: h1 h2 h3 h4 h5 h6 p ul ol li strong em u s a br table thead tbody tr th td pre code blockquote',
+  '- An explicit <p></p> is an empty paragraph and is preserved. <p><br></p> instead contains a real line break; empty wrapper <div> elements do not create paragraphs.',
   '- Tables: use <th> for the first (header) row; cells contain plain text only (<br> may split lines); nested tables / merged cells are not supported; once inserted the table is protected as a whole, only cell text remains editable',
   '- Use <pre> for code samples (monospace font + shading, line breaks preserved); use <blockquote> for quotations (indent + left bar)',
   '- Use <formula>LaTeX</formula> for math (produces native Word equations): as a top-level block it becomes its own centered paragraph; placed inside <p>/<li>/<h*> text it is an inline formula flowing with the text, e.g. <p>From <formula>E = mc^2</formula> we know…</p>; supports the common subset of \\frac \\sqrt super/subscripts \\sum \\int \\lim matrix environments Greek letters etc., the align environment is not supported; invalid LaTeX fails the whole call — fix and retry',
   '- Do not include <html>/<body>, markdown code fences, or explanatory text',
   "- <sel>…</sel> appears only in the context to mark the user's selection; it is not a tag you may write",
+  '- Elements with data-doc-readonly are read-only context, not replacement content or object references. Copying them into an HTML write is refused without changes. Edit surrounding text in place or exclude those blocks; use explicit structure operations when deletion is intended.',
   '- <img src="doc:B.I"> in read_blocks output is picture I of block B. To keep a picture when you replace its block, copy that exact tag into the new HTML where the picture should sit; a replaced range whose pictures you leave out loses them (the tool result says so). Any other <img> is ignored — new pictures go through insert_picture',
   '- <span style="color:#RRGGBB;font-size:Npt"> appears only in read_blocks output, on runs whose color or size differs from the rest of the block (color:auto / font-size:default = back to the block\'s normal style); it is read-only — writing <span> has no effect, change colors and sizes with the apply_ops formatting commands',
   '- Organize long content into sections with h2/h3 (unless the user only wants a single paragraph)',
@@ -369,9 +371,9 @@ function inlineAtomToHtml(node: PmNode, image?: ImageSrcMapper, refs?: ImageRefs
     return refs ? `<img src="${IMAGE_REF_PREFIX}${refs.block}.${refs.next++}">` : ''
   }
   if (node.type === 'docInlineMath') {
-    // editor-created formulas round-trip as LaTeX; parsed-from-docx ones
-    // degrade to the flat token strip (structure lost if the model rewrites)
-    const source = String(node.attrs?.latex ?? '') || String(node.attrs?.text ?? '')
+    const latex = String(node.attrs?.latex ?? '')
+    const source = latex || String(node.attrs?.text ?? '')
+    if (!image && !latex) return `<span data-doc-readonly="formula">${escapeHtml(source)}</span>`
     return source ? `<formula>${escapeHtml(source)}</formula>` : ''
   }
   if (node.type === 'docRuby') return escapeHtml(String(node.attrs?.base ?? ''))
@@ -433,14 +435,27 @@ function inlineToHtml(
       cuts.push(end)
       for (let i = 0; i < cuts.length - 1; i++) {
         boundary(cuts[i])
-        if (!deleted)
-          html += wrapInlineText(text.slice(cuts[i] - pos, cuts[i + 1] - pos), marks, base)
+        if (!deleted) {
+          const part = wrapInlineText(text.slice(cuts[i] - pos, cuts[i + 1] - pos), marks, base)
+          html +=
+            !image && marks.some((mark) => mark.type === 'instrField' || mark.type === 'refField')
+              ? `<span data-doc-readonly="field">${part}</span>`
+              : part
+        }
       }
       pos = end
       continue
     }
     boundary(pos)
-    if (!deleted) html += inlineAtomToHtml(node, image, refs)
+    if (!deleted) {
+      const part = inlineAtomToHtml(node, image, refs)
+      html +=
+        !image &&
+        node.type !== 'docInlineImage' &&
+        (node.marks ?? []).some((mark) => mark.type === 'instrField' || mark.type === 'refField')
+          ? `<span data-doc-readonly="field">${part}</span>`
+          : part
+    }
     pos += 1
   }
   boundary(pos)
@@ -455,6 +470,16 @@ function inlineToPlainText(content: PmNode[] | undefined): string {
     .filter((n) => !(n.marks ?? []).some((m: PmMark) => m.type === 'del'))
     .map((n) => (n.type === 'hardBreak' ? '\n' : n.type === 'text' ? (n.text ?? '') : ''))
     .join('')
+}
+
+function readOnlyInlineKind(content: PmNode[] | undefined): 'field' | 'formula' | undefined {
+  for (const node of content ?? []) {
+    const marks = node.marks ?? []
+    if (marks.some((mark) => mark.type === 'del' || mark.type === REDACT_MARK)) continue
+    if (marks.some((mark) => mark.type === 'instrField' || mark.type === 'refField')) return 'field'
+    if (node.type === 'docInlineMath' && !node.attrs?.latex) return 'formula'
+  }
+  return undefined
 }
 
 /** <pre> body: escaped plain text, the selected span delimited by <sel>…</sel> like the rich blocks */
@@ -525,6 +550,7 @@ function tableToHtml(
         const cell = node.nodeAt(cellOffset)!
         const contentStart = start + cellOffset + 2
         const paras: string[] = []
+        let readOnly: string | undefined
         if (!hasDeletionRevision(cell))
           cell.forEach((paragraph, offset) => {
             if (!paragraph.isTextblock || hasDeletionRevision(paragraph)) return
@@ -533,6 +559,7 @@ function tableToHtml(
             const to = sel ? Math.min(paragraph.content.size, sel.to - inlineStart) : 0
             const selection = from < to ? { from, to } : undefined
             const json = paragraph.toJSON() as PmNode
+            if (!image) readOnly ??= readOnlyInlineKind(redactNode(json).content)
             paras.push(
               sel || image
                 ? inlineToHtml(json.content, selection, image)
@@ -544,7 +571,7 @@ function tableToHtml(
                   ),
             )
           })
-        return `<${tag}>${paras.join('<br>')}</${tag}>`
+        return `<${tag}${readOnly ? ` data-doc-readonly="${readOnly}"` : ''}>${paras.join('<br>')}</${tag}>`
       })
       .join('')
     return `<tr>${cells}</tr>`
@@ -610,7 +637,10 @@ export function serializeRangeToHtml(
     } else if (node.type === 'docParagraph') {
       flushList()
       if (isCodeParagraph(node)) {
-        parts.push(`<pre>${codeToHtml(node.content, inlineSel(i))}</pre>`)
+        const readOnly = !image && readOnlyInlineKind(node.content)
+        parts.push(
+          `<pre${readOnly ? ` data-doc-readonly="${readOnly}"` : ''}>${codeToHtml(node.content, inlineSel(i))}</pre>`,
+        )
       } else if (isQuoteParagraph(node)) {
         parts.push(
           `<blockquote>${inlineToHtml(node.content, inlineSel(i), image, refs)}</blockquote>`,
@@ -630,7 +660,7 @@ export function serializeRangeToHtml(
         parts.push(`<formula>${escapeHtml(formula.latex)}</formula>`)
       } else if (formula?.tokens?.length) {
         parts.push(
-          `<p>[Protected formula: ${escapeHtml(formula.tokens.join(' '))}, structure is read-only, kept as is]</p>`,
+          `<p data-doc-readonly="formula">[Protected formula: ${escapeHtml(formula.tokens.join(' '))}, read-only representation; exclude from HTML replacement]</p>`,
         )
       } else {
         const label = String(node.attrs?.label ?? node.attrs?.blockType ?? 'content')
@@ -639,7 +669,7 @@ export function serializeRangeToHtml(
           .replace(/\s+/g, ' ')
           .trim()
         parts.push(
-          `<p>[Protected content: ${escapeHtml(label)}${preview ? ` — visible text: "${escapeHtml(clip(preview, 300))}"` : ''}, kept as is]</p>`,
+          `<p data-doc-readonly="protected">[Protected content: ${escapeHtml(label)}${preview ? ` — visible text: "${escapeHtml(clip(preview, 300))}"` : ''}, read-only representation; exclude from HTML replacement]</p>`,
         )
       }
     }
@@ -1313,7 +1343,17 @@ export function countInlineImages(editor: Editor, start: number, end: number): n
   return n
 }
 
+export function readOnlyHtmlError(html: string): string | null {
+  if (!/data-doc-readonly/i.test(html)) return null
+  const parsed = new DOMParser().parseFromString(html, 'text/html')
+  return parsed.querySelector('[data-doc-readonly]')
+    ? 'HTML contains read-only document metadata, not editable content or an object reference. No changes were made. Exclude the protected range or edit its surrounding text in place; use explicit structure operations for intentional deletion.'
+    : null
+}
+
 export function parseHtmlFragment(raw: string, numIds: NumIds): PmNode[] {
+  const readOnly = readOnlyHtmlError(raw)
+  if (readOnly) throw new Error(readOnly)
   let text = raw.trim()
   const fence = /```(?:html)?\s*([\s\S]*?)```/.exec(text)
   if (fence) text = fence[1].trim()
@@ -1368,7 +1408,7 @@ export function parseHtmlFragment(raw: string, numIds: NumIds): PmNode[] {
       pushFormula(el)
     } else if (tag === 'p' || tag === 'div') {
       const inline = parseInline(el, [])
-      if (inline.length > 0) out.push(blockNode('docParagraph', {}, inline))
+      if (tag === 'p' || inline.length > 0) out.push(blockNode('docParagraph', {}, inline))
     } else {
       // unknown block-ish tag: salvage the text
       const t = (el.textContent ?? '').trim()
@@ -1386,6 +1426,8 @@ const BLOCK_TAG = /<\/?(h[1-6]|p|div|ul|ol|li|table|thead|tbody|tr|th|td|pre|blo
  * inside one text block, so a multi-block answer belongs to replace_blocks.
  */
 export function parseInlineFragment(raw: string): PmNode[] {
+  const readOnly = readOnlyHtmlError(raw)
+  if (readOnly) throw new Error(readOnly)
   let text = raw.trim()
   const fence = /```(?:html)?\s*([\s\S]*?)```/.exec(text)
   if (fence) text = fence[1].trim()
