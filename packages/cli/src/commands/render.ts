@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { flagBool, flagString } from '../args'

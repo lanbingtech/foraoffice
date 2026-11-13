@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { getDocsHost, getOptionalDocsHost } from '../host/docs-host'
 import type { DocsAiOperation } from '../../shared/editor-action'
 import { useEffect, useMemo, useRef, useState } from 'react'

@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { Node as PmNode } from '@tiptap/pm/model'
 import { asciiFamilyResolver, runFaceDecls } from '../text-layout/run-faces'
 import {

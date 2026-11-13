@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /**
  * Floating "Ask AI" entry on a text selection, plus the anchored popover that
  * captures one instruction — sent immediately (a normal selection-scoped run)

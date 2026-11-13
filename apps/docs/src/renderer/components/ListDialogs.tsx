@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { useMemo, useState } from 'react'
 import type { ChangeEvent, ReactNode } from 'react'
 import { Dropdown } from '@genoffice/ui/editor'

@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /** app strings, zh: defines the key set every other locale shard must match. */
 export const zh = {
   appExternalAgentFailed: '无法将操作提交给外部 Agent：{error}',

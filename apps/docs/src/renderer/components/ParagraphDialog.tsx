@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { useState } from 'react'
 import type { Editor } from '@tiptap/core'
 import type { StyleInfo } from '@genoffice/docx-engine'

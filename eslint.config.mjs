@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 // Repo-wide lint config (lint only — no formatter, so no whole-repo format diff).
 // Rules are tuned so the current codebase passes cleanly; tighten incrementally.
 import js from '@eslint/js'

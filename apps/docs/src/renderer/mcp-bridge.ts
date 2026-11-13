@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { getOptionalDocsHost } from './host/docs-host'
 import type { McpCommandMessage } from '../shared/ipc'
 import type { FileActionContext } from './file-actions'

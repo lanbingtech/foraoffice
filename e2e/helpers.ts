@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /**
  * Shared launcher for Electron E2E tests.
  *

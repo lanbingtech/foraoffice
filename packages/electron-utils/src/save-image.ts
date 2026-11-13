@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /// "Save Image As…" for any image the renderer displays: data URLs are decoded
 /// in place, everything else (http(s), app asset schemes) goes through
 /// net.fetch so custom protocol handlers keep enforcing their own access rules.

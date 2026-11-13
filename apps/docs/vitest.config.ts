@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 

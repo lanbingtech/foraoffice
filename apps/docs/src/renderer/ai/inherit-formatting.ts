@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /**
  * Formatting inheritance for AI rewrites (replace_blocks).
  *

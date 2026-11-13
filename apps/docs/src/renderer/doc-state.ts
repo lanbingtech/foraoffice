@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /**
  * Shared document-state types and header/footer helpers used by App.tsx and
  * the extracted action modules (file-actions, review-actions, …).

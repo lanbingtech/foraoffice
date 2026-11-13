@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import { VIEW_IMAGE_CHANNEL, type MarkdownImage, type PdfInternalLink } from '../shared/ipc'

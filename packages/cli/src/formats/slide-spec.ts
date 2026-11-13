@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, extname, join, resolve } from 'node:path'
 import {

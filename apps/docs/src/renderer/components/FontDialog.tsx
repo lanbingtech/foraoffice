@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { useEffect, useState } from 'react'
 import type { Editor } from '@tiptap/core'
 import type { Selection, Transaction } from '@tiptap/pm/state'

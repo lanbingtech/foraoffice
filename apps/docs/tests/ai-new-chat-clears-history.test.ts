@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 // "New chat" must clear the restored history transcript, not just the live
 // turn: previously the previous conversation stayed painted on screen with
 // no way to dismiss it (#195).
