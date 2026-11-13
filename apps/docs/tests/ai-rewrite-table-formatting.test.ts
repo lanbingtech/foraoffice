@@ -250,7 +250,7 @@ describe('replace_blocks keeps a rewritten table formatted like the table it rep
     const { editor } = await open(STYLED_TABLE)
     const html = serializeRangeToHtml(editor, 0, 0)
     expect(html).toBe(
-      '<table><tr><th>Metric</th><th>Value</th></tr><tr><td>Revenue</td><td>100</td></tr><tr><td>Total</td><td>100</td></tr></table>',
+      '<table><tr><th data-row="0" data-col="0">Metric</th><th data-row="0" data-col="1">Value</th></tr><tr><td data-row="1" data-col="0">Revenue</td><td data-row="1" data-col="1">100</td></tr><tr><td data-row="2" data-col="0">Total</td><td data-row="2" data-col="1">100</td></tr></table>',
     )
     expect(html).not.toMatch(/D9EAF7|Calibri|Cambria|3000|center|right/)
   })
@@ -330,7 +330,7 @@ describe('replace_blocks keeps a rewritten table formatted like the table it rep
 
   it('a shaded header row that was not bold does not turn bold because the model echoed <th>', async () => {
     const { editor } = await open(FILL_ONLY_HEADER)
-    expect(serializeRangeToHtml(editor, 0, 0)).toContain('<th>Name</th>')
+    expect(serializeRangeToHtml(editor, 0, 0)).toContain('<th data-row="0" data-col="0">Name</th>')
     await replaceBlocks(
       editor,
       0,
@@ -424,7 +424,7 @@ describe('replace_blocks keeps a rewritten table formatted like the table it rep
   it('merged cells survive: the empty cell the model echoes under a vertical merge is not a new cell', async () => {
     const { editor, parsed } = await open(MERGED_TABLE)
     expect(serializeRangeToHtml(editor, 0, 0)).toBe(
-      '<table><tr><td>Group</td><td>First</td></tr><tr><td></td><td>Second</td></tr></table>',
+      '<table><tr><td rowspan="2" data-row="0" data-col="0">Group</td><td data-row="0" data-col="1">First</td></tr><tr><td data-row="1" data-col="1">Second</td></tr></table>',
     )
     await replaceBlocks(
       editor,
@@ -454,7 +454,7 @@ describe('replace_blocks keeps a rewritten table formatted like the table it rep
     const [before] = blocks(editor)
     // the spanning cell is one <th>; the parser pads that row with an empty cell
     expect(serializeRangeToHtml(editor, 0, 0)).toBe(
-      '<table><tr><th>Quarter</th></tr><tr><td>Revenue</td><td>100</td></tr><tr><td>Cost</td><td>60</td></tr></table>',
+      '<table><tr><th colspan="2" data-row="0" data-col="0">Quarter</th></tr><tr><td data-row="1" data-col="0">Revenue</td><td data-row="1" data-col="1">100</td></tr><tr><td data-row="2" data-col="0">Cost</td><td data-row="2" data-col="1">60</td></tr></table>',
     )
     await replaceBlocks(
       editor,
@@ -522,7 +522,7 @@ describe('replace_blocks keeps a rewritten table formatted like the table it rep
     const { editor, parsed } = await open(BOTH_MERGED_TABLE)
     const [before] = blocks(editor)
     expect(serializeRangeToHtml(editor, 0, 0)).toBe(
-      '<table><tr><th>Quarter</th></tr><tr><td>Group</td><td>First</td></tr><tr><td></td><td>Second</td></tr></table>',
+      '<table><tr><th colspan="2" data-row="0" data-col="0">Quarter</th></tr><tr><td rowspan="2" data-row="1" data-col="0">Group</td><td data-row="1" data-col="1">First</td></tr><tr><td data-row="2" data-col="1">Second</td></tr></table>',
     )
     await replaceBlocks(
       editor,
@@ -565,7 +565,7 @@ describe('replace_blocks keeps a rewritten table formatted like the table it rep
 
   it('a bulleted cell stays bulleted when the model rewrites its points', async () => {
     const { editor, parsed } = await open(LIST_CELL_TABLE, true)
-    expect(serializeRangeToHtml(editor, 0, 0)).toContain('<td>First point<br>Second point</td>')
+    expect(serializeRangeToHtml(editor, 0, 0)).toContain('<td data-row="0" data-col="1">First point<br>Second point</td>')
     await replaceBlocks(
       editor,
       0,

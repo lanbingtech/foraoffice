@@ -175,3 +175,46 @@ it('distinguishes unsupported targets from missing image bytes', async () => {
     runtime.dispose()
   }
 })
+
+it('keeps vertical merges through the actual replace_blocks formatting inheritance path', async () => {
+  const editor = create([table()])
+  const runtime = createDocsRuntime({
+    current: () => ({
+      editor,
+      identity: editor,
+      numIds: { bullet: null, ordered: null },
+      autoAcceptUntracked: true,
+    }),
+  })
+  try {
+    const caller = runtime.connect({ id: 'merged-rewrite' })
+    caller.context()
+    const read = await caller.execute({
+      id: 'read',
+      name: 'read_blocks',
+      input: { startBlockIndex: 0, endBlockIndex: 0 },
+    })
+    expect(
+      await caller.execute({
+        id: 'rewrite',
+        name: 'replace_blocks',
+        input: {
+          startBlockIndex: 0,
+          endBlockIndex: 0,
+          html: read.output.replace('merged', 'rewritten'),
+        },
+      }),
+    ).toMatchObject({ committed: true })
+    const after = await caller.execute({
+      id: 'verify',
+      name: 'read_blocks',
+      input: { startBlockIndex: 0, endBlockIndex: 0 },
+    })
+    const dom = new DOMParser().parseFromString(after.output, 'text/html')
+    expect(dom.querySelector('[colspan="2"][rowspan="2"]')?.textContent).toBe('rewritten')
+    expect(dom.querySelectorAll('td,th')).toHaveLength(3)
+    expect(dom.querySelector('[data-row="1"][data-col="2"]')?.textContent).toBe('bottom')
+  } finally {
+    runtime.dispose()
+  }
+})

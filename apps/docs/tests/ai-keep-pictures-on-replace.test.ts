@@ -321,7 +321,7 @@ describe('table formatting inheritance obeys explicit image references', () => {
     const editor = createEditor([table([[originalCell]])])
     const html = serializeRangeToHtml(editor, 0, 0)
     expect(html).toBe(
-      '<table><tr><td>A <img src="doc:0.0"><br>B <img src="doc:0.1"></td></tr></table>',
+      '<table><tr><td data-row="0" data-col="0">A <img src="doc:0.0"><br>B <img src="doc:0.1"></td></tr></table>',
     )
     const result = await replace(editor, 0, 0, html)
     expect(result.output).not.toContain('picture(s)')
@@ -338,8 +338,8 @@ describe('table formatting inheritance obeys explicit image references', () => {
       ]),
     ])
     const html = serializeRangeToHtml(editor, 0, 0)
-    expect(html).toContain('<td><img src="doc:0.0"></td>')
-    expect(html).toContain('<td><img src="doc:0.1"></td>')
+    expect(html).toContain('<td data-row="0" data-col="1"><img src="doc:0.0"></td>')
+    expect(html).toContain('<td data-row="1" data-col="1"><img src="doc:0.1"></td>')
     expect(html.match(/<img /g)).toHaveLength(2)
   })
 
@@ -353,7 +353,7 @@ describe('table formatting inheritance obeys explicit image references', () => {
     const editor = createEditor([original])
     expect(countInlineImages(editor, 0, 0)).toBe(1)
     expect(serializeRangeToHtml(editor, 0, 0)).toBe(
-      '<table><tr><td><img src="doc:0.0"></td></tr></table>',
+      '<table><tr><td data-row="1" data-col="0"><img src="doc:0.0"></td></tr></table>',
     )
     const result = await replace(
       editor,
