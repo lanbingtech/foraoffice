@@ -60,7 +60,7 @@ const PREVIEW_TIGHT_CHARS = 20
  * from the op registry, so the guide cannot drift from the implementation.
  */
 export const OPS_GUIDE = [
-  'apply_ops runs a list of ops as ONE atomic transaction: every op is validated first and any invalid op rejects the whole batch (the error quotes the op\'s usage line). Each op is a flat object { op, target?, ...fields }. Fields are patches: a present field is set, null clears it, an absent field is left untouched — never repeat properties the user did not ask to change. Colors are "#RRGGBB", font sizes are points, lengths are twips (1 pt = 20 twips). Pass dryRun: true to validate and see the plan without changing the document.',
+  'apply_ops runs a list of ops as ONE atomic transaction: every op is validated first and any invalid op rejects the whole batch (the error quotes the op\'s usage line). Each op is a flat object { op, target?, ...fields }. Fields are patches: a present field is set, null clears it, an absent field is left untouched — never repeat properties the user did not ask to change. Colors are "#RRGGBB", font sizes are points, lengths are twips (1 pt = 20 twips). Pass dryRun: true to validate parameter shapes and see the plan without executing; target/content constraints can still fail during execution.',
   '',
   'Target (all conditions are ANDed; provide at least one):',
   '```',
@@ -547,7 +547,11 @@ function tableToHtml(
       .map((entry) => {
         const cellOffset = grid.map[r * grid.width + column]
         column += entry.colSpan ?? 1
-        if (entry.vMerge === 'continue') return `<${tag}></${tag}>`
+        if (entry.vMerge === 'continue')
+          return r > 0 &&
+            grid.map[(r - 1) * grid.width + column - (entry.colSpan ?? 1)] === cellOffset
+            ? ''
+            : `<${tag}></${tag}>`
         const cell = node.nodeAt(cellOffset)!
         const contentStart = start + cellOffset + 2
         const paras: string[] = []
@@ -578,12 +582,18 @@ function tableToHtml(
                     .join(''),
             )
           })
-        return `<${tag}${readOnly ? ` data-doc-readonly="${readOnly}"` : ''}>${paras.join('<br>')}</${tag}>`
+        const colspan = Number(cell.attrs.colspan) || 1
+        const rowspan = Number(cell.attrs.rowspan) || 1
+        const spans = `${colspan > 1 ? ` colspan="${colspan}"` : ''}${rowspan > 1 ? ` rowspan="${rowspan}"` : ''}`
+        return `<${tag}${spans}${readOnly ? ` data-doc-readonly="${readOnly}"` : ''}>${paras.join('<br>')}</${tag}>`
       })
       .join('')
     return `<tr>${cells}</tr>`
   })
-  return `<table>${rows.join('')}</table>`
+  const merged = model.rows.some((row) =>
+    row.some((cell) => (cell.colSpan ?? 1) > 1 || cell.vMerge),
+  )
+  return `<table${merged ? ' data-doc-readonly="merged-table"' : ''}>${rows.join('')}</table>`
 }
 
 /**
@@ -698,6 +708,15 @@ export interface AiHfState {
   titlePg: boolean
   evenOddHf: boolean
   multiSection: boolean
+  sections?: Array<{
+    index: number
+    variants: Array<{
+      kind: 'header' | 'footer'
+      view: 'default' | 'first' | 'even'
+      text: string
+      owner: number
+    }>
+  }>
 }
 
 function hfContextLines(hf: AiHfState): string[] {
@@ -718,8 +737,14 @@ function hfContextLines(hf: AiHfState): string[] {
   }
   if (hf.multiSection) {
     lines.push(
-      '- the document has multiple sections; header/footer edits apply to the first section (later sections inherit unless they define their own)',
+      '- the document has multiple sections; without section, header/footer edits target section 0; a linked strip writes its owner and sections inheriting it. Use section to select another section.',
     )
+  }
+  for (const section of hf.sections ?? []) {
+    for (const strip of section.variants)
+      lines.push(
+        `- section ${section.index} ${strip.kind}/${strip.view} (owner section ${strip.owner}): ${fmt(strip.text)}`,
+      )
   }
   return lines
 }
@@ -1329,7 +1354,7 @@ function parseBlockquote(el: Element): PmNode | null {
 const IMAGE_REF_NODE = '__imageRef'
 
 /** the pictures read_blocks showed for this block, in the same order: no rules, no pending deletions, no withheld pictures */
-function inlineImagesOf(block: ProseMirrorNode): ProseMirrorNode[] {
+export function inlineImagesOf(block: ProseMirrorNode): ProseMirrorNode[] {
   const out: ProseMirrorNode[] = []
   block.descendants((n) => {
     if (hasDeletionRevision(n)) return false

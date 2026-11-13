@@ -67,6 +67,7 @@ import {
   replaceBlockRange,
   replaceInlineRange,
   serializeRangeToHtml,
+  inlineImagesOf,
   type AiHfState,
   type AiTrack,
   type NumIds,
@@ -91,7 +92,12 @@ export const DOCS_EDITOR_TOOLS = docsToolCatalog(opNames())
 export interface AiHeaderFooterAccess {
   read(): AiHfState
   /** returns an error message, or null on success */
-  set(kind: 'header' | 'footer', view: 'default' | 'first' | 'even', text: string): string | null
+  set(
+    kind: 'header' | 'footer',
+    view: 'default' | 'first' | 'even',
+    text: string,
+    section?: number,
+  ): string | null
 }
 
 /**
@@ -358,12 +364,20 @@ function rangeError(editor: Editor): string {
 export function imageBlockSource(
   editor: Editor,
   index: unknown,
+  imageIndex?: unknown,
 ): { src: string; label: string | undefined } | null {
   if (!Number.isInteger(index)) return null
   const i = Number(index)
   const doc = editor.state.doc
   if (i < 0 || i >= doc.childCount) return null
   const node = doc.child(i)
+  if (imageIndex !== undefined) {
+    if (!Number.isInteger(imageIndex) || Number(imageIndex) < 0) return null
+    const image = inlineImagesOf(node)[Number(imageIndex)]
+    if (image)
+      return { src: String(image.attrs.dataUrl ?? ''), label: image.attrs.alt ?? undefined }
+    if (imageIndex !== 0) return null
+  }
   if (node.type.name !== 'docProtected' || node.attrs.blockType !== 'image') return null
   const src = typeof node.attrs.imageDataUrl === 'string' ? node.attrs.imageDataUrl : ''
   if (!src) return null
@@ -1362,10 +1376,18 @@ function executeSyncTool(
       if (text.length > 2000) {
         return fail(summaryOf(), 'text is too long for a header/footer (2000 characters max)')
       }
-      const error = hf.set(kind, view, text)
+      const section = call.input.section
+      if (
+        section !== undefined &&
+        (!Number.isInteger(section) ||
+          Number(section) < 0 ||
+          !hf.read().sections?.some((item) => item.index === section))
+      )
+        return fail(summaryOf(), 'section must name an existing section from document context')
+      const error = hf.set(kind, view, text, section as number | undefined)
       if (error) return fail(summaryOf(), error)
       return {
-        output: `Updated the ${kind}${view !== 'default' ? ` (${view}-page variant)` : ''}.`,
+        output: `Updated the ${kind}${view !== 'default' ? ` (${view}-page variant)` : ''} in section ${section ?? 0} (including sections sharing its owner).`,
         mutated: false, // app state only, saved with the document; not part of the PM doc
         summary: summaryOf(),
       }

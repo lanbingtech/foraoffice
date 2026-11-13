@@ -19,11 +19,12 @@ export async function readDocumentMedia(
   blockIndex: number,
   signal: AbortSignal,
   isCurrent: () => boolean,
+  imageIndex?: number,
 ): Promise<MediaResult> {
-  const image = imageBlockSource(editor, blockIndex)
+  const image = imageBlockSource(editor, blockIndex, imageIndex)
   if (!image)
     return refused(
-      'The block is not an accessible document image; read fresh document context.',
+      'The target has no accessible image. For an inline doc:B.I reference, pass blockIndex B and imageIndex I.',
       'invalid_input',
     )
   if (!isCurrent())

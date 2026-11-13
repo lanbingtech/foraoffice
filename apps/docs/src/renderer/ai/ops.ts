@@ -1180,6 +1180,10 @@ function runSetList(op: Op, env: RunEnv): OpResult {
     }
     // headings keep their role; converting them to list items would drop the level
     if (b.node.type.name === 'docHeading') continue
+    if (b.node.type.name !== 'docParagraph' && b.node.type.name !== 'docListItem')
+      throw new Error(
+        `setList: block ${b.index} is not a paragraph or list item (${b.node.type.name})`,
+      )
     if (b.node.type.name === 'docListItem') {
       if (b.node.attrs.kind === kind) continue
       tr.setNodeMarkup(

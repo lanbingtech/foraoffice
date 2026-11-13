@@ -358,9 +358,7 @@ describe('AI table cell selection through the SDK runtime', () => {
       ],
     })
     const editor = createEditor({ type: 'doc', content: [table] })
-    expect(serializeRangeToHtml(editor, 0, 0)).toContain(
-      `<tr><td></td><td></td><td>${ORIGINAL}</td></tr>`,
-    )
+    expect(serializeRangeToHtml(editor, 0, 0)).toContain(`<tr><td></td><td>${ORIGINAL}</td></tr>`)
     select(editor, 0)
     expect(buildDocContext(editor)).toContain(`<sel>${TARGET}</sel>`)
     const result = await executeTool(

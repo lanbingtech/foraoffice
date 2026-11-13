@@ -5,10 +5,17 @@ export const DOCS_RUNTIME_TOOLS: AgentToolDef[] = [
   {
     name: 'read_document_media',
     description:
-      'Read an authorized image block as image data for the external Harness to analyze. Use current block indexes from document context. Internal asset addresses are not exposed.',
+      'Read an authorized image block as image data for the external Harness to analyze. Use current block indexes; for an inline doc:B.I image from read_blocks, pass blockIndex B and imageIndex I. Internal asset addresses are not exposed.',
     inputSchema: {
       type: 'object',
-      properties: { blockIndex: { type: 'integer', minimum: 0 } },
+      properties: {
+        blockIndex: { type: 'integer', minimum: 0 },
+        imageIndex: {
+          type: 'integer',
+          minimum: 0,
+          description: 'Inline image ordinal I in doc:B.I; omit for standalone image blocks',
+        },
+      },
       required: ['blockIndex'],
     },
   },

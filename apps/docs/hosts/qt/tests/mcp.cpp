@@ -2,6 +2,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QEventLoop>
+#include <QFile>
 #include <QJsonDocument>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -116,6 +117,21 @@ private slots:
         QVERIFY(clientResult.value("tools").toArray().contains("read_document"));
         const auto session = initialize(connection);
         QVERIFY(!session.isEmpty());
+        QFile input(workspace.filePath("original-input.txt"));
+        QVERIFY(input.open(QIODevice::WriteOnly));
+        input.write("ORIGINAL INPUT SENTINEL"); input.close();
+        const auto configured = native([&](Editor::Completion done) {
+            editor->configureResources({input.fileName()}, {}, std::move(done));
+        });
+        QVERIFY2(!configured.contains("error"), qPrintable(QString::fromUtf8(QJsonDocument(configured).toJson())));
+        QCOMPARE(configured.value("result").toObject().value("attachments").toArray().size(), 1);
+        const auto attachment = rpc(connection, "tools/call", {{"name", "read_attachment"},
+            {"arguments", QJsonObject{{"index", 0}}}}, session);
+        QVERIFY(QString::fromUtf8(QJsonDocument(attachment.body).toJson()).contains("ORIGINAL INPUT SENTINEL"));
+        native([&](Editor::Completion done) { editor->configureResources({}, {}, std::move(done)); });
+        const auto revokedAttachment = rpc(connection, "tools/call", {{"name", "read_attachment"},
+            {"arguments", QJsonObject{{"index", 0}}}}, session);
+        QVERIFY(!QString::fromUtf8(QJsonDocument(revokedAttachment.body).toJson()).contains("ORIGINAL INPUT SENTINEL"));
         const auto write = rpc(connection, "tools/call", {{"name", "insert_content"}, {"arguments", QJsonObject{{"html", "<p>Unsaved Agent edit</p>"}}}}, session);
         QVERIFY2(!write.body.value("result").toObject().value("isError").toBool(), qPrintable(QString::fromUtf8(QJsonDocument(write.body).toJson())));
         QVERIFY(sdk(*editor, "snapshot").value("result").toObject().value("text").toString().contains("Unsaved Agent edit"));

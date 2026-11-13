@@ -7367,12 +7367,13 @@ export function App({
   // by which time React state has caught up.
   const aiHfCtx = {
     overlay: new Map<string, HeaderFooter>(),
-    valueOf(kind: 'header' | 'footer', view: HfView): HeaderFooter | null {
-      const pending = this.overlay.get(`${kind}:${view}`)
-      if (pending) return pending
-      return hfValueAt(kind === 'header' ? 0 : lastSectionIdx, kind, view)
+    sections: hfSections,
+    resolve: hfResolveAt,
+    valueOf(kind: 'header' | 'footer', view: HfView, section = 0): HeaderFooter | null {
+      const resolved = this.resolve(section, kind, view)
+      return this.overlay.get(`${resolved.owner}:${kind}:${view}`) ?? resolved.value
     },
-    commit: commitHf,
+    commit: commitHfAt,
     titlePg,
     evenOddHf,
     multiHf,
@@ -7466,8 +7467,8 @@ export function App({
     () => ({
       read: () => {
         const ctx = aiHfCtxRef.current
-        const textOf = (kind: 'header' | 'footer', view: HfView) => {
-          const value = ctx.valueOf(kind, view)
+        const textOf = (kind: 'header' | 'footer', view: HfView, section = 0) => {
+          const value = ctx.valueOf(kind, view, section)
           return value ? hfEditText(value) : ''
         }
         return {
@@ -7480,11 +7481,24 @@ export function App({
           titlePg: ctx.titlePg,
           evenOddHf: ctx.evenOddHf,
           multiSection: ctx.multiHf,
+          sections: ctx.sections.map((_section, index) => ({
+            index,
+            variants: (['header', 'footer'] as const).flatMap((kind) =>
+              (['default', 'first', 'even'] as const).map((view) => ({
+                kind,
+                view,
+                text: textOf(kind, view, index),
+                owner: ctx.resolve(index, kind, view).owner,
+              })),
+            ),
+          })),
         }
       },
-      set: (kind, view, text) => {
+      set: (kind, view, text, section = 0) => {
         const ctx = aiHfCtxRef.current
         if (ctx.locked) return 'the document is read-only; headers/footers cannot be edited'
+        if (view === 'first' && section !== 0)
+          return 'first-page variant enabling is only supported for section 0; use section layout controls for other sections'
         if (view === 'first' && !ctx.titlePg) {
           setTitlePg(true)
           setTitlePgDirty(true)
@@ -7495,9 +7509,11 @@ export function App({
           setEvenOddHfDirty(true)
           ctx.evenOddHf = true
         }
-        const next = applyHfText(ctx.valueOf(kind, view), text)
-        ctx.commit(kind, next, view)
-        ctx.overlay.set(`${kind}:${view}`, next)
+        const next = applyHfText(ctx.valueOf(kind, view, section), text)
+        const owner = ctx.resolve(section, kind, view).owner
+        if (!ctx.commit(section, kind, view, next))
+          return 'the selected section has no writable header/footer part'
+        ctx.overlay.set(`${owner}:${kind}:${view}`, next)
         return null
       },
     }),

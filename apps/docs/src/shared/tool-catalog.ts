@@ -135,7 +135,8 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
           },
           dryRun: {
             type: 'boolean',
-            description: 'validate and return the plan without changing the document',
+            description:
+              'validate parameter shapes and return the plan without executing or changing the document; target/content constraints can still fail during execution',
           },
         },
         required: ['ops'],
@@ -464,11 +465,16 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
       name: 'set_header_footer',
       description:
         'Set the page header or footer text (the current contents are listed in the message context). Plain text; \\n separates lines; the tokens {PAGE} and {NUMPAGES} become live page-number fields; an empty string clears the text. ' +
-        'Per-line alignment/styling of the existing header/footer is preserved; images in it are untouched. view "first"/"even" writes the different-first-page / even-page variant (enabling that setting if needed).',
+        'section is 0-based and defaults to 0; linked strips edit their owner, affecting inheriting sections as shown in context. Per-line alignment/styling of the existing header/footer is preserved; images in it are untouched. view "first"/"even" writes the different-first-page / even-page variant (enabling that setting if needed).',
       inputSchema: {
         type: 'object',
         properties: {
           kind: { type: 'string', enum: ['header', 'footer'] },
+          section: {
+            type: 'integer',
+            minimum: 0,
+            description: 'Target section index from document context; defaults to 0',
+          },
           text: {
             type: 'string',
             description: 'new text; \\n between lines; may contain {PAGE} / {NUMPAGES}; "" clears',

@@ -493,6 +493,7 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
                   bindings.current()?.stateVersion === doc.stateVersion &&
                   seen === expected &&
                   doc.editor.state.doc === expected,
+                call.input.imageIndex as number | undefined,
               ),
               operationSignal,
             )
