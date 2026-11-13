@@ -150,9 +150,17 @@ test('a native host owns an independent Node document backend through JSON-RPC a
       mime: 'image/png',
       base64: image.toString('base64'),
     })
+    // Linux CI installs Carlito for layout tests; Arial is not part of that font stack.
+    const installedFont = process.platform === 'linux' ? 'Carlito' : 'Arial'
     expect(
-      await request('services.call', { method: 'fontMetrics', args: ['Arial'] }),
+      await request('services.call', { method: 'fontMetrics', args: [installedFont] }),
     ).toMatchObject({ unitsPerEm: expect.any(Number), hheaAscender: expect.any(Number) })
+    expect(
+      await request('services.call', {
+        method: 'fontMetrics',
+        args: [`Missing font ${randomUUID()}`],
+      }),
+    ).toBeNull()
     for (const revoke of ['document.releaseAllActions', 'document.releaseAction']) {
       const bindingId = randomUUID()
       const batchIds = [++seq, ++seq]

@@ -3,14 +3,17 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { launchShell, closeAndSaveVideo, screenshotPath } from './helpers'
 
+// Electron screencasting stalls this startup flow on Windows; keep the screenshots.
+const recordVideo = process.platform !== 'win32'
+
 test.describe('first-run onboarding', () => {
   test('fresh install walks all slides and persists the seen flag', async () => {
-    const launched = await launchShell({ videoDir: 'onboarding-walkthrough' })
+    const launched = await launchShell({ videoDir: 'onboarding-walkthrough', recordVideo })
     const { page, userDataDir } = launched
     try {
       const overlay = page.locator('.onb-overlay')
       await expect(overlay).toBeVisible()
-      await expect(page.locator('.onb-slide.active .onb-title')).toHaveText('Welcome to GenOffice')
+      await expect(page.locator('.onb-slide.active .onb-title')).toHaveText('Welcome to ForaOffice')
       await page.screenshot({ path: screenshotPath('onboarding-slide-1') })
 
       await page.locator('.onb-next').click()
@@ -41,6 +44,7 @@ test.describe('first-run onboarding', () => {
     const relaunch = await launchShell({
       userDataDir: launched.userDataDir,
       videoDir: 'onboarding-relaunch',
+      recordVideo,
     })
     try {
       await expect(relaunch.page.locator('.home-hero')).toBeVisible()
@@ -52,7 +56,7 @@ test.describe('first-run onboarding', () => {
   })
 
   test('skip dismisses the onboarding and persists the seen flag', async () => {
-    const launched = await launchShell({ videoDir: 'onboarding-skip' })
+    const launched = await launchShell({ videoDir: 'onboarding-skip', recordVideo })
     const { page, userDataDir } = launched
     try {
       await expect(page.locator('.onb-overlay')).toBeVisible()
