@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Opdrachtregel en agents
+
+> Deze handleiding beschrijft de van GenOffice overgenomen desktopapp in ForaOffice, inclusief ingebouwde agent en instellingen. Hosts die Docs insluiten leveren eigen diensten en agentintegratie; desktopfuncties zijn niet automatisch SDK-mogelijkheden. Zie de [Docs-SDK-handleiding](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Elke installatie bevat een `genoffice`-commando dat dezelfde engines aanstuurt als het venster — dezelfde parsers, dezelfde writer, dezelfde renderer. Een bestand dat de app opslaat en een bestand dat de opdracht schrijft zijn hetzelfde bestand, en een controle die het AI-paneel van de app doorstaat, doorstaat de opdracht ook.
 

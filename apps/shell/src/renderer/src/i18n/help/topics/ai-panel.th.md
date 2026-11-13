@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # แผงผู้ช่วย AI
+
+> คู่มือนี้อธิบายแอปเดสก์ท็อปที่ ForaOffice สืบทอดจาก GenOffice รวมถึงเอเจนต์และการตั้งค่าในตัว โฮสต์ที่ฝัง Docs ต้องจัดเตรียมบริการและการผสานเอเจนต์เอง ฟังก์ชันเดสก์ท็อปไม่ได้เป็นความสามารถของ SDK โดยอัตโนมัติ ดู[คู่มือ Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md)
 
 ทุกตัวแก้ไขเรียกใช้แผง AI ได้: เลือกสิ่งที่ต้องการ สั่งงาน แล้วดูผลลัพธ์ที่ทยอยทีละส่วน
 

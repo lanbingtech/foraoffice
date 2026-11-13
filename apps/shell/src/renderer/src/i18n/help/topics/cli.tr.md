@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Komut satırı ve aracılar
+
+> Bu kılavuz, ForaOffice içindeki GenOffice’den devralınan masaüstü uygulamasını, yerleşik ajanını ve ayarlarını anlatır. Docs gömen ana uygulamalar kendi hizmetlerini ve ajan bütünleştirmelerini sağlar; masaüstü özellikleri otomatik olarak SDK yeteneği değildir. [Docs SDK kılavuzuna](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md) bakın.
 
 Her kurulum, pencerenin kullandığı motorların aynısını süren bir `genoffice` komutuyla gelir — aynı ayrıştırıcılar, aynı yazıcı, aynı işleyici. Uygulamanın kaydettiği dosya ile komutun yazdığı dosya aynı dosyadır ve uygulamanın AI panelinin geçtiği bir denetimden komut da geçer.
 

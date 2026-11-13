@@ -1,6 +1,8 @@
+# Modified for ForaOffice: clarify that the recipe installs upstream binaries.
+# This wrapper does not include ForaOffice source changes or its Docs SDK.
 # Community NixOS packaging (genoffice#1858): wrap the upstream AppImage with
 # appimageTools instead of rebuilding the Electron/Rust source tree under nix.
-# The AppImage is self-contained, so this runs the same bits the README ships.
+# The AppImage is self-contained, so this runs upstream's published application.
 # The desktop entry and icons come from this repo (apps/shell/build/icons, the
 # same files electron-builder packages), not from the AppImage's internals.
 #
@@ -52,14 +54,14 @@ appimageTools.wrapType2 {
     Type=Application
     Icon=genoffice
     StartupWMClass=genoffice
-    Comment=Unified GenOffice shell: one app hosting the docs and sheets modules behind a home/launcher window
+    Comment=Upstream GenOffice desktop suite; does not include ForaOffice SDK changes
     MimeType=application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.ms-excel.sheet.macroEnabled.12;application/vnd.openxmlformats-officedocument.presentationml.presentation;application/vnd.ms-excel;text/csv;text/tab-separated-values;application/pdf;text/markdown;text/html;
     Categories=Office;
     EOF
   '';
 
   meta = with lib; {
-    description = "AI-native office suite: Word, Excel, PowerPoint, PDF and Markdown in one local app";
+    description = "Upstream GenOffice desktop suite, without ForaOffice SDK changes";
     homepage = "https://github.com/genspark-ai/genoffice";
     license = licenses.asl20;
     mainProgram = "genoffice";

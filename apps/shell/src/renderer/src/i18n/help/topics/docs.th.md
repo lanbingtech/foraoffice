@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Docs: การประมวลผลคำ
+
+> คู่มือนี้อธิบายแอปเดสก์ท็อปที่ ForaOffice สืบทอดจาก GenOffice รวมถึงเอเจนต์และการตั้งค่าในตัว โฮสต์ที่ฝัง Docs ต้องจัดเตรียมบริการและการผสานเอเจนต์เอง ฟังก์ชันเดสก์ท็อปไม่ได้เป็นความสามารถของ SDK โดยอัตโนมัติ ดู[คู่มือ Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md)
 
 Docs คือโปรแกรมประมวลผลคำที่ทำงานคล้าย Word: อ่านและเขียนไฟล์ .docx ของจริง พร้อมการแบ่งหน้าแบบสิ่งที่เห็นคือสิ่งที่ได้อย่างแท้จริง
 

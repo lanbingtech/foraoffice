@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # חלונית העוזר AI
+
+> מדריך זה מתאר את יישום שולחן העבודה שהתקבל מ־GenOffice בתוך ForaOffice, כולל הסוכן וההגדרות המובנים. מארחים המשלבים את Docs מספקים שירותים ושילוב סוכן משלהם; תכונות שולחן העבודה אינן אוטומטית יכולות SDK. ראו את [מדריך Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 כל עורך יכול להפעיל את חלונית ה-AI: בחרו משהו, תנו הוראה, צפו בתוצאה הזורמת.
 

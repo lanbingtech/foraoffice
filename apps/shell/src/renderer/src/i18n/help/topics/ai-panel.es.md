@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # El panel de IA
+
+> Este manual describe la aplicación de escritorio heredada de GenOffice en ForaOffice, incluidos su agente y ajustes integrados. Los anfitriones de Docs integrado proporcionan sus propios servicios y agentes; las funciones de escritorio no son automáticamente capacidades del SDK. Consulta la [guía de Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Todos los editores pueden invocar el panel de IA: seleccione algo, dé una instrucción y vea el resultado en streaming.
 

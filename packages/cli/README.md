@@ -1,4 +1,14 @@
+<!-- Modified for ForaOffice: distinguish inherited file automation from the live Docs SDK. -->
+
 # @genoffice/cli
+
+ForaOffice retains the `genoffice` command and `@genoffice/cli` workspace name
+for compatibility with the inherited GenOffice file-processing tools. This
+guide describes that CLI and its desktop integration, not the embedded Docs
+runtime. CLI file operations read files on disk; use the
+[Docs SDK guide](../../apps/docs/sdk/README.md) to operate on a mounted editor's
+unsaved state or captured selection. Desktop settings and built-in agents are
+not prerequisites for the external-agent SDK contract.
 
 `genoffice` is the GenOffice command line. It exposes the suite's document engines
 to scripts and AI agents without opening a window: the packaged app runs the

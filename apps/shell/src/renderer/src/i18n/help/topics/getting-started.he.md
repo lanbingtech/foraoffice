@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # התחלה מהירה: הממשק והבסיס
+
+> מדריך זה מתאר את יישום שולחן העבודה שהתקבל מ־GenOffice בתוך ForaOffice, כולל הסוכן וההגדרות המובנים. מארחים המשלבים את Docs מספקים שירותים ושילוב סוכן משלהם; תכונות שולחן העבודה אינן אוטומטית יכולות SDK. ראו את [מדריך Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 ‏GenOffice היא חבילת משרד שרצה כולה על המחשב שלך: חלון אחד, שורת כרטיסיות אחת, ובתוכה שישה עורכים — Docs (עיבוד תמלילים), Sheets (גיליונות), Slides (מצגות), PDF, Markdown ו-HTML. הקבצים הם .docx / .xlsx / .pptx / .pdf אמיתיים, ניתנים להחלפה מלאה עם Word, Excel ו-PowerPoint. לא נדרשת רשת.
 

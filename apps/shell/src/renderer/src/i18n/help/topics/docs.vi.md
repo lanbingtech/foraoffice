@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Docs: xử lý văn bản
+
+> Tài liệu này mô tả ứng dụng máy tính để bàn kế thừa từ GenOffice trong ForaOffice, gồm tác nhân và cài đặt tích hợp. Ứng dụng chủ nhúng Docs cung cấp dịch vụ và tích hợp tác nhân riêng; tính năng máy tính để bàn không tự động trở thành khả năng của SDK. Xem [hướng dẫn Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Docs là trình xử lý văn bản giống Word: đọc và ghi .docx thật với cách ngắt trang WYSIWYG đúng nghĩa.
 

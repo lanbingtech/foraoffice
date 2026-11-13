@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Docs: edytor tekstu
+
+> Ta instrukcja opisuje odziedziczoną aplikację desktopową GenOffice w ForaOffice, wraz z wbudowanym agentem i ustawieniami. Hosty osadzające Docs zapewniają własne usługi i integrację agenta; funkcje desktopowe nie są automatycznie możliwościami SDK. Zobacz [przewodnik Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Docs to edytor tekstu podobny do Worda: otwiera i zapisuje prawdziwe pliki .docx z wiernym podziałem na strony (WYSIWYG).
 

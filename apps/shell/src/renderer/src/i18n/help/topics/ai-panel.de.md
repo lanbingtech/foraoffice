@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Der KI-Bereich
+
+> Dieses Handbuch beschreibt die von GenOffice übernommene Desktop-Anwendung in ForaOffice mit eingebautem Agenten und Einstellungen. Hosts für eingebettetes Docs stellen eigene Dienste und Agent-Integrationen bereit; Desktop-Funktionen sind nicht automatisch SDK-Funktionen. Siehe [Docs-SDK-Anleitung](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Jeder Editor kann den KI-Bereich aufrufen: Etwas auswählen, eine Anweisung geben und das gestreamte Ergebnis ansehen.
 

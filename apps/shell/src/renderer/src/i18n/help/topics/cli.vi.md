@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Dòng lệnh và tác nhân
+
+> Tài liệu này mô tả ứng dụng máy tính để bàn kế thừa từ GenOffice trong ForaOffice, gồm tác nhân và cài đặt tích hợp. Ứng dụng chủ nhúng Docs cung cấp dịch vụ và tích hợp tác nhân riêng; tính năng máy tính để bàn không tự động trở thành khả năng của SDK. Xem [hướng dẫn Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Mọi bản cài đặt đều kèm lệnh `genoffice` điều khiển đúng những engine mà cửa sổ dùng — cùng bộ phân tích, cùng bộ ghi, cùng bộ kết xuất. Một tệp do ứng dụng lưu và một tệp do lệnh ghi là cùng một tệp, và một kiểm tra mà bảng AI của ứng dụng vượt qua thì lệnh cũng vượt qua.
 
