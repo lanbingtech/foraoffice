@@ -1,3 +1,4 @@
+// Modified for ForaOffice: fork product identity and project routing.
 /**
  * electron-builder configuration (moved out of package.json "build" so the
  * auto-update feed URL can be injected at build time instead of living in
@@ -560,8 +561,8 @@ const FILE_ASSOCIATIONS = [
 ]
 
 const config = {
-  appId: 'com.genoffice.app',
-  productName: 'GenOffice',
+  appId: 'com.foraoffice.app',
+  productName: 'ForaOffice',
   // Resolved from the installed electron package so dependency bumps can
   // never leave a stale hard-coded pin behind (packaging would silently ship
   // the old runtime).

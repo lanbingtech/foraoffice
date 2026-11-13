@@ -1,3 +1,4 @@
+// Modified for ForaOffice: keep simulated Linux desktop paths portable on Windows.
 import { describe, expect, it, vi } from 'vitest'
 import {
   OFFICE_TYPES,
@@ -134,7 +135,7 @@ describe('createDefaultAppService', () => {
       platform: 'linux',
       run,
       readFile: (p) => {
-        if (p.endsWith('/usr/share/applications/wps-office-et.desktop'))
+        if (p.replaceAll('\\', '/').endsWith('/usr/share/applications/wps-office-et.desktop'))
           return '[Desktop Entry]\nName=WPS Spreadsheets\n'
         throw new Error('ENOENT')
       },

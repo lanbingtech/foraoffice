@@ -1,6 +1,6 @@
 {
   "name": "@genoffice/markdown",
-  "productName": "GenOffice Markdown",
+  "productName": "ForaOffice Markdown",
   "version": "0.1.0",
   "license": "Apache-2.0",
   "private": true,
@@ -60,7 +60,7 @@
     "vite": "^7.3.7",
     "vitest": "^4.1.12"
   },
-  "author": "GenOffice",
+  "author": "ForaOffice contributors",
   "dependencies": {
     "@tiptap/extension-mathematics": "3.31.0",
     "katex": "^0.18.2",
@@ -69,5 +69,17 @@
     "wavedrom": "^3.7.0",
     "pdfjs-dist": "^6.2.108",
     "@genoffice/agent-core": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lanbingtech/foraoffice.git"
+  },
+  "homepage": "https://github.com/lanbingtech/foraoffice",
+  "bugs": {
+    "url": "https://github.com/lanbingtech/foraoffice/issues"
+  },
+  "foraoffice": {
+    "modifiedFrom": "GenOffice v0.12.852",
+    "modifications": "Fork product identity, source/support routing and Docs SDK delivery"
   }
 }

@@ -1,3 +1,4 @@
+# Modified for ForaOffice: validate the portable Docs SDK and its supported host modes.
 name: CI
 
 # Test gate for every PR and push: changed-file formatting, lint, typecheck across
@@ -7,7 +8,7 @@ name: CI
 
 on:
   push:
-    branches: [main, 'dev_*', 'release_*']
+    branches: [main, 'dev_*', 'release_*', 'feat/**']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -225,7 +226,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -255,6 +256,12 @@ jobs:
 
       - name: Build apps
         run: npm run build:all
+
+      - name: Build portable Docs SDK (embedded assets and Node services)
+        run: npm run build:sdk
+
+      - name: Install and validate SDK outside the monorepo
+        run: npm run check:sdk-package
 
       - name: Generate sheets fixtures
         run: npm run fixtures -w @genoffice/sheets
@@ -297,7 +304,13 @@ jobs:
       - name: E2E (Electron shell)
         env:
           DEBUG: 'pw:browser'
+          FORAOFFICE_SDK_TEST_HOST: browser
         run: xvfb-run --auto-servernum -- npm run test:e2e
+
+      - name: Docs SDK in an Electron host
+        env:
+          DEBUG: 'pw:browser'
+        run: xvfb-run --auto-servernum -- npm run test:sdk:electron
 
       - name: Upload E2E artifacts on failure
         if: failure()
@@ -307,4 +320,57 @@ jobs:
           path: |
             e2e/artifacts
             e2e/test-results
+          retention-days: 7
+
+  docs-qt:
+    # Native Windows coverage is separate from browser/Electron tests. A skipped
+    # Qt test in the Linux suite never substitutes for these CTest targets.
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies and build SDK
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build:sdk
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install Qt 6.8 native dependencies
+        run: |
+          python -m pip install aqtinstall==3.3.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m aqt install-qt windows desktop 6.8.3 win64_msvc2022_64 -m qtwebengine qtwebchannel qtpositioning -O "$env:RUNNER_TEMP/Qt"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build and run native Qt regressions
+        run: |
+          $qtRoot = "$env:RUNNER_TEMP/Qt/6.8.3/msvc2022_64"
+          $env:PATH = "$qtRoot/bin;$env:PATH"
+          $env:QTWEBENGINEPROCESS_PATH = "$qtRoot/bin/QtWebEngineProcess.exe"
+          cmake -S apps/docs/hosts/qt -B apps/docs/out/qt-tests -G "Visual Studio 17 2022" -A x64 "-DCMAKE_PREFIX_PATH=$qtRoot" -DFORAOFFICE_DOCS_QT_BUILD_TESTS=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build apps/docs/out/qt-tests --config Release --parallel 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir apps/docs/out/qt-tests -C Release --output-on-failure --no-tests=error
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload native Qt evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docs-qt-evidence
+          path: |
+            apps/docs/out/qt-tests/Testing/Temporary/LastTest.log
+            apps/docs/out/qt-tests/*-test-results.txt
+            apps/docs/out/qt-tests/sdk-test-output
+          if-no-files-found: warn
           retention-days: 7
