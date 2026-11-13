@@ -91,7 +91,19 @@ export function createDocsCommandRouter(runtime: DocsRuntime): DocsCommands {
         if (!client) {
           if (message.bindingId) {
             const scope = scopes.get(message.bindingId)
-            if (!scope) throw new Error('The action scope is not bound to this document')
+            if (!scope) {
+              const output = 'The action scope is not bound to this document'
+              throw new DocsOperationError(output, {
+                output,
+                summary: 'Document operation refused',
+                isError: true,
+                errorCode: 'stale_target',
+                committed: false,
+                // No authorized document metadata remains; never inspect the active document.
+                documentId: '',
+                revision: 0,
+              })
+            }
             client = scope.connect({ id: callerId })
           } else {
             client = runtime.connect({ id: callerId })
