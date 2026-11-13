@@ -31,7 +31,8 @@ export function repoRoot(): string | null {
     const pkg = join(dir, 'package.json')
     if (existsSync(pkg)) {
       try {
-        if (JSON.parse(readFileSync(pkg, 'utf-8')).name === 'genoffice') {
+        const name = JSON.parse(readFileSync(pkg, 'utf-8')).name
+        if (name === 'foraoffice' || name === 'genoffice') {
           cachedRepo = dir
           return dir
         }
@@ -96,7 +97,7 @@ export interface AppLaunch {
   args: string[]
 }
 
-/** How to start the GenOffice GUI: the app binary that hosts this CLI, an installed app, or the dev checkout. */
+/** Start the hosting app, a fork installation (or upstream-compatible fallback), or the checkout. */
 export function appLaunch(env: NodeJS.ProcessEnv = process.env): AppLaunch | null {
   if (env.GENOFFICE_APP_BIN) return { command: env.GENOFFICE_APP_BIN, args: [] }
   // Embedded hosts may supply a renderer explicitly while refusing ambient
@@ -126,24 +127,38 @@ function installedAppBinaries(
     case 'darwin':
       return [
         ...(shipped ? [shipped] : []),
+        '/Applications/ForaOffice.app/Contents/MacOS/ForaOffice',
+        join(homedir(), 'Applications/ForaOffice.app/Contents/MacOS/ForaOffice'),
         '/Applications/GenOffice.app/Contents/MacOS/GenOffice',
         join(homedir(), 'Applications/GenOffice.app/Contents/MacOS/GenOffice'),
       ]
     case 'win32':
       return [
         ...(shipped ? [shipped] : []),
+        env.LOCALAPPDATA ? join(env.LOCALAPPDATA, 'Programs', 'ForaOffice', 'ForaOffice.exe') : '',
+        env.ProgramFiles ? join(env.ProgramFiles, 'ForaOffice', 'ForaOffice.exe') : '',
         env.LOCALAPPDATA ? join(env.LOCALAPPDATA, 'Programs', 'GenOffice', 'GenOffice.exe') : '',
         env.ProgramFiles ? join(env.ProgramFiles, 'GenOffice', 'GenOffice.exe') : '',
       ].filter(Boolean)
     default:
-      return [...(shipped ? [shipped] : []), '/opt/GenOffice/genoffice', '/usr/bin/genoffice']
+      return [
+        ...(shipped ? [shipped] : []),
+        '/opt/ForaOffice/genoffice',
+        '/opt/GenOffice/genoffice',
+        '/usr/bin/genoffice',
+      ]
   }
 }
 
 export function appBinaryForResources(resources: string, platform: NodeJS.Platform): string {
   const install = dirname(resources)
-  if (platform === 'darwin') return join(install, 'MacOS', 'GenOffice')
-  if (platform === 'win32') return join(install, 'GenOffice.exe')
+  if (platform === 'darwin' || platform === 'win32') {
+    const candidates =
+      platform === 'darwin'
+        ? [join(install, 'MacOS', 'ForaOffice'), join(install, 'MacOS', 'GenOffice')]
+        : [join(install, 'ForaOffice.exe'), join(install, 'GenOffice.exe')]
+    return candidates.find((path) => existsSync(path)) ?? candidates[0]!
+  }
   return join(install, 'genoffice')
 }
 
