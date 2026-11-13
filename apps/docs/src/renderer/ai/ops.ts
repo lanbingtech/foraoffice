@@ -94,7 +94,7 @@ export interface OpContext {
   source?: 'ai' | 'ui'
   /** flag changed blocks with the yellow AI highlight (default: only for source 'ai') */
   markAi?: boolean
-  /** validate and plan only; nothing is dispatched */
+  /** Build and validate the full transaction, then discard it without dispatch. */
   dryRun?: boolean
   /** style catalog for applyStyle (ids, heading levels, pending define_style entries) */
   styles?: AiStyleAccess
@@ -1180,6 +1180,11 @@ function runSetList(op: Op, env: RunEnv): OpResult {
     }
     // headings keep their role; converting them to list items would drop the level
     if (b.node.type.name === 'docHeading') continue
+    if (b.node.type.name !== 'docParagraph' && b.node.type.name !== 'docListItem') {
+      throw new Error(
+        `setList cannot target ${b.node.type.name}; only paragraphs and list items are supported`,
+      )
+    }
     if (b.node.type.name === 'docListItem') {
       if (b.node.attrs.kind === kind) continue
       tr.setNodeMarkup(
@@ -1656,7 +1661,7 @@ const failure = (error: string): ExecuteOutcome => ({ ok: false, results: [], su
 /**
  * Validate every op, then apply the batch as one transaction. Any invalid op
  * rejects the whole batch (atomic) with every error listed, each followed by
- * the op's usage line; dryRun stops after planning.
+ * the op's usage line; dryRun validates the same provisional transaction without dispatch.
  */
 export function executeOps(editor: Editor, ops: unknown, ctx: OpContext = {}): ExecuteOutcome {
   if (!Array.isArray(ops) || ops.length === 0) return failure('ops must be a non-empty array')
@@ -1688,8 +1693,6 @@ export function executeOps(editor: Editor, ops: unknown, ctx: OpContext = {}): E
       `${errors.join('\n')}\nNothing was applied (atomic): fix the op(s) and resend the whole batch.`,
     )
   }
-  if (ctx.dryRun) return { ok: true, results: [], summary: '', plan }
-
   const tr = editor.state.tr
   const schema = editor.schema
   const selection = frozenSelectionRange(editor, ctx.selection) ?? editor.state.selection
@@ -1706,6 +1709,10 @@ export function executeOps(editor: Editor, ops: unknown, ctx: OpContext = {}): E
   } catch (e) {
     return failure(e instanceof Error ? e.message : String(e))
   }
+
+  // Build the complete transaction even for a preview: schema and target checks
+  // must agree with execution, but no document or history state is dispatched.
+  if (ctx.dryRun) return { ok: true, results: [], summary: '', plan }
 
   if (tr.steps.length > 0) {
     // intent record for consumers downstream of the Step stream (journal, analytics)

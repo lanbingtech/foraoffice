@@ -119,6 +119,7 @@ export const HTML_RULES = [
   "- <sel>…</sel> appears only in the context to mark the user's selection; it is not a tag you may write",
   '- Elements with data-doc-readonly are read-only context, not replacement content or object references. Copying them into an HTML write is refused without changes. Edit surrounding text in place or exclude those blocks; use explicit structure operations when deletion is intended.',
   '- <img src="doc:B.I"> in read_blocks output is picture I of block B. To keep a picture when you replace its block, copy that exact tag into the new HTML where the picture should sit; a replaced range whose pictures you leave out loses them (the tool result says so). Any other <img> is ignored — new pictures go through insert_picture',
+  '- Table cells carry colspan/rowspan for merges and zero-based data-row/data-col grid positions. Covered grid positions do not contain extra cells. Preserve spans when rewriting; grid positions are read-only descriptions.',
   '- <span style="color:#RRGGBB;font-size:Npt"> appears only in read_blocks output, on runs whose color or size differs from the rest of the block (color:auto / font-size:default = back to the block\'s normal style); it is read-only — writing <span> has no effect, change colors and sizes with the apply_ops formatting commands',
   '- Organize long content into sections with h2/h3 (unless the user only wants a single paragraph)',
   '- Keep the same language as the original document / user instruction, unless translation is requested',
@@ -539,17 +540,20 @@ function tableToHtml(
   const model = pmTableToModel(node.toJSON() as PmNode)
   const headerRow = isHeaderRowTable(model)
   const grid = TableMap.get(node)
-  const rows = model.rows.map((row, r) => {
+  let rowOffset = 0
+  const rows = Array.from({ length: node.childCount }, (_, r) => {
     const tag = headerRow && r === 0 ? 'th' : 'td'
     const physical = node.child(r)
+    const at = rowOffset
+    rowOffset += physical.nodeSize
     if (hasDeletionRevision(physical)) return ''
-    let column = 0
-    const cells = row
-      .map((entry) => {
-        const cellOffset = grid.map[r * grid.width + column]
-        column += entry.colSpan ?? 1
-        if (entry.vMerge === 'continue') return `<${tag}></${tag}>`
-        const cell = node.nodeAt(cellOffset)!
+    const physicalCells: Array<{ cell: ProseMirrorNode; cellOffset: number }> = []
+    physical.forEach((cell, offset) => physicalCells.push({ cell, cellOffset: at + offset + 1 }))
+    const cells = physicalCells
+      .map(({ cell, cellOffset }) => {
+        const rect = grid.findCell(cellOffset)
+        const spans = `${cell.attrs.colspan > 1 ? ` colspan="${cell.attrs.colspan}"` : ''}${cell.attrs.rowspan > 1 ? ` rowspan="${cell.attrs.rowspan}"` : ''}`
+        const position = ` data-row="${rect.top}" data-col="${rect.left}"`
         const contentStart = start + cellOffset + 2
         const paras: string[] = []
         let readOnly: string | undefined
@@ -579,7 +583,7 @@ function tableToHtml(
                     .join(''),
             )
           })
-        return `<${tag}${readOnly ? ` data-doc-readonly="${readOnly}"` : ''}>${paras.join('<br>')}</${tag}>`
+        return `<${tag}${spans}${position}${readOnly ? ` data-doc-readonly="${readOnly}"` : ''}>${paras.join('<br>')}</${tag}>`
       })
       .join('')
     return `<tr>${cells}</tr>`
@@ -690,6 +694,19 @@ export function serializeRangeToHtml(
 
 /** Header/footer snapshot for the AI context; texts use {PAGE}/{NUMPAGES} tokens, null = variant off */
 export interface AiHfState {
+  sections?: Array<{
+    index: number
+    titlePg: boolean
+    strips: Array<{
+      kind: 'header' | 'footer'
+      view: 'default' | 'first' | 'even'
+      text: string
+      owner: number
+      inherited: boolean
+      sharedWith: number[]
+      sharedTargets?: Array<{ section: number; view: 'default' | 'first' | 'even' }>
+    }>
+  }>
   header: string
   footer: string
   headerFirst: string | null
@@ -702,6 +719,14 @@ export interface AiHfState {
 }
 
 function hfContextLines(hf: AiHfState): string[] {
+  if (hf.sections)
+    return [
+      "Headers & footers: zero-based section indexes, variants default/first/even. set_header_footer defaults to section 0 for BOTH kinds; scope=section isolates the chosen section, scope=shared changes every listed sharedWith section. first enables that section's titlePg; even enables document-wide even/odd display. {PAGE}/{NUMPAGES} remain live fields.",
+      ...hf.sections.map(
+        (section) =>
+          `- section ${section.index} (titlePg=${section.titlePg}, evenOddHf=${hf.evenOddHf}): ${JSON.stringify(section.strips)}`,
+      ),
+    ]
   const fmt = (v: string) => (v ? `"${clip(v.replace(/\n/g, '\\n'), 160)}"` : '(empty)')
   const lines = [
     'Headers & footers ({PAGE}/{NUMPAGES} are live page-number fields; change with set_header_footer):',
@@ -719,7 +744,7 @@ function hfContextLines(hf: AiHfState): string[] {
   }
   if (hf.multiSection) {
     lines.push(
-      '- the document has multiple sections; header/footer edits apply to the first section (later sections inherit unless they define their own)',
+      '- the document has multiple sections, but section metadata is unavailable from this host; do not assume multi-section targeting is supported',
     )
   }
   return lines
@@ -1289,6 +1314,33 @@ function parseTable(el: Element): PmNode | null {
       })
     }),
   )
+  // HTML merge geometry is document structure, not presentation. Keep physical
+  // cells only; rowspan-covered grid positions must not acquire blank cells.
+  if (
+    rawRows.some((row) =>
+      row.some((cell) => cell.hasAttribute('colspan') || cell.hasAttribute('rowspan')),
+    )
+  ) {
+    const occupied = new Set<string>()
+    let width = 0
+    rawRows.forEach((cells, r) => {
+      let column = 0
+      table.content![r].content = cells.map((el, c) => {
+        while (occupied.has(`${r}:${column}`)) column++
+        const dom = el as HTMLTableCellElement
+        const colspan = dom.colSpan || 1
+        const rowspan = Math.min(dom.rowSpan || rawRows.length - r, rawRows.length - r)
+        const cell = table.content![r].content![c]
+        cell.attrs = { ...cell.attrs, colspan, rowspan, colwidth: null }
+        for (let y = r; y < r + rowspan; y++)
+          for (let x = column; x < column + colspan; x++) occupied.add(`${y}:${x}`)
+        column += colspan
+        width = Math.max(width, column)
+        return cell
+      })
+    })
+    table.attrs = { ...table.attrs, colWidthsPct: Array.from({ length: width }, () => 100 / width) }
+  }
   return table
 }
 
@@ -1330,10 +1382,15 @@ function parseBlockquote(el: Element): PmNode | null {
 const IMAGE_REF_NODE = '__imageRef'
 
 /** the pictures read_blocks showed for this block, in the same order: no rules, no pending deletions, no withheld pictures */
-function inlineImagesOf(block: ProseMirrorNode): ProseMirrorNode[] {
+export function inlineImagesOf(block: ProseMirrorNode): ProseMirrorNode[] {
   const out: ProseMirrorNode[] = []
   block.descendants((n) => {
-    if (hasDeletionRevision(n)) return false
+    if (
+      hasDeletionRevision(n) ||
+      n.attrs.redact ||
+      n.marks.some((m) => m.type.name === REDACT_MARK)
+    )
+      return false
     if (
       n.type.name === 'docInlineImage' &&
       !n.attrs.rule &&
@@ -1343,6 +1400,19 @@ function inlineImagesOf(block: ProseMirrorNode): ProseMirrorNode[] {
     return true
   })
   return out
+}
+
+/** Visible images in the same order as the restricted-HTML image references. */
+export function documentImagesOf(block: ProseMirrorNode): ProseMirrorNode[] {
+  if (
+    hasDeletionRevision(block) ||
+    block.attrs.redact ||
+    block.marks.some((m) => m.type.name === REDACT_MARK)
+  )
+    return []
+  return block.type.name === 'docProtected' && block.attrs.blockType === 'image'
+    ? [block]
+    : inlineImagesOf(block)
 }
 
 /**

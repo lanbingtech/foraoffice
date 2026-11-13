@@ -62,7 +62,7 @@ import {
   type HfVariantsState,
   type PendingNumbering,
 } from './doc-state'
-import { hfSaveOptions } from './hf-sections'
+import { hfSaveOptions, type HfSectionState } from './hf-sections'
 import { fetchDocBytes } from './doc-bytes'
 import { parseDocxOffThread } from './parse-off-thread'
 import { PHASED_APPEND } from './editor/streaming-tail-guard'
@@ -184,6 +184,8 @@ export interface FileActionContext {
   setHfVariants: (value: HfVariantsState) => void
   setHfVariantsDirty: (value: HfVariantKey[]) => void
   sectionHfEdits: Record<string, HeaderFooter>
+  /** The same effective section snapshot used by runtime and canvas consumers. */
+  headerFooterState?: HfSectionState
   setSectionHfEdits: (value: Record<string, HeaderFooter>) => void
   /** laid-out page total, written as the cached NUMPAGES result */
   pageCount?: number
@@ -1006,11 +1008,13 @@ export async function buildDocBytes(
     }
     saveBlocks = applySectPrRewrites(saveBlocks, plan.saveBlockIndexByDocx, rewrites)
   }
-  const hfOptions = hfSaveOptions({
-    sections: ctx.sections,
-    edits: ctx.sectionHfEdits,
-    links: ctx.hfLinks,
-  })
+  const hfOptions = hfSaveOptions(
+    ctx.headerFooterState ?? {
+      sections: ctx.sections,
+      edits: ctx.sectionHfEdits,
+      links: ctx.hfLinks,
+    },
+  )
   const bytes = await saveDocx(doc.parsed, saveBlocks, {
     pageCount: ctx.pageCount,
     newPictures: Object.keys(plan.newPictures).length > 0 ? plan.newPictures : undefined,

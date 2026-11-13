@@ -1,3 +1,4 @@
+// Modified for ForaOffice: reliable document targeting and portable inspection.
 import type { Editor } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import type { Transaction } from '@tiptap/pm/state'
@@ -36,7 +37,7 @@ import type {
   DocsSaveOutcome,
   DocsSaveResult,
 } from '../../shared/operation-result'
-import { readDocumentMedia } from './document-media'
+import { readDocumentMedia, documentMediaReferences } from './document-media'
 import {
   DOCS_RESOURCE_TOOL_NAMES,
   DOCS_RESOURCE_TOOLS,
@@ -339,13 +340,14 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
         return {
           documentId,
           revision: documentState.revision,
-          text: buildDocContext(
-            doc.editor,
-            frozen.scope,
-            doc.comments?.list(),
-            doc.headerFooter?.read(),
-            doc.pageSetup?.list(),
-          ),
+          text:
+            buildDocContext(
+              doc.editor,
+              frozen.scope,
+              doc.comments?.list(),
+              doc.headerFooter?.read(),
+              doc.pageSetup?.list(),
+            ) + documentMediaReferences(doc.editor, documentId, documentState.revision),
         }
       },
       execute(call, signal) {
@@ -481,10 +483,26 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
           if (unavailable) return failure(unavailable.reason, unavailable.errorCode)
           if (call.name === 'read_document_media') {
             const expected = doc.editor.state.doc
+            let blockIndex = Number(call.input.blockIndex)
+            let imageIndex =
+              call.input.imageIndex === undefined ? undefined : Number(call.input.imageIndex)
+            if (call.input.mediaRef !== undefined) {
+              const ref = /^media:([^:]+):(\d+):(\d+)\.(\d+)$/.exec(String(call.input.mediaRef))
+              if (!ref) return failure('Invalid document media reference.', 'invalid_input')
+              if (ref[1] !== boundState.documentId || Number(ref[2]) !== boundState.revision)
+                return failure('The media reference is stale; read fresh context.', 'stale_target')
+              if (
+                (call.input.blockIndex !== undefined && blockIndex !== Number(ref[3])) ||
+                (imageIndex !== undefined && imageIndex !== Number(ref[4]))
+              )
+                return failure('mediaRef and image coordinates disagree.', 'invalid_input')
+              blockIndex = Number(ref[3])
+              imageIndex = Number(ref[4])
+            }
             return withCancellation(
               readDocumentMedia(
                 doc.editor,
-                Number(call.input.blockIndex),
+                blockIndex,
                 operationSignal,
                 () =>
                   !closed &&
@@ -493,6 +511,7 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
                   bindings.current()?.stateVersion === doc.stateVersion &&
                   seen === expected &&
                   doc.editor.state.doc === expected,
+                imageIndex,
               ),
               operationSignal,
             )
@@ -503,6 +522,7 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
           const revisionsWereCurrent = revisionsSeen === doc.editor.state.doc
           const stateWasCurrent = seenState === doc.stateVersion
           const writesDocument =
+            !(call.name === 'apply_ops' && call.input.dryRun === true) &&
             !DOCS_READ_TOOLS.has(call.name) &&
             !DOCS_DRAFT_CONTROLS.has(call.name) &&
             call.name !== 'start_document_draft' &&
@@ -608,6 +628,16 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
               doc.editor.view.dispatch(transaction.setMeta('addToHistory', false))
           }
           if (!result.isError) {
+            if (readsBlocks)
+              result.output += documentMediaReferences(
+                doc.editor,
+                boundState.documentId,
+                boundState.revision,
+                call.name === 'read_blocks' ? Number(call.input.startBlockIndex) : 0,
+                call.name === 'read_blocks'
+                  ? Number(call.input.endBlockIndex)
+                  : doc.editor.state.doc.childCount - 1,
+              )
             const nextState = bindings.current()?.stateVersion
             if (readsBlocks || (result.mutated && blocksWereCurrent)) seen = doc.editor.state.doc
             if (
@@ -638,6 +668,7 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
             if (!disposed && bindings.current()?.identity === boundIdentity) current()
             const helper = DOCS_RESOURCE_TOOL_NAMES.has(call.name)
             const storeWrite =
+              !(call.name === 'apply_ops' && call.input.dryRun === true) &&
               !helper &&
               !execution.isError &&
               !DOCS_READ_TOOLS.has(call.name) &&

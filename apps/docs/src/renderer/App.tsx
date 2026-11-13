@@ -128,7 +128,7 @@ import type { AiStyleInfo } from './ai/style-ops'
 import { applyResolvedPageSetup, describeSection, type AiPageSetupAccess } from './ai/page-setup'
 import { patchPendingSectPr, sectionIndexAtBlock } from './ai/pending-sections'
 import { protectedNoteMarkBlock, type AiNotesAccess } from './ai/note-ops'
-import { applyHfText, hfEditText } from './editor/hf-text'
+import { createHeaderFooterAccess } from './ai/header-footer-access'
 import {
   insertHfField,
   insertHfInstrField,
@@ -140,10 +140,10 @@ import type { HfAction, HfEditingInfo } from './components/ribbon-hf-tab'
 import {
   hfCommitTarget,
   hfLinked,
-  hfTextCommit,
   ownHf,
   resolveHf,
   withHfLink,
+  withHfEdit,
   withHfPictureEdit,
   type HfSectionState,
 } from './hf-sections'
@@ -982,15 +982,6 @@ export function App({
   const headerAreaView = areaView('header')
   const footerAreaView = areaView('footer')
 
-  /** the AI header/footer tool edits the strip the matching edge area shows */
-  const commitHf = (kind: 'header' | 'footer', next: HeaderFooter, viewOverride?: HfView) => {
-    commitHfAt(
-      kind === 'header' ? 0 : lastSectionIdx,
-      kind,
-      viewOverride ?? (kind === 'header' ? headerAreaView : footerAreaView),
-      next,
-    )
-  }
   /** "Different first page" toggle (ribbon checkbox); page 1's header/footer become the first-page variant, as in Word */
   const toggleTitlePg = (on: boolean) => {
     hfEditorRef.current?.exit()
@@ -1699,7 +1690,9 @@ export function App({
     if (!target) return false
     // functional: two commits in one turn (Remove Page Numbers on both strips, an
     // editor exit racing an AI set) must both land
-    setSectionHfEdits((m) => ({ ...m, [target.key]: hfTextCommit(m[target.key], next) }))
+    setSectionHfEdits(
+      (m) => withHfEdit({ ...hfState, edits: m }, si, kind, variant, next, ownerAtOpen)?.edits ?? m,
+    )
     return true
   }
   /** a floating header picture moved or resized on section `si`'s strip
@@ -2320,6 +2313,7 @@ export function App({
     section,
     sectionDirty,
     sections,
+    headerFooterState: hfState,
     sectionsDirty,
     trailingStartType,
     setSection,
@@ -7356,27 +7350,6 @@ export function App({
     }
   }, [])
 
-  // AI header/footer tool: reads the live HF state and writes through the same
-  // commit path as on-canvas editing (variant routing, per-section edits, dirty flags).
-  // The overlay mirrors this render's AI writes: an agent batch runs several tools
-  // between renders, so a read right after a set must not see the pre-write state
-  // (same pitfall as the comments id-minting ref mirror). Recreated per render,
-  // by which time React state has caught up.
-  const aiHfCtx = {
-    overlay: new Map<string, HeaderFooter>(),
-    valueOf(kind: 'header' | 'footer', view: HfView): HeaderFooter | null {
-      const pending = this.overlay.get(`${kind}:${view}`)
-      if (pending) return pending
-      return hfValueAt(kind === 'header' ? 0 : lastSectionIdx, kind, view)
-    },
-    commit: commitHf,
-    titlePg,
-    evenOddHf,
-    multiHf,
-    locked: isProtected || readMode,
-  }
-  const aiHfCtxRef = useRef(aiHfCtx)
-  aiHfCtxRef.current = aiHfCtx
   // AI style / watermark tools read and write the same pending stores the save path drains.
   // The upserts ref mirrors the state synchronously: an agent turn runs several style tools
   // between renders, so a define_style followed by applyStyle must see the pending entry.
@@ -7459,45 +7432,34 @@ export function App({
     [upsertStyleDef, applyWatermark, isProtected, trackChangesForced],
   )
 
+  const aiPageSetupRef = useRef<{ access: AiPageSetupAccess; sections: SectionInfo[] } | null>(null)
+  const aiHfFlagsRef = useRef({ evenOddHf, locked: isProtected || readMode })
+  aiHfFlagsRef.current = { evenOddHf, locked: isProtected || readMode }
   const aiHfAccess = useMemo<AiHeaderFooterAccess>(
-    () => ({
-      read: () => {
-        const ctx = aiHfCtxRef.current
-        const textOf = (kind: 'header' | 'footer', view: HfView) => {
-          const value = ctx.valueOf(kind, view)
-          return value ? hfEditText(value) : ''
-        }
-        return {
-          header: textOf('header', 'default'),
-          footer: textOf('footer', 'default'),
-          headerFirst: ctx.titlePg ? textOf('header', 'first') : null,
-          footerFirst: ctx.titlePg ? textOf('footer', 'first') : null,
-          headerEven: ctx.evenOddHf ? textOf('header', 'even') : null,
-          footerEven: ctx.evenOddHf ? textOf('footer', 'even') : null,
-          titlePg: ctx.titlePg,
-          evenOddHf: ctx.evenOddHf,
-          multiSection: ctx.multiHf,
-        }
-      },
-      set: (kind, view, text) => {
-        const ctx = aiHfCtxRef.current
-        if (ctx.locked) return 'the document is read-only; headers/footers cannot be edited'
-        if (view === 'first' && !ctx.titlePg) {
-          setTitlePg(true)
-          setTitlePgDirty(true)
-          ctx.titlePg = true
-        }
-        if (view === 'even' && !ctx.evenOddHf) {
+    () =>
+      createHeaderFooterAccess({
+        current: () => hfStateRef.current,
+        locked: () => aiHfFlagsRef.current.locked,
+        evenOdd: () => aiHfFlagsRef.current.evenOddHf,
+        enableEven: () => {
           setEvenOddHf(true)
           setEvenOddHfDirty(true)
-          ctx.evenOddHf = true
-        }
-        const next = applyHfText(ctx.valueOf(kind, view), text)
-        ctx.commit(kind, next, view)
-        ctx.overlay.set(`${kind}:${view}`, next)
-        return null
-      },
-    }),
+          aiHfFlagsRef.current.evenOddHf = true
+        },
+        enableFirst: (index) => {
+          const pageSetup = aiPageSetupRef.current
+          const end = hfStateRef.current.sections[index]?.lastBlockIndex
+          const target = pageSetup?.sections.findIndex((s) => s.lastBlockIndex === end) ?? -1
+          const section = pageSetup?.access.current(target)
+          if (!section) return 'the section is unavailable'
+          return pageSetup!.access.set(target, { settings: section.settings, titlePg: true })
+        },
+        commit: (state) => {
+          hfStateRef.current = state
+          setSectionHfEdits(state.edits)
+          setHfLinks(state.links)
+        },
+      }),
     [],
   )
 
@@ -7630,6 +7592,8 @@ export function App({
     }),
     [editor],
   )
+
+  aiPageSetupRef.current = { access: aiPageSetupAccess, sections }
 
   const hostedId = doc?.hosted?.id
   const runtimeIdentity = useMemo(

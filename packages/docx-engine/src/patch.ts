@@ -1,3 +1,4 @@
+// Modified for ForaOffice: reliable document targeting and portable inspection.
 import JSZip from 'jszip'
 import {
   applyRevisionResolutions,
@@ -52,6 +53,7 @@ import {
   hfReferenceTags,
   hfReferenceType,
   injectIntoSectPr,
+  readSections,
 } from './section'
 import {
   CUSTOM_XML_REL_TYPE,
@@ -457,6 +459,16 @@ export interface SaveOptions {
     hf: HeaderFooter
     /** w:type of the reference; absent = default */
     variant?: 'default' | 'first' | 'even'
+    /** Live section ordinal, including newly inserted section breaks. */
+    sectionIndex?: number
+    /** Resolved source after pending link edits; null means no original part. */
+    sourceRelationshipId?: string | null
+    /** Preserve the first untouched inherited section when isolating a strip. */
+    preserveFollowing?: {
+      sectionIndex: number
+      sourceRelationshipId: string | null
+      hf: HeaderFooter
+    }
   }>
   /**
    * Word's "Link to Previous" switched on: drop the section's own header/footer
@@ -1276,6 +1288,84 @@ export async function saveDocx(
   // ---- Per-section header/footer (non-last sections): with a reference, rewrite the
   // part; without one, create a part + inject the reference ----
   const sectionRefTags = new Map<number, string[]>()
+  const isolatedRefs = new Map<
+    number,
+    Array<{ kind: 'header' | 'footer'; variant: 'default' | 'first' | 'even'; rId: string }>
+  >()
+  let outputSectionIndex = 0
+  const sections = readSections(parsed)
+  const originalRef = (
+    index: number,
+    kind: 'header' | 'footer',
+    variant: 'default' | 'first' | 'even',
+  ) => {
+    for (let i = index; i >= 0; i--) {
+      const ref = sections[i]?.[kind === 'header' ? 'headerRefs' : 'footerRefs'][variant]
+      if (ref) return ref
+    }
+    return undefined
+  }
+  const cloneSectionPart = async (
+    kind: 'header' | 'footer',
+    hf: HeaderFooter,
+    sourceRef?: string,
+  ) => {
+    const target = sourceRef ? relTargets.get(sourceRef) : undefined
+    const sourcePath = target ? resolveRelationshipTargetPath(docPath, target) : null
+    const folder = sourcePath ? sourcePath.slice(0, sourcePath.lastIndexOf('/') + 1) : 'word/'
+    let number = 1
+    while (
+      zip.file(`${folder}${kind}${number}.xml`) ||
+      hfParts.some((p) => p.path === `${folder}${kind}${number}.xml`)
+    )
+      number++
+    const path = `${folder}${kind}${number}.xml`
+    const originalXml = sourcePath ? ((await zip.file(sourcePath)?.async('string')) ?? null) : null
+    if (sourcePath) {
+      const relsPathOf = (part: string) => part.replace(/([^/]+)$/, '_rels/$1.rels')
+      const rels = await zip.file(relsPathOf(sourcePath))?.async('string')
+      if (rels) hfRelsOut.set(relsPathOf(path), rels)
+    }
+    hfParts.push({
+      path,
+      xml: await resolveHfNewPictures(path, editedHfPartXml(kind, hf, originalXml), hf),
+    })
+    const rId = `rId${nextRelNum++}`
+    newRels.push({ rId, type: HF_REL_TYPE[kind], target: `/${path}`, external: false })
+    hfOverrides.push(
+      `<Override PartName="/${path}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml"/>`,
+    )
+    return rId
+  }
+  const queueSectionRef = (
+    index: number,
+    kind: 'header' | 'footer',
+    variant: 'default' | 'first' | 'even',
+    rId: string,
+  ) => {
+    const previous = isolatedRefs.get(index) ?? []
+    isolatedRefs.set(index, [
+      ...previous.filter((ref) => ref.kind !== kind || ref.variant !== variant),
+      { kind, variant, rId },
+    ])
+  }
+  const applySectionRefs = (xml: string, end: number) => {
+    const tags = sectionRefTags.get(end)
+    return tags?.length ? injectIntoSectPr(xml, tags.join('')) : xml
+  }
+  const applyIsolatedRefs = (xml: string) => {
+    if (!/<w:sectPr[\s/>]/.test(xml)) return xml
+    const refs = isolatedRefs.get(outputSectionIndex++) ?? []
+    for (const ref of refs) xml = removeHfReference(xml, ref.kind, ref.variant)
+    return refs.length
+      ? injectIntoSectPr(
+          xml,
+          refs
+            .map((ref) => `<w:${ref.kind}Reference w:type="${ref.variant}" r:id="${ref.rId}"/>`)
+            .join(''),
+        )
+      : xml
+  }
   const unlinkSectionHf = (xml: string, docxIndex: number): string => {
     let out = xml
     for (const u of options.sectionHfUnlink ?? []) {
@@ -1285,6 +1375,56 @@ export async function saveDocx(
     return out
   }
   for (const edit of options.sectionHf ?? []) {
+    if (edit.hf.sectionOnly) {
+      const index =
+        edit.sectionIndex ?? sections.findIndex((s) => s.lastBlockIndex === edit.lastBlockIndex)
+      if (!Number.isInteger(index) || index < 0)
+        throw new Error('The header/footer section is missing')
+      const variant = edit.variant ?? 'default'
+      const sourceRef =
+        edit.sourceRelationshipId === undefined
+          ? originalRef(index, edit.kind, variant)
+          : (edit.sourceRelationshipId ?? undefined)
+      queueSectionRef(
+        index,
+        edit.kind,
+        variant,
+        await cloneSectionPart(edit.kind, edit.hf, sourceRef),
+      )
+      if (edit.sectionIndex !== undefined) {
+        const boundary = edit.preserveFollowing
+        if (boundary)
+          queueSectionRef(
+            boundary.sectionIndex,
+            edit.kind,
+            variant,
+            boundary.sourceRelationshipId ?? (await cloneSectionPart(edit.kind, boundary.hf)),
+          )
+      } else {
+        // Compatibility for engine callers without a live section snapshot.
+        for (let next = index + 1; next < sections.length; next++) {
+          if (sections[next][edit.kind === 'header' ? 'headerRefs' : 'footerRefs'][variant]) break
+          if (
+            options.sectionHf?.some(
+              (other) =>
+                other.hf.sectionOnly &&
+                other.lastBlockIndex === sections[next].lastBlockIndex &&
+                other.kind === edit.kind &&
+                (other.variant ?? 'default') === variant,
+            )
+          )
+            continue
+          queueSectionRef(
+            next,
+            edit.kind,
+            variant,
+            sourceRef ?? (await cloneSectionPart(edit.kind, { text: '' })),
+          )
+          break
+        }
+      }
+      continue
+    }
     const block = parsed.blocks.find((b) => b.docxIndex === edit.lastBlockIndex)
     const sectPr =
       block?.originalXml?.match(/<w:sectPr[^>]*\/>|<w:sectPr[\s\S]*?<\/w:sectPr>/)?.[0] ?? ''
@@ -1832,11 +1972,9 @@ export async function saveDocx(
     xml = resolveNewPictures(xml)
     // Inject newly created per-section header/footer references into the section's sectPr
     // (the reference must be the first sectPr child)
-    const refTags = fbDocxIndex !== undefined ? sectionRefTags.get(fbDocxIndex) : undefined
-    if (refTags && refTags.length > 0) {
-      xml = injectIntoSectPr(xml, refTags.join(''))
-    }
-    if (fbDocxIndex !== undefined) xml = unlinkSectionHf(xml, fbDocxIndex)
+    if (fbDocxIndex !== undefined)
+      xml = applySectionRefs(unlinkSectionHf(xml, fbDocxIndex), fbDocxIndex)
+    xml = applyIsolatedRefs(xml)
     // The ink list is authoritative: old aidocs-ink runs go away, the desired
     // set is re-injected at its (possibly new) anchor paragraphs.
     if (options.inks !== undefined) xml = stripInkRuns(xml)
@@ -1903,6 +2041,7 @@ export async function saveDocx(
           xml = injectIntoSectPr(xml, hfRefTags.join(''))
         }
         xml = unlinkSectionHf(xml, block.docxIndex)
+        xml = applyIsolatedRefs(applySectionRefs(xml, block.docxIndex))
       }
       const index = block.docxIndex
       if (index !== null) {
@@ -1913,6 +2052,9 @@ export async function saveDocx(
       parts.push(xml)
     }
   }
+
+  if ([...isolatedRefs.keys()].some((index) => index >= outputSectionIndex))
+    throw new Error('A targeted header/footer section was not emitted by this save')
 
   let newDocumentXml =
     documentXml.slice(0, bodyContentStart) +

@@ -92,7 +92,13 @@ export const DOCS_EDITOR_TOOLS = docsToolCatalog(opNames())
 export interface AiHeaderFooterAccess {
   read(): AiHfState
   /** returns an error message, or null on success */
-  set(kind: 'header' | 'footer', view: 'default' | 'first' | 'even', text: string): string | null
+  set(
+    kind: 'header' | 'footer',
+    view: 'default' | 'first' | 'even',
+    text: string,
+    section?: number,
+    scope?: 'section' | 'shared',
+  ): string | null
 }
 
 /**
@@ -1356,6 +1362,30 @@ function executeSyncTool(
         return fail(summaryOf(), 'view must be "default", "first" or "even"')
       }
       if (typeof call.input.text !== 'string') return fail(summaryOf(), 'text must be a string')
+      const section = call.input.section === undefined ? 0 : Number(call.input.section)
+      const snapshot = hf.read()
+      if (snapshot.multiSection && !snapshot.sections)
+        return fail(
+          summaryOf(),
+          'This host does not expose section-addressed header/footer editing.',
+          'unavailable',
+        )
+      const count = snapshot.sections?.length ?? 1
+      if (
+        (call.input.section !== undefined && !Number.isInteger(call.input.section)) ||
+        !Number.isInteger(section) ||
+        section < 0 ||
+        section >= count
+      )
+        return fail(summaryOf(), `section must be 0-${count - 1}`)
+      const scope = call.input.scope ?? 'section'
+      if (scope !== 'section' && scope !== 'shared')
+        return fail(summaryOf(), 'scope must be section or shared')
+      const strip = snapshot.sections?.[section]?.strips.find(
+        (s) => s.kind === kind && s.view === view,
+      )
+      const affected =
+        scope === 'shared' ? (strip?.sharedTargets ?? [{ section, view }]) : [{ section, view }]
       // a doubly escaped newline arrives as the two characters backslash-n; a footer must not show it literally
       const text = call.input.text.includes('\n')
         ? call.input.text
@@ -1363,10 +1393,10 @@ function executeSyncTool(
       if (text.length > 2000) {
         return fail(summaryOf(), 'text is too long for a header/footer (2000 characters max)')
       }
-      const error = hf.set(kind, view, text)
+      const error = hf.set(kind, view, text, section, scope)
       if (error) return fail(summaryOf(), error)
       return {
-        output: `Updated the ${kind}${view !== 'default' ? ` (${view}-page variant)` : ''}.`,
+        output: `Updated section ${section} ${kind}${view !== 'default' ? ` (${view}-page variant)` : ''}; scope=${scope}; affected targets: ${JSON.stringify(affected)}. ${scope === 'section' ? 'Other sections retain their content; shared/inherited parts are isolated on save.' : 'All listed aliases of the owning part are affected.'}${view === 'even' ? ' Even/odd display is enabled document-wide.' : ''}`,
         mutated: false, // app state only, saved with the document; not part of the PM doc
         summary: summaryOf(),
       }

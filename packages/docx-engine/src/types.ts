@@ -1,3 +1,4 @@
+// Modified for ForaOffice: reliable document targeting and portable inspection.
 import type { RevisionResolution } from './revision-xml'
 import type { DocumentProperties } from './doc-properties'
 import type { EffectivePPr, EffectiveRPr } from './resolve-props'
@@ -1028,6 +1029,8 @@ export interface NumberingDef {
 /** Content for the default page header / footer. */
 export interface HeaderFooter {
   text: string
+  /** Pending section-scoped edit: clone the part and preserve other sections. */
+  sectionOnly?: true
   /** append an automatic page number (PAGE field), footer only */
   pageNumber?: boolean
   /**

@@ -1,3 +1,4 @@
+// Modified for ForaOffice: reliable document targeting and portable inspection.
 import type { AgentToolDef } from '@genoffice/agent-core'
 
 /** Runtime lifecycle controls, separate from the pinned native AI tool catalog. */
@@ -5,11 +6,22 @@ export const DOCS_RUNTIME_TOOLS: AgentToolDef[] = [
   {
     name: 'read_document_media',
     description:
-      'Read an authorized image block as image data for the external Harness to analyze. Use current block indexes from document context. Internal asset addresses are not exposed.',
+      'Read an authorized standalone, inline or table-cell image as standard MCP image content. Prefer the revision-bound mediaRef from fresh context/read_blocks; alternatively use blockIndex and imageIndex (required for multiple images). Missing resources, stale references and unsupported targets are distinguished. Internal asset addresses are not exposed.',
     inputSchema: {
       type: 'object',
-      properties: { blockIndex: { type: 'integer', minimum: 0 } },
-      required: ['blockIndex'],
+      properties: {
+        mediaRef: {
+          type: 'string',
+          description: 'Revision-bound reference returned by context/read_blocks.',
+        },
+        blockIndex: { type: 'integer', minimum: 0 },
+        imageIndex: {
+          type: 'integer',
+          minimum: 0,
+          description: 'Zero-based image ordinal within the block.',
+        },
+      },
+      anyOf: [{ required: ['mediaRef'] }, { required: ['blockIndex'] }],
     },
   },
   {
