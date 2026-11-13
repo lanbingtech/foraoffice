@@ -1,6 +1,9 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { zh } from './zh'
 
 export const ru = {
+  appExternalAgentFailed: 'Не удалось отправить действие внешнему агенту: {error}',
+  appDocumentDraftPending: 'Сначала завершите или отклоните черновик документа.',
   appScTitle: 'Сочетания клавиш',
   appScFilter: 'Поиск сочетания',
   appScNone: 'Совпадений не найдено',

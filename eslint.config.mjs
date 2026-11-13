@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 // Repo-wide lint config (lint only — no formatter, so no whole-repo format diff).
 // Rules are tuned so the current codebase passes cleanly; tighten incrementally.
 import js from '@eslint/js'
@@ -8,6 +9,13 @@ import reactHooks from 'eslint-plugin-react-hooks'
 export default tseslint.config(
   {
     ignores: [
+      // Private local tooling and investigation trees are not project source.
+      '.agents/**',
+      '.scratch/**',
+      '.task/**',
+      '.claude/**',
+      '.codex/**',
+      '.cursor/**',
       '**/node_modules/**',
       '**/dist/**',
       '**/out/**',
@@ -77,5 +85,9 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/no-require-imports': 'off',
     },
+  },
+  {
+    files: ['apps/docs/hosts/qt/web/*.js'],
+    languageOptions: { globals: { ...globals.browser } },
   },
 )

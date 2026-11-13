@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createServer, get as httpGet, request as httpRequest } from 'node:http'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -20,6 +21,7 @@ import type { DocsControl } from '../../src/main/mcp/tools/document-tools'
 import type { SlidesControl } from '../../src/main/mcp/tools/slides-tools'
 import type { SheetsControl } from '../../src/main/mcp/tools/sheets-tools'
 import { realCliRunner } from './real-cli'
+import { LIVE_DOCS_TOOL_NAMES } from './docs-tool-names'
 
 /**
  * Full-surface MCP acceptance test over the REAL Streamable HTTP transport.
@@ -34,22 +36,18 @@ import { realCliRunner } from './real-cli'
  */
 
 const DEFAULT_NAMES = [
-  'apply_ops',
+  ...LIVE_DOCS_TOOL_NAMES,
   'apply_sheet_ops',
   'apply_slide_ops',
   'create_session',
   'get_app_info',
-  'insert_content',
-  'insert_picture',
   'open_documents',
   'open_in_genoffice',
   'read_deck',
-  'read_document',
   'read_docx',
   'read_docx_properties',
   'read_pdf',
   'read_sheet',
-  'replace_blocks',
   'sheet_links',
   'save_session',
 ].sort()

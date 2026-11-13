@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Perintah baris perintah dan agen
+
+> Panduan ini menjelaskan aplikasi desktop warisan GenOffice di ForaOffice, termasuk agen dan pengaturan bawaannya. Host yang menyematkan Docs menyediakan layanan dan integrasi agen sendiri; fitur desktop tidak otomatis menjadi kemampuan SDK. Lihat [panduan Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Setiap pemasangan membawa perintah `genoffice` yang menjalankan mesin yang sama dengan jendela — parser yang sama, penulis yang sama, perender yang sama. Berkas yang disimpan aplikasi dan berkas yang ditulis perintah itu adalah berkas yang sama, dan pemeriksaan yang lolos di panel AI aplikasi juga lolos di perintah.
 

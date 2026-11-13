@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Mulai cepat: antarmuka dan dasar-dasarnya
+
+> Panduan ini menjelaskan aplikasi desktop warisan GenOffice di ForaOffice, termasuk agen dan pengaturan bawaannya. Host yang menyematkan Docs menyediakan layanan dan integrasi agen sendiri; fitur desktop tidak otomatis menjadi kemampuan SDK. Lihat [panduan Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 GenOffice adalah rangkaian perkantoran yang berjalan sepenuhnya di komputer Anda: satu jendela, satu deret tab, dengan enam editor — Docs (pemrosesan kata), Sheets (spreadsheet), Slides (presentasi), PDF, Markdown, dan HTML. File yang dibuka dan disimpan adalah .docx / .xlsx / .pptx / .pdf asli, sepenuhnya serasi dengan Word, Excel, dan PowerPoint. Tidak perlu jaringan.
 

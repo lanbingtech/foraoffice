@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
@@ -24,6 +25,12 @@ export default defineConfig({
       '@genoffice/electron-utils/atomic-write': local(
         '../../packages/electron-utils/src/atomic-write.ts',
       ),
+      '@genoffice/electron-utils/print-html-pdf': local(
+        '../../packages/electron-utils/src/print-html-pdf.ts',
+      ),
+      '@genoffice/electron-utils/ooxml-encryption': local(
+        '../../packages/electron-utils/src/ooxml-encryption.ts',
+      ),
       '@genoffice/electron-utils/safe-external-url': local(
         '../../packages/electron-utils/src/safe-external-url.ts',
       ),
@@ -39,6 +46,9 @@ export default defineConfig({
       '@genoffice/electron-utils/remote-image': local(
         '../../packages/electron-utils/src/remote-image.ts',
       ),
+      '@genoffice/electron-utils/image-data': local(
+        '../../packages/electron-utils/src/image-data.ts',
+      ),
       '@genoffice/electron-utils/safe-remote-url': local(
         '../../packages/electron-utils/src/safe-remote-url.ts',
       ),
@@ -53,6 +63,9 @@ export default defineConfig({
       '@genoffice/ai-provider/browser': local('../../packages/ai-provider/src/browser.ts'),
       '@genoffice/ai-provider': local('../../packages/ai-provider/src/index.ts'),
       '@genoffice/i18n': local('../../packages/i18n/src/index.ts'),
+      '@genoffice/ui/editor': local('../../packages/ui/src/editor.ts'),
+      '@genoffice/ui/font-list': local('../../packages/ui/src/font-list.ts'),
+      '@genoffice/ui/wordart-presets': local('../../packages/ui/src/wordart-presets.ts'),
       '@genoffice/ui': local('../../packages/ui/src/index.ts'),
     },
   },

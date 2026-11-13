@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { clipText } from '../preview'
 import type { Editor } from '@tiptap/core'
 import JSZip from 'jszip'
@@ -926,7 +927,6 @@ export async function applyDocOps(
         null,
         comments,
         hf,
-        undefined,
         pageSetup,
         extras,
         notes,
@@ -1557,7 +1557,7 @@ async function setPictureWatermark(
   return { output: `Picture watermark set (${size.width}x${size.height}px source).` }
 }
 
-type DocExtras = NonNullable<Parameters<Modules['tools']['executeTool']>[10]>
+type DocExtras = NonNullable<Parameters<Modules['tools']['executeTool']>[9]>
 
 /** styles.xml catalog plus this batch's define_style entries, and the header watermark. */
 function docExtras(doc: OpenDocument): DocExtras {
@@ -1848,7 +1848,7 @@ export async function docsCatalog(): Promise<{ catalog: OpCatalog; htmlRules: st
     target: d.target,
     keys: [...d.keys],
   }))
-  const tools = new Map(mods.tools.AGENT_TOOLS.map((t) => [t.name, t]))
+  const tools = new Map(mods.tools.DOCS_EDITOR_TOOLS.map((t) => [t.name, t]))
   const content: OpEntry[] = CONTENT_OPS.map((op) => {
     const tool = tools.get(op)
     if (!tool && op !== 'insert_image' && op !== 'set_properties') {

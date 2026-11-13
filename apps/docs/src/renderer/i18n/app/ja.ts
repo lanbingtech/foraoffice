@@ -1,6 +1,9 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { zh } from './zh'
 
 export const ja = {
+  appExternalAgentFailed: '外部エージェントに操作を送信できませんでした：{error}',
+  appDocumentDraftPending: '先に文書の下書きを確定するか破棄してください。',
   appScTitle: 'キーボードショートカット',
   appScFilter: 'ショートカットを検索',
   appScNone: '一致するショートカットがありません',

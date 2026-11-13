@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # AI アシスタントパネル
+
+> このマニュアルは ForaOffice が GenOffice から引き継いだデスクトップアプリと、その内蔵エージェントや設定を説明します。Docs を組み込むホストは独自のサービスとエージェント連携を提供します。デスクトップ機能が自動的に SDK の機能になるわけではありません。[Docs SDK ガイド](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md)を参照してください。
 
 どのエディターからでも AI パネルを呼び出せます。内容を選び、指示を出し、ストリームされる結果を見ます。
 

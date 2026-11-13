@@ -1,6 +1,9 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { zh } from './zh'
 
 export const es = {
+  appExternalAgentFailed: 'No se pudo enviar la acción al agente externo: {error}',
+  appDocumentDraftPending: 'Primero finaliza o descarta el borrador del documento.',
   appScTitle: 'Atajos de teclado',
   appScFilter: 'Buscar atajo',
   appScNone: 'No hay atajos coincidentes',

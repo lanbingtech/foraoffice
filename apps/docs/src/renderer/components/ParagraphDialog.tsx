@@ -1,7 +1,8 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { useState } from 'react'
 import type { Editor } from '@tiptap/core'
 import type { StyleInfo } from '@genoffice/docx-engine'
-import { Dropdown } from '@genoffice/ui'
+import { Dropdown } from '@genoffice/ui/editor'
 import { useI18n, type StringKey } from '../i18n/locale'
 import { setParaAttrs, activeParaAttrs } from './ribbon-tabs'
 import { setSelectionAlign } from '../editor/direction'

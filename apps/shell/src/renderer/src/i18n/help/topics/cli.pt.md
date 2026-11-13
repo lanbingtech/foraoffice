@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Linha de comandos e agentes
+
+> Este manual descreve o aplicativo desktop herdado do GenOffice no ForaOffice, incluindo agente e configurações integrados. Os hospedeiros que incorporam Docs fornecem serviços e integração com agentes próprios; recursos desktop não são automaticamente capacidades do SDK. Consulte o [guia do Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Todas as instalações incluem um comando `genoffice` que conduz os mesmos motores que a janela usa — os mesmos analisadores, o mesmo escritor, o mesmo renderizador. Um arquivo que o aplicativo salva e um arquivo que o comando escreve são o mesmo arquivo, e uma verificação que o painel de IA do aplicativo ultrapassa é uma verificação que o comando também ultrapassa.
 

@@ -1,3 +1,7 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
+import { getDocsHost } from '../host/docs-host'
+import type { DocsAiOperation } from '../../shared/editor-action'
+import { RIBBON_ICON_SIZE } from './ribbon-metrics'
 import { useRef, useState } from 'react'
 import type { Editor, JSONContent } from '@tiptap/core'
 import type { Node as PmNode } from '@tiptap/pm/model'
@@ -7,7 +11,7 @@ import {
   useDismissablePopover,
   wordArtSolidColor,
   type WordArtPreset,
-} from '@genoffice/ui'
+} from '@genoffice/ui/editor'
 import {
   buildLineParagraphXml,
   buildShapeParagraphXml,
@@ -90,7 +94,7 @@ export { MailingsTab } from './ribbon-mailings-tab'
 export { ReferencesTab } from './ribbon-references-tab'
 
 /** icon size for the big icon-over-label ribbon buttons (slides ribbon parity) */
-export const BIG = 28
+export const BIG = RIBBON_ICON_SIZE
 
 /* ---------- shared helpers ---------- */
 
@@ -441,7 +445,7 @@ export async function insertImageFromDataUrl(
 }
 
 export async function insertImageViaDialog(editor: Editor): Promise<void> {
-  const picked = await window.desktop.pickImage()
+  const picked = await getDocsHost().pickImage()
   if (!picked) return
   await insertImageFromDataUrl(
     editor,
@@ -772,7 +776,7 @@ export const AI_REWRITE_ACK_KEY = 'docs-ai-rewrite-ack'
 export type { BalloonMode, RevisionDisplayMode }
 
 interface ReviewTabProps extends TabProps {
-  onAiPreset: (instruction: string) => void
+  onAiPreset: (instruction: string, operation: DocsAiOperation) => void
   commentCount: number
   /** unresolved root comments; 0 disables the AI resolve-comments action */
   openCommentCount: number
@@ -918,8 +922,16 @@ export function ReviewTab({
             disabled={!hasDoc}
             data-tip={`${t('ribbonEditorTip')} — ${t('ribbonAiCreditNote')}`}
             onClick={() => {
-              if (hasRangeSelection()) onAiPreset(t('ribbonEditorSelectionPrompt'))
-              else if (confirmAiRewrite()) onAiPreset(t('ribbonEditorPrompt'))
+              if (hasRangeSelection())
+                onAiPreset(t('ribbonEditorSelectionPrompt'), {
+                  operationId: 'proofread_selection',
+                  parameters: {},
+                })
+              else if (confirmAiRewrite())
+                onAiPreset(t('ribbonEditorPrompt'), {
+                  operationId: 'proofread_document',
+                  parameters: {},
+                })
             }}
           >
             <span className="rb-big-icon">
@@ -964,7 +976,7 @@ export function ReviewTab({
               <span>{t('ribbonTranslate')}</span>
             </button>
             {dropdown === 'translate' && (
-              <div data-rb-panel="" className="layout-menu">
+              <div data-rb-panel="" className="layout-menu layout-menu-scroll">
                 {TRANSLATE_LANGS.map(({ code }) => (
                   <button
                     key={code}
@@ -973,9 +985,16 @@ export function ReviewTab({
                       if (hasRangeSelection()) {
                         onAiPreset(
                           t('ribbonTranslateSelectionPrompt', { lang: t(ribbonLangKey(code)) }),
+                          {
+                            operationId: 'translate_selection',
+                            parameters: { targetLanguage: code },
+                          },
                         )
                       } else if (confirmAiRewrite()) {
-                        onAiPreset(t('ribbonTranslatePrompt', { lang: t(ribbonLangKey(code)) }))
+                        onAiPreset(t('ribbonTranslatePrompt', { lang: t(ribbonLangKey(code)) }), {
+                          operationId: 'translate_document',
+                          parameters: { targetLanguage: code },
+                        })
                       }
                     }}
                   >
@@ -1085,7 +1104,12 @@ export function ReviewTab({
             className="rb-big"
             disabled={!hasDoc || openCommentCount === 0}
             data-tip={`${t('ribbonAiCommentsTip', { count: openCommentCount })} — ${t('ribbonAiCreditNote')}`}
-            onClick={() => onAiPreset(t('ribbonAiCommentsPrompt'))}
+            onClick={() =>
+              onAiPreset(t('ribbonAiCommentsPrompt'), {
+                operationId: 'resolve_comments',
+                parameters: {},
+              })
+            }
           >
             <span className="rb-big-icon">
               <span className="ai-feature-icon" aria-hidden="true">
@@ -1288,7 +1312,12 @@ export function ReviewTab({
             className="rb-big"
             disabled={!hasDoc || revisionCount === 0}
             data-tip={`${t('ribbonAiRevisionsTip', { count: revisionCount })} — ${t('ribbonAiCreditNote')}`}
-            onClick={() => onAiPreset(t('ribbonAiRevisionsPrompt'))}
+            onClick={() =>
+              onAiPreset(t('ribbonAiRevisionsPrompt'), {
+                operationId: 'summarize_revisions',
+                parameters: {},
+              })
+            }
           >
             <span className="rb-big-icon">
               <span className="ai-feature-icon" aria-hidden="true">
@@ -1416,7 +1445,7 @@ export function ViewTab({
   const winMenuRef = useRef<HTMLDivElement>(null)
 
   const toggleWinMenu = async () => {
-    if (!winMenuOpen) setWindows(await window.desktop.listDocsTabs())
+    if (!winMenuOpen) setWindows(await getDocsHost().listDocsTabs())
     setWinMenuOpen((v) => !v)
   }
 
@@ -1643,7 +1672,7 @@ export function ViewTab({
           <button
             className="rb-big"
             data-tip={t('ribbonNewTabTip')}
-            onClick={() => void window.desktop.openNewTab(filePath)}
+            onClick={() => void getDocsHost().openNewTab(filePath)}
           >
             <span className="rb-big-icon">
               <IconNewWindow size={BIG} />
@@ -1679,7 +1708,7 @@ export function ViewTab({
                   <button
                     key={w.id}
                     onClick={() => {
-                      void window.desktop.focusDocsTab(w.id)
+                      void getDocsHost().focusDocsTab(w.id)
                       setWinMenuOpen(false)
                     }}
                   >

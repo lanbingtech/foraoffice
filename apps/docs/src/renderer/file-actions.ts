@@ -1,3 +1,8 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
+import { getDocsHost, getDocsDocumentHost } from './host/docs-host'
+import { hostedOpenResult } from './host/document-services'
+import { assertDocumentOperation, validateHostedIdentity } from '../shared/document-host'
+import type { DocsHostedIdentity } from '../shared/document-host'
 /**
  * Document lifecycle: open/new (full state reset from a parsed docx), the
  * save pipeline (PM doc → save plan → docx bytes → reparse), and PDF export.
@@ -6,9 +11,10 @@
  * so state never goes stale.
  */
 import type { Editor } from '@tiptap/core'
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { history } from '@tiptap/pm/history'
-import { suggestFileName } from '@genoffice/ui'
 import { modelTextOf, type RedactableNode } from './ai/redact-view'
+import { hasActiveDocumentDraft } from './runtime/draft-landing'
 import {
   applyPageNumType,
   applySectionSettings,
@@ -47,6 +53,7 @@ import {
 } from '@genoffice/docx-engine'
 import type { Dispatch, SetStateAction } from 'react'
 import type { AiDocContent, OpenDocxResult } from '../shared/ipc'
+import type { DocsErrorCode, DocsSaveOutcome } from '../shared/operation-result'
 import {
   hfVariantsFromParsed,
   openedFileStartsDirty,
@@ -84,7 +91,12 @@ import {
   type InkTool,
 } from './editor/ink'
 import { t, getLang } from './i18n/locale'
-import { isBlankDocument, parseHtmlFragment, replaceBlockRange } from './ai/protocol'
+import {
+  isBlankDocument,
+  parseHtmlFragment,
+  readOnlyHtmlError,
+  replaceBlockRange,
+} from './ai/protocol'
 import { carryDocSeen } from './ai/tools'
 import { isDocDirty, resetCrossDocEditState } from './doc-dirty'
 import { pruneUnreferencedNumbering } from './numbering-actions'
@@ -106,7 +118,7 @@ import { collectPdfInternalLinks } from './pdf-internal-links'
 import type { PdfInternalLink } from '../shared/ipc'
 import { showToast } from './components/toast-bus'
 import { buildStandaloneHtml } from './html-export'
-import { aiPanelInitiallyOpen } from '@genoffice/ui'
+import { aiPanelInitiallyOpen } from '@genoffice/ui/editor'
 
 /** An export waiting for the pagination preview to mount; resolve settles the caller's exportPdf promise. */
 export type PendingPdfExport = {
@@ -118,6 +130,9 @@ export type PendingPdfExport = {
 
 /** The App state the file actions need; built fresh per call. */
 export interface FileActionContext {
+  beforeDocumentReplace?(): void
+  /** Publish a replacement body and its authored stores before lifecycle completion. */
+  commitDocumentState?(operation: () => void): void
   editor: Editor | null
   doc: DocState | null
   dirtyRef: { current: boolean }
@@ -198,6 +213,7 @@ export interface FileActionContext {
   setDefaultFonts?: (fonts: DefaultFonts | undefined) => void
   fontSettingsVersionRef?: { current: number }
   settleFontSettings?: () => Promise<FileActionContext>
+  getDocumentStateVersion?: () => unknown
   styleUpserts: Record<string, StyleUpsert>
   setStyleUpserts: (value: Record<string, StyleUpsert>) => void
   comments: CommentInfo[]
@@ -307,6 +323,40 @@ function resetEditorHistory(editor: Editor): void {
   if (!plugin) return
   editor.unregisterPlugin('history')
   editor.registerPlugin(history((plugin.spec as { config?: object }).config))
+}
+
+/** Saved anchors are attributes: update them without replacing character positions or undo history. */
+function rebaseSavedAttributes(editor: Editor, saved: ProseMirrorNode): boolean {
+  const before = editor.state.doc
+  const sameContent = (left: ProseMirrorNode, right: ProseMirrorNode): boolean => {
+    if (
+      left.type !== right.type ||
+      left.text !== right.text ||
+      left.childCount !== right.childCount ||
+      left.marks.length !== right.marks.length ||
+      left.marks.some((mark, index) => !mark.eq(right.marks[index]))
+    )
+      return false
+    for (let index = 0; index < left.childCount; index++)
+      if (!sameContent(left.child(index), right.child(index))) return false
+    return true
+  }
+  if (!sameContent(before, saved)) return false
+  const transaction = editor.state.tr
+  const update = (left: ProseMirrorNode, right: ProseMirrorNode, position: number) => {
+    for (const key of Object.keys(right.attrs)) {
+      if (JSON.stringify(left.attrs[key]) === JSON.stringify(right.attrs[key])) continue
+      if (position < 0) transaction.setDocAttribute(key, right.attrs[key])
+      else transaction.setNodeAttribute(position, key, right.attrs[key])
+    }
+    right.forEach((child, offset, index) => update(left.child(index), child, position + 1 + offset))
+  }
+  update(before, saved, -1)
+  if (transaction.docChanged) {
+    editor.view.dispatch(transaction.setMeta(TRACK_IGNORE, true).setMeta('addToHistory', false))
+    carryDocSeen(editor, before)
+  }
+  return true
 }
 
 /**
@@ -464,25 +514,39 @@ function focusDocumentStart(editor: Editor): void {
 /** bumped when a document replacement starts; a slower one still parsing must not land */
 let openGeneration = 0
 
+function commitDocumentState(ctx: FileActionContext, operation: () => void): void {
+  if (ctx.commitDocumentState) ctx.commitDocumentState(operation)
+  else operation()
+}
+
 export async function loadFile(
   ctx: FileActionContext,
   result: OpenDocxResult,
 ): Promise<LoadFileOutcome> {
-  if (!result || !ctx.editor) return 'canceled'
+  if (!result || !ctx.editor || ctx.editor.isDestroyed) return 'canceled'
   if ('needsPassword' in result) {
     ctx.promptDocxPassword({ path: result.path, name: result.name })
     return 'password'
   }
   const generation = ++openGeneration
+  const openingHost = getDocsDocumentHost()
+  const currentOpen = () =>
+    generation === openGeneration &&
+    !ctx.editor!.isDestroyed &&
+    openingHost === getDocsDocumentHost()
   try {
-    const bytes = await fetchDocBytes(result.dataUrl)
+    const bytes = result.data
+      ? new Uint8Array(result.data)
+      : result.hosted
+        ? await blankDocxBytes()
+        : await fetchDocBytes(result.dataUrl)
     // a 0-byte .docx (touch, failed download) is not a corrupt archive but an
     // empty document: open the blank template under the file's own path
     const parsed = await parseDocxOffThread(
       bytes.byteLength === 0 ? await blankDocxBytes() : bytes,
       { owned: true },
     )
-    if (generation !== openGeneration) return 'superseded'
+    if (!currentOpen()) return 'superseded'
     const tier = openTierFor(docWeight(parsed.blocks))
     if (tier === 'refuse') {
       const msg = t('appDocTooLargeBlocks', {
@@ -498,125 +562,130 @@ export async function loadFile(
     setLazyMediaHashes(parsed.extras.lazyMediaHashes)
     // before setContent: blockAttrs/marks bake fontTable-driven factors and chains into the DOM
     const adopted = await adoptEmbeddedFonts(parsed.embeddedFonts)
-    if (!adopted || generation !== openGeneration) return 'superseded'
+    if (!adopted || !currentOpen()) return 'superseded'
     setDocFontTable(parsed.fontTable)
     await prefetchFaces(collectDocFonts(parsed))
     await loadBundledStandIns(collectDocFonts(parsed))
-    if (generation !== openGeneration) return 'superseded'
-    ctx.editor.storage.listNumbering.styles = parsed.styles
-    ctx.editor.storage.listNumbering.docDefaults = parsed.docDefaults
-    ctx.editor.storage.listNumbering.defs = parsed.numbering
-    applyDocLayoutSettings(ctx.editor, parsed)
-    setContentPhased(
-      phasedHostFor(ctx),
-      blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)),
-    )
-    resetEditorHistory(ctx.editor)
-    if (tier !== 'readOnly') focusDocumentStart(ctx.editor)
-    noteDocumentSwapped()
-    ctx.setDoc({
-      parsed,
-      filePath: result.path,
-      fileName: result.name,
-      hash: result.hash,
-      encrypted: result.encrypted,
+    if (!currentOpen()) return 'superseded'
+    ctx.beforeDocumentReplace?.()
+    if (!currentOpen()) return 'superseded'
+    commitDocumentState(ctx, () => {
+      ctx.editor!.storage.listNumbering.styles = parsed.styles
+      ctx.editor!.storage.listNumbering.docDefaults = parsed.docDefaults
+      ctx.editor!.storage.listNumbering.defs = parsed.numbering
+      applyDocLayoutSettings(ctx.editor!, parsed)
+      setContentPhased(
+        phasedHostFor(ctx),
+        blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)),
+      )
+      resetEditorHistory(ctx.editor!)
+      if (tier !== 'readOnly') focusDocumentStart(ctx.editor!)
+      noteDocumentSwapped()
+      ctx.setDoc({
+        parsed,
+        filePath: result.hosted ? null : result.path,
+        hosted: result.hosted,
+        fileName: result.name,
+        hash: result.hash,
+        encrypted: result.encrypted,
+      })
+      // this tab's document was replaced: a password parked for the previous
+      // unsaved draft is stale and must not encrypt this document's saves.
+      // Done here, not in the main process's loadDocx — Review > Compare also
+      // opens files without replacing the current document.
+      discardStalePasswordIntents()
+      ctx.setAiPanelKey((k) => k + 1)
+      ctx.setDocCss(docStyleCss(parsed))
+      ctx.setSection(readSectionSettings(parsed))
+      ctx.setSections(readSections(parsed))
+      ctx.setSectionDirty(false)
+      ctx.setPageColor(readPageColor(parsed))
+      ctx.setPageColorDirty(false)
+      ctx.setHeader(
+        parsed.headerText || parsed.headerHasPageNumber || parsed.headerParas?.length
+          ? {
+              text: parsed.headerText ?? '',
+              pageNumber: parsed.headerHasPageNumber,
+              paras: parsed.headerParas ?? undefined,
+            }
+          : null,
+      )
+      ctx.setHeaderDirty(false)
+      ctx.setFooter(
+        parsed.footerText || parsed.footerHasPageNumber || parsed.footerParas?.length
+          ? {
+              text: parsed.footerText ?? '',
+              pageNumber: parsed.footerHasPageNumber,
+              paras: parsed.footerParas ?? undefined,
+            }
+          : null,
+      )
+      ctx.setFooterDirty(false)
+      ctx.setHfVariants(hfVariantsFromParsed(parsed))
+      ctx.setHfVariantsDirty([])
+      resetCrossDocEditState(ctx)
+      ctx.setTitlePg(parsed.titlePg ?? false)
+      ctx.setTitlePgDirty(false)
+      ctx.setEvenOddHf(parsed.evenAndOddHeaders ?? false)
+      ctx.setEvenOddHfDirty(false)
+      ctx.setMirrorMargins(parsed.mirrorMargins ?? false)
+      ctx.setMirrorMarginsDirty(false)
+      ctx.setShowComments(true)
+      ctx.setCommentPanelOpen(hasUnanchoredComments(parsed.comments, parsed.blocks))
+      ctx.setCommentPopup(null)
+      ctx.setReadMode(tier === 'readOnly')
+      ctx.setLargeDocSpellOff(tier !== 'normal')
+      ctx.setComments(parsed.comments)
+      ctx.setCommentsDirty(false)
+      ctx.setWatermark(parsed.watermarkText ?? null)
+      ctx.setWatermarkDirty(false)
+      ctx.setWatermarkStyle(null)
+      ctx.setWatermarkPicture(null)
+      ctx.setInkAnnotations(annotationsFromParsed(parsed.inks))
+      ctx.setInksDirty(false)
+      ctx.setInkTool('select')
+      ctx.setFootnotes(parsed.footnotes)
+      ctx.setEndnotes(parsed.endnotes)
+      ctx.setNotesDirty(false)
+      ctx.setSources(parsed.sources)
+      ctx.setSourcesDirty(false)
+      ctx.setZoteroDocumentData(parsed.zoteroDocumentData)
+      ctx.setZoteroDocumentDataDirty(false)
+      ctx.setThemeFonts(parsed.themeFonts ?? null)
+      ctx.setThemeFontsDirty(false)
+      ctx.setThemeColors(parsed.themeColors ?? null)
+      ctx.setThemeColorsDirty(false)
+      ctx.setCommentComposing(false)
+      ctx.setTrackChanges(parsed.trackRevisions ?? false)
+      ctx.setTrackRevisionsDirty(false)
+      ctx.setProtection(parsed.protection)
+      ctx.setProtectionDirty(false)
+      ctx.setWriteProtection(parsed.writeProtection)
+      ctx.setWriteProtectionDirty(false)
+      ctx.setRemovePersonalInfo(parsed.removePersonalInfo)
+      ctx.setRemovePersonalInfoDirty(false)
+      ctx.onWriteProtectionLoaded(parsed.writeProtection)
+      ctx.setCompareResult(null)
+      // Recovery content still only exists in the autosave copy. Keep it dirty
+      // until an explicit/automatic save lands it on the original path.
+      ctx.dirtyRef.current = openedFileStartsDirty(result)
+      const missing = checkMissingFonts(collectDocFonts(parsed))
+      // one status line per open: the Read Mode explanation outranks the rest
+      if (tier === 'readOnly') {
+        ctx.setStatus(t('appDocLargeReadOnly', { blocks: parsed.blocks.length }))
+      } else if (tier === 'lite') {
+        ctx.setStatus(t('appDocLargeSpellOff', { blocks: parsed.blocks.length }))
+      } else if (missing.length > 0) {
+        const names = missing
+          .slice(0, 3)
+          .map((m) => (m.substitute ? `${m.name} → ${m.substitute}` : m.name))
+          .join(', ')
+        ctx.setStatus(t('appFontsMissing', { names: missing.length > 3 ? `${names}…` : names }))
+      } else {
+        ctx.setStatus(t('appOpenedFile', { name: result.name }))
+      }
     })
-    // this tab's document was replaced: a password parked for the previous
-    // unsaved draft is stale and must not encrypt this document's saves.
-    // Done here, not in the main process's loadDocx — Review > Compare also
-    // opens files without replacing the current document.
-    discardStalePasswordIntents()
-    ctx.setAiPanelKey((k) => k + 1)
-    ctx.setDocCss(docStyleCss(parsed))
-    ctx.setSection(readSectionSettings(parsed))
-    ctx.setSections(readSections(parsed))
-    ctx.setSectionDirty(false)
-    ctx.setPageColor(readPageColor(parsed))
-    ctx.setPageColorDirty(false)
-    ctx.setHeader(
-      parsed.headerText || parsed.headerHasPageNumber || parsed.headerParas?.length
-        ? {
-            text: parsed.headerText ?? '',
-            pageNumber: parsed.headerHasPageNumber,
-            paras: parsed.headerParas ?? undefined,
-          }
-        : null,
-    )
-    ctx.setHeaderDirty(false)
-    ctx.setFooter(
-      parsed.footerText || parsed.footerHasPageNumber || parsed.footerParas?.length
-        ? {
-            text: parsed.footerText ?? '',
-            pageNumber: parsed.footerHasPageNumber,
-            paras: parsed.footerParas ?? undefined,
-          }
-        : null,
-    )
-    ctx.setFooterDirty(false)
-    ctx.setHfVariants(hfVariantsFromParsed(parsed))
-    ctx.setHfVariantsDirty([])
-    resetCrossDocEditState(ctx)
-    ctx.setTitlePg(parsed.titlePg ?? false)
-    ctx.setTitlePgDirty(false)
-    ctx.setEvenOddHf(parsed.evenAndOddHeaders ?? false)
-    ctx.setEvenOddHfDirty(false)
-    ctx.setMirrorMargins(parsed.mirrorMargins ?? false)
-    ctx.setMirrorMarginsDirty(false)
-    ctx.setShowComments(true)
-    ctx.setCommentPanelOpen(hasUnanchoredComments(parsed.comments, parsed.blocks))
-    ctx.setCommentPopup(null)
-    ctx.setReadMode(tier === 'readOnly')
-    ctx.setLargeDocSpellOff(tier !== 'normal')
-    ctx.setComments(parsed.comments)
-    ctx.setCommentsDirty(false)
-    ctx.setWatermark(parsed.watermarkText ?? null)
-    ctx.setWatermarkDirty(false)
-    ctx.setWatermarkStyle(null)
-    ctx.setWatermarkPicture(null)
-    ctx.setInkAnnotations(annotationsFromParsed(parsed.inks))
-    ctx.setInksDirty(false)
-    ctx.setInkTool('select')
-    ctx.setFootnotes(parsed.footnotes)
-    ctx.setEndnotes(parsed.endnotes)
-    ctx.setNotesDirty(false)
-    ctx.setSources(parsed.sources)
-    ctx.setSourcesDirty(false)
-    ctx.setZoteroDocumentData(parsed.zoteroDocumentData)
-    ctx.setZoteroDocumentDataDirty(false)
-    ctx.setThemeFonts(parsed.themeFonts ?? null)
-    ctx.setThemeFontsDirty(false)
-    ctx.setThemeColors(parsed.themeColors ?? null)
-    ctx.setThemeColorsDirty(false)
-    ctx.setCommentComposing(false)
-    ctx.setTrackChanges(parsed.trackRevisions ?? false)
-    ctx.setTrackRevisionsDirty(false)
-    ctx.setProtection(parsed.protection)
-    ctx.setProtectionDirty(false)
-    ctx.setWriteProtection(parsed.writeProtection)
-    ctx.setWriteProtectionDirty(false)
-    ctx.setRemovePersonalInfo(parsed.removePersonalInfo)
-    ctx.setRemovePersonalInfoDirty(false)
-    ctx.onWriteProtectionLoaded(parsed.writeProtection)
-    ctx.setCompareResult(null)
-    // Recovery content still only exists in the autosave copy. Keep it dirty
-    // until an explicit/automatic save lands it on the original path.
-    ctx.dirtyRef.current = openedFileStartsDirty(result)
-    const missing = checkMissingFonts(collectDocFonts(parsed))
-    // one status line per open: the Read Mode explanation outranks the rest
-    if (tier === 'readOnly') {
-      ctx.setStatus(t('appDocLargeReadOnly', { blocks: parsed.blocks.length }))
-    } else if (tier === 'lite') {
-      ctx.setStatus(t('appDocLargeSpellOff', { blocks: parsed.blocks.length }))
-    } else if (missing.length > 0) {
-      const names = missing
-        .slice(0, 3)
-        .map((m) => (m.substitute ? `${m.name} → ${m.substitute}` : m.name))
-        .join(', ')
-      ctx.setStatus(t('appFontsMissing', { names: missing.length > 3 ? `${names}…` : names }))
-    } else {
-      ctx.setStatus(t('appOpenedFile', { name: result.name }))
-    }
-    void window.desktop.getRecentFiles().then(ctx.setRecent)
+    void getDocsHost().getRecentFiles().then(ctx.setRecent)
     return 'ok'
   } catch (err) {
     if (generation !== openGeneration) return 'superseded'
@@ -629,7 +698,7 @@ export async function loadFile(
 
 async function systemLocale(): Promise<string> {
   try {
-    return (await window.desktop.getSystemLocale?.()) || navigator.language
+    return (await getDocsHost().getSystemLocale?.()) || navigator.language
   } catch {
     return navigator.language
   }
@@ -644,89 +713,123 @@ async function blankDocxBytes(): Promise<Uint8Array> {
 
 /** new document from the built-in blank template (AI can then generate into it) */
 export async function newFile(ctx: FileActionContext): Promise<boolean | undefined> {
-  if (!ctx.editor) return
+  if (!ctx.editor || ctx.editor.isDestroyed) return
   const generation = ++openGeneration
+  const host = getDocsDocumentHost()
+  const currentNew = () =>
+    generation === openGeneration && !ctx.editor!.isDestroyed && host === getDocsDocumentHost()
+  let hosted: DocsHostedIdentity | undefined
+  if (host) {
+    assertDocumentOperation(host, 'new')
+    if (!host.newDocument) throw new Error('The host does not provide new documents')
+    const target = await host.newDocument()
+    if (ctx.editor.isDestroyed || host !== getDocsDocumentHost() || generation !== openGeneration)
+      return false
+    if (!target) return false
+    validateHostedIdentity(target)
+    if (target.data) return (await loadFile(ctx, hostedOpenResult(target))) === 'ok'
+    hosted = { id: target.id, name: target.name, readOnly: target.readOnly }
+  }
   try {
     const bytes = await blankDocxBytes()
     const parsed = await parseDocx(bytes)
-    if (generation !== openGeneration) return
+    if (!currentNew()) return
     setLazyMediaHashes([])
     const adopted = await adoptEmbeddedFonts(parsed.embeddedFonts)
-    if (!adopted || generation !== openGeneration) return
+    if (!adopted || !currentNew()) return
     setDocFontTable(parsed.fontTable)
     await prefetchFaces(collectDocFonts(parsed))
     await loadBundledStandIns(collectDocFonts(parsed))
-    if (generation !== openGeneration) return
-    ctx.editor.storage.listNumbering.styles = parsed.styles
-    ctx.editor.storage.listNumbering.docDefaults = parsed.docDefaults
-    ctx.editor.storage.listNumbering.defs = parsed.numbering
-    applyDocLayoutSettings(ctx.editor, parsed)
+    if (!currentNew()) return
     // a tail still streaming for the previous document must never land in this one
     cancelPhasedContent()
-    ctx.editor.commands.setContent(
-      blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)) as never,
-    )
-    resetEditorHistory(ctx.editor)
-    focusDocumentStart(ctx.editor)
-    noteDocumentSwapped()
-    ctx.setDoc({ parsed, filePath: null, fileName: t('appUntitledDocx'), hash: '', isBlank: true })
-    // a very large document opened in Read Mode must not leave it on for the new one
-    ctx.setReadMode(false)
-    ctx.setLargeDocSpellOff(false)
-    // a fresh blank draft starts unencrypted: drop any pending password left by
-    // the previous draft (its DocState, including the encrypted flag, is gone)
-    discardStalePasswordIntents()
-    ctx.setAiPanelKey((k) => k + 1)
-    ctx.setDocCss(docStyleCss(parsed))
-    ctx.setSection(readSectionSettings(parsed))
-    ctx.setSections(readSections(parsed))
-    ctx.setSectionDirty(false)
-    ctx.setPageColor(readPageColor(parsed))
-    ctx.setPageColorDirty(false)
-    ctx.setHeader(null)
-    ctx.setHeaderDirty(false)
-    ctx.setFooter(null)
-    ctx.setFooterDirty(false)
-    ctx.setHfVariants(hfVariantsFromParsed(parsed))
-    ctx.setHfVariantsDirty([])
-    resetCrossDocEditState(ctx)
-    ctx.setShowComments(true)
-    ctx.setCommentPanelOpen(false)
-    ctx.setCommentPopup(null)
-    ctx.setComments([])
-    ctx.setCommentsDirty(false)
-    ctx.setWatermark(null)
-    ctx.setWatermarkDirty(false)
-    ctx.setWatermarkPicture(null)
-    ctx.setInkAnnotations([])
-    ctx.setInksDirty(false)
-    ctx.setInkTool('select')
-    ctx.setFootnotes(parsed.footnotes)
-    ctx.setEndnotes(parsed.endnotes)
-    ctx.setNotesDirty(false)
-    ctx.setSources([])
-    ctx.setSourcesDirty(false)
-    ctx.setZoteroDocumentData(parsed.zoteroDocumentData)
-    ctx.setZoteroDocumentDataDirty(false)
-    ctx.setThemeFonts(parsed.themeFonts ?? null)
-    ctx.setThemeFontsDirty(false)
-    ctx.setThemeColors(parsed.themeColors ?? null)
-    ctx.setThemeColorsDirty(false)
-    ctx.setCommentComposing(false)
-    ctx.setTrackChanges(false)
-    ctx.setTrackRevisionsDirty(false)
-    ctx.setProtection(null)
-    ctx.setProtectionDirty(false)
-    ctx.setWriteProtection(null)
-    ctx.setWriteProtectionDirty(false)
-    ctx.setRemovePersonalInfo(false)
-    ctx.setRemovePersonalInfoDirty(false)
-    ctx.onWriteProtectionLoaded(null)
-    ctx.setCompareResult(null)
-    ctx.dirtyRef.current = false
-    // same rule as the first render, so the "open in new documents" setting holds for Cmd+N too
-    ctx.setShowAi(aiPanelInitiallyOpen('aidocs.showAi'))
-    ctx.setStatus(t('appNewDocCreated'))
+    ctx.beforeDocumentReplace?.()
+    if (!currentNew()) return
+    commitDocumentState(ctx, () => {
+      ctx.editor!.storage.listNumbering.styles = parsed.styles
+      ctx.editor!.storage.listNumbering.docDefaults = parsed.docDefaults
+      ctx.editor!.storage.listNumbering.defs = parsed.numbering
+      applyDocLayoutSettings(ctx.editor!, parsed)
+      ctx.editor!.commands.setContent(
+        blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)) as never,
+      )
+      resetEditorHistory(ctx.editor!)
+      focusDocumentStart(ctx.editor!)
+      noteDocumentSwapped()
+      ctx.setDoc({
+        parsed,
+        filePath: null,
+        fileName: hosted?.name ?? t('appUntitledDocx'),
+        hash: '',
+        isBlank: true,
+        hosted,
+      })
+      // a very large document opened in Read Mode must not leave it on for the new one
+      ctx.setReadMode(false)
+      ctx.setLargeDocSpellOff(false)
+      ctx.setDocLoading(false)
+      // a fresh blank draft starts unencrypted: drop any pending password left by
+      // the previous draft (its DocState, including the encrypted flag, is gone)
+      discardStalePasswordIntents()
+      ctx.setAiPanelKey((k) => k + 1)
+      ctx.setDocCss(docStyleCss(parsed))
+      ctx.setSection(readSectionSettings(parsed))
+      ctx.setSections(readSections(parsed))
+      ctx.setSectionDirty(false)
+      ctx.setPageColor(readPageColor(parsed))
+      ctx.setPageColorDirty(false)
+      ctx.setHeader(null)
+      ctx.setHeaderDirty(false)
+      ctx.setFooter(null)
+      ctx.setFooterDirty(false)
+      ctx.setHfVariants(hfVariantsFromParsed(parsed))
+      ctx.setHfVariantsDirty([])
+      resetCrossDocEditState(ctx)
+      ctx.setTitlePg(parsed.titlePg ?? false)
+      ctx.setTitlePgDirty(false)
+      ctx.setEvenOddHf(parsed.evenAndOddHeaders ?? false)
+      ctx.setEvenOddHfDirty(false)
+      ctx.setMirrorMargins(parsed.mirrorMargins ?? false)
+      ctx.setMirrorMarginsDirty(false)
+      ctx.setShowComments(true)
+      ctx.setCommentPanelOpen(false)
+      ctx.setCommentPopup(null)
+      ctx.setComments([])
+      ctx.setCommentsDirty(false)
+      ctx.setWatermark(null)
+      ctx.setWatermarkDirty(false)
+      ctx.setWatermarkStyle(null)
+      ctx.setWatermarkPicture(null)
+      ctx.setInkAnnotations([])
+      ctx.setInksDirty(false)
+      ctx.setInkTool('select')
+      ctx.setFootnotes(parsed.footnotes)
+      ctx.setEndnotes(parsed.endnotes)
+      ctx.setNotesDirty(false)
+      ctx.setSources([])
+      ctx.setSourcesDirty(false)
+      ctx.setZoteroDocumentData(parsed.zoteroDocumentData)
+      ctx.setZoteroDocumentDataDirty(false)
+      ctx.setThemeFonts(parsed.themeFonts ?? null)
+      ctx.setThemeFontsDirty(false)
+      ctx.setThemeColors(parsed.themeColors ?? null)
+      ctx.setThemeColorsDirty(false)
+      ctx.setCommentComposing(false)
+      ctx.setTrackChanges(false)
+      ctx.setTrackRevisionsDirty(false)
+      ctx.setProtection(null)
+      ctx.setProtectionDirty(false)
+      ctx.setWriteProtection(null)
+      ctx.setWriteProtectionDirty(false)
+      ctx.setRemovePersonalInfo(false)
+      ctx.setRemovePersonalInfoDirty(false)
+      ctx.onWriteProtectionLoaded(null)
+      ctx.setCompareResult(null)
+      ctx.dirtyRef.current = false
+      // same rule as the first render, so the "open in new documents" setting holds for Cmd+N too
+      ctx.setShowAi(aiPanelInitiallyOpen('aidocs.showAi'))
+      ctx.setStatus(t('appNewDocCreated'))
+    })
     return true
   } catch (err) {
     if (generation !== openGeneration) return
@@ -808,7 +911,10 @@ function docxNameFromStem(stem: string): string | null {
  * is the one thing that reaches them after the model has seen the rest of the
  * document, so a leak here would survive the redaction it was meant to outlive.
  */
-export async function suggestedSaveAsName(ctx: FileActionContext): Promise<string> {
+export async function suggestedSaveAsName(
+  ctx: FileActionContext,
+  suggestFileName: (input: { content: string }) => Promise<string>,
+): Promise<string> {
   const { editor } = ctx
   if (!editor) return ''
   const stem = await suggestFileName({ content: modelTextOfDocument(editor) })
@@ -830,6 +936,7 @@ export async function buildDocBytes(
   ctx: FileActionContext,
   pmOverride?: PmNode,
 ): Promise<Uint8Array | null> {
+  if (ctx.editor && hasActiveDocumentDraft(ctx.editor)) return null
   const generation = docGeneration
   if (ctx.settleFontSettings) ctx = await ctx.settleFontSettings()
   if (docGeneration !== generation) return null
@@ -941,6 +1048,7 @@ export async function buildDocBytes(
     themeFonts: ctx.themeFontsDirty && ctx.themeFonts ? ctx.themeFonts : undefined,
     themeColors: ctx.themeColorsDirty && ctx.themeColors ? ctx.themeColors : undefined,
   })
+  if (docGeneration !== generation || hasActiveDocumentDraft(editor)) return null
   return bytes
 }
 
@@ -955,8 +1063,17 @@ export async function buildDocBytes(
  * later tick then covers it like any opened file.
  */
 export async function writeRecoveryCopy(ctx: FileActionContext): Promise<void> {
+  // Managed storage owns recovery policy; a pathless object is not an unsaved local file.
+  if (getDocsDocumentHost()) return
   const { doc, editor } = ctx
-  if (!doc || !editor || ctx.saveInFlightRef.current || !isDocDirty(ctx)) return
+  if (
+    !doc ||
+    !editor ||
+    hasActiveDocumentDraft(editor) ||
+    ctx.saveInFlightRef.current ||
+    !isDocDirty(ctx)
+  )
+    return
   // an edit during a phased open marks the document dirty while the tail is
   // still streaming: a snapshot now would persist a truncated document. The
   // next tick covers it.
@@ -976,7 +1093,7 @@ export async function writeRecoveryCopy(ctx: FileActionContext): Promise<void> {
       bytes.byteOffset,
       bytes.byteOffset + bytes.byteLength,
     ) as ArrayBuffer
-    await window.desktop.writeRecoveryCopy(doc.filePath, buffer)
+    await getDocsHost().writeRecoveryCopy(doc.filePath, buffer)
   } catch {
     /* best-effort */
   }
@@ -993,10 +1110,11 @@ const runSerializedSave = createSaveSerializer()
 function discardStalePasswordIntents(): void {
   // Start the IPC now, before the replacement document can record a password.
   // The destructive half stays serialized behind an old in-flight save.
-  const throughRevision = window.desktop.docPasswordIntentRevision()
+  const services = getDocsHost()
+  const throughRevision = services.docPasswordIntentRevision()
   void runSerializedSave(
     async () => {
-      await window.desktop.discardDocPasswordIntents(await throughRevision)
+      await services.discardDocPasswordIntents(await throughRevision)
       return false // not a save: a queued save pass must never reuse this result
     },
     () => false,
@@ -1048,6 +1166,22 @@ export function save(
   newDocName?: string,
   explicitTarget?: ExplicitSaveTarget,
 ): Promise<boolean> {
+  const host = getDocsDocumentHost()
+  if (
+    host &&
+    (host.capabilities?.[saveAs ? 'saveAs' : 'save'] === false || ctx.doc?.hosted?.readOnly)
+  ) {
+    explicitTarget?.onError?.('The host does not permit this save', 'permission_denied')
+    return Promise.resolve(false)
+  }
+  const draftSettled = () => {
+    if (!ctx.editor || !hasActiveDocumentDraft(ctx.editor)) return true
+    const message = t('appDocumentDraftPending')
+    explicitTarget?.onError?.(message, 'invalid_input')
+    if (!auto) ctx.setStatus(message)
+    return false
+  }
+  if (!draftSettled()) return Promise.resolve(false)
   // A save arriving mid-flight waits for the current one instead of failing.
   // Reuse the finished pass only when it left nothing behind — judged by the
   // composite dirty check (header/section/theme edits do not set dirtyRef), plus
@@ -1058,11 +1192,16 @@ export function save(
   return runSerializedSave(
     async () => {
       const settled = ctx.settleFontSettings ? await ctx.settleFontSettings() : ctx
-      if (docGeneration !== generation) return false
+      if (docGeneration !== generation || !draftSettled()) return false
       return saveOnce(settled, saveAs, auto, newDocName, explicitTarget)
     },
     // an explicit MCP target must always write, never reuse an earlier pass
-    () => !saveAs && !explicitTarget && !ctx.saveIncompleteRef.current && !isDocDirty(ctx),
+    () =>
+      draftSettled() &&
+      !saveAs &&
+      !explicitTarget &&
+      !ctx.saveIncompleteRef.current &&
+      !isDocDirty(ctx),
   )
 }
 
@@ -1071,7 +1210,47 @@ export interface ExplicitSaveTarget {
   path: string
   overwrite: boolean
   /** receives the main process's reason when the write is refused */
-  onError?: (message: string) => void
+  onError?: (message: string, code?: DocsErrorCode) => void
+  /** A lost host response must not be reported as a guaranteed absence of file writes. */
+  onEffect?: (effect: 'writing' | 'written' | 'refused') => void
+}
+
+/** The single result adapter for live-runtime saves and a newly created Word view. */
+export async function saveExplicit(
+  ctx: FileActionContext,
+  { path, overwrite }: { path: string; overwrite: boolean },
+): Promise<DocsSaveOutcome> {
+  let error = ''
+  let errorCode: DocsErrorCode | undefined
+  const effect: { current: 'none' | 'writing' | 'written' | 'refused' } = { current: 'none' }
+  const ok = await save(ctx, false, true, undefined, {
+    path,
+    overwrite,
+    onError: (reason, code) => {
+      error = reason
+      errorCode = code
+    },
+    onEffect: (next) => {
+      effect.current = next
+    },
+  })
+  const pending = !ok || ctx.saveIncompleteRef.current
+  return {
+    ok: ok && !pending,
+    path,
+    pending,
+    committed: effect.current === 'written' ? true : effect.current === 'writing' ? null : false,
+    ...(pending
+      ? {
+          error:
+            error ||
+            (ok
+              ? 'The snapshot was saved, but newer document changes remain unsaved'
+              : 'The document could not be saved'),
+          errorCode: ok ? ('stale_target' as const) : (errorCode ?? ('host_failure' as const)),
+        }
+      : {}),
+  }
 }
 
 /** the parsed fragment flags every node aiChanged (yellow highlight); a boot-time fill is not a reviewable AI edit */
@@ -1089,6 +1268,8 @@ function stripAiChanged(node: PmNode): PmNode {
  * silently dropping the content.
  */
 export function aiDocContentNodes(html: string): PmNode[] {
+  const readOnly = readOnlyHtmlError(html)
+  if (readOnly) throw new Error(readOnly)
   const numIds = { bullet: BLANK_BULLET_NUM_ID, ordered: BLANK_ORDERED_NUM_ID }
   try {
     const nodes = parseHtmlFragment(html, numIds)
@@ -1120,7 +1301,7 @@ export function aiDocContentNodes(html: string): PmNode[] {
 export async function applyAiDocContent(
   ctx: FileActionContext,
   content: AiDocContent,
-): Promise<void> {
+): Promise<DocsSaveOutcome | undefined> {
   const { editor, doc } = ctx
   if (!editor || !doc) return
   const nodes = aiDocContentNodes(content.html)
@@ -1129,6 +1310,7 @@ export async function applyAiDocContent(
     // the document is born with this content: undo must not reach back to empty
     resetEditorHistory(editor)
   }
+  if (content.targetPath) return saveExplicit(ctx, { path: content.targetPath, overwrite: false })
   await save(ctx, false, true, `${content.title}.docx`)
 }
 
@@ -1140,12 +1322,13 @@ async function saveOnce(
   explicitTarget?: ExplicitSaveTarget,
 ): Promise<boolean> {
   const { doc, editor } = ctx
-  if (!doc || !editor) return false
+  if (!doc || !editor || editor.isDestroyed) return false
   ctx.saveInFlightRef.current = true
   ctx.saveIncompleteRef.current = false
   try {
     // a mid-stream save would serialize (and write) a truncated document
     const generation = docGeneration
+    const documentHost = getDocsDocumentHost()
     await waitForFullContent()
     // the wait ended because another document replaced this one: nothing to write
     if (docGeneration !== generation) return false
@@ -1154,8 +1337,15 @@ async function saveOnce(
     // identity snapshot: detects edits that arrive while the save is in flight
     const fontSettingsVersion = ctx.fontSettingsVersionRef?.current
     const docSnapshot = editor.state.doc
+    const stateSnapshot = ctx.getDocumentStateVersion?.()
     const bytes = await buildDocBytes(ctx)
     if (!bytes) return false
+    if (
+      editor.isDestroyed ||
+      docGeneration !== generation ||
+      documentHost !== getDocsDocumentHost()
+    )
+      return false
     const buffer = bytes.buffer.slice(
       bytes.byteOffset,
       bytes.byteOffset + bytes.byteLength,
@@ -1163,22 +1353,70 @@ async function saveOnce(
     // a pathless snapshot may belong to a document that an earlier queued pass
     // already landed on disk — overwrite that file instead of creating another
     let savedPath = doc.filePath ?? pathlessDocSavedPath
+    let savedIdentity = doc.hosted
     let passwordIntentPending = false
     let fullBytes: Uint8Array | undefined
-    if (explicitTarget) {
+    if (doc.hosted) {
+      const host = getDocsDocumentHost()
+      if (!host?.saveDocument) throw new Error('The host does not provide document saving')
+      assertDocumentOperation(host, saveAs ? 'saveAs' : 'save')
+      if (doc.hosted.readOnly) throw new Error('The hosted document is read-only')
+      explicitTarget?.onEffect?.('writing')
+      const result = await host.saveDocument({
+        document: { ...doc.hosted },
+        data: buffer,
+        kind: saveAs ? 'saveAs' : 'save',
+        auto,
+        ...(explicitTarget
+          ? { requestedPath: explicitTarget.path, overwrite: explicitTarget.overwrite }
+          : {}),
+      })
+      if (!result.ok || result.committed !== true || result.pending) {
+        explicitTarget?.onEffect?.(result.committed === false ? 'refused' : 'writing')
+        explicitTarget?.onError?.(
+          result.error ?? 'The host did not commit the document',
+          result.errorCode,
+        )
+        if (result.error) ctx.setStatus(t('appSaveFailed', { error: result.error }))
+        return false
+      }
+      explicitTarget?.onEffect?.('written')
+      if (saveAs && (typeof result.adopt !== 'boolean' || (result.adopt && !result.document))) {
+        ctx.setStatus(
+          t('appSaveFailed', {
+            error: 'The host must explicitly adopt an identified copy or export without switching',
+          }),
+        )
+        return false
+      }
+      // Exporting a copy must not mark the current object saved or change its identity.
+      if (saveAs && result.adopt === false) return true
+      if (result.document) {
+        validateHostedIdentity(result.document)
+        savedIdentity = { ...result.document }
+      }
+      savedPath = null
+    } else if (getDocsDocumentHost()) {
+      throw new Error('The current document has no hosted identity')
+    } else if (explicitTarget) {
       // MCP-driven explicit output: no dialog, no derived name — always write to
       // the caller's path (overwrite policy is enforced in the main process).
-      const result = await window.desktop.saveDocxTo(
+      explicitTarget.onEffect?.('writing')
+      const result = await getDocsHost().saveDocxTo(
         explicitTarget.path,
         buffer,
         explicitTarget.overwrite,
+        doc.filePath,
       )
       if (!result.ok) {
+        if (result.committed === true) explicitTarget.onEffect?.('written')
+        else if (result.committed === false) explicitTarget.onEffect?.('refused')
         ctx.setStatus(t('appSaveFailed', { error: result.error ?? '' }))
         showToast(t('appSaveFailed', { error: result.error ?? '' }), 'error')
-        explicitTarget.onError?.(result.error ?? '')
+        explicitTarget.onError?.(result.error ?? '', result.errorCode)
         return false
       }
+      explicitTarget.onEffect?.('written')
       savedPath = result.path!
       passwordIntentPending = result.passwordIntentPending === true
       if (result.dataUrl) fullBytes = await fetchDocBytes(result.dataUrl)
@@ -1203,15 +1441,12 @@ async function saveOnce(
       // branches. It is a proposal, not a decision: the dialog is the
       // confirmation, and nothing is renamed on disk behind the reader.
       const result = saveAs
-        ? await window.desktop.saveDocxAs(
+        ? await getDocsHost().saveDocxAs(
             dialogNameFor(newDocName, autoName, doc.fileName),
             buffer,
             doc.filePath,
           )
-        : await window.desktop.saveDocxNew(
-            dialogNameFor(newDocName, autoName, doc.fileName),
-            buffer,
-          )
+        : await getDocsHost().saveDocxNew(dialogNameFor(newDocName, autoName, doc.fileName), buffer)
       if (!result.ok) {
         if (result.error) {
           ctx.setStatus(t('appSaveFailed', { error: result.error }))
@@ -1224,7 +1459,7 @@ async function saveOnce(
       if (result.dataUrl) fullBytes = await fetchDocBytes(result.dataUrl)
       if (!doc.filePath) pathlessDocSavedPath = savedPath
     } else {
-      const result = await window.desktop.saveDocx(savedPath, buffer, auto)
+      const result = await getDocsHost().saveDocx(savedPath, buffer, auto)
       if (!result.ok) {
         // external-modified: the main process already prompted (or the autosave
         // deferred to a manual save) — stay dirty, no second dialog/error banner
@@ -1239,8 +1474,16 @@ async function saveOnce(
     }
     // parse before the identity check: a document opened during this await must not be rewritten
     const reparsed = await parseDocxOffThread(fullBytes ?? bytes)
+    // The write belongs to the old document; never attach its path or state to a replacement.
+    if (
+      docGeneration !== generation ||
+      editor.isDestroyed ||
+      documentHost !== getDocsDocumentHost()
+    )
+      return true
     if (
       editor.state.doc !== docSnapshot ||
+      ctx.getDocumentStateVersion?.() !== stateSnapshot ||
       passwordIntentPending ||
       ctx.fontSettingsVersionRef?.current !== fontSettingsVersion
     ) {
@@ -1255,7 +1498,8 @@ async function saveOnce(
           ? {
               ...prev,
               filePath: savedPath,
-              fileName: savedPath?.split(/[\\/]/).pop() ?? prev.fileName,
+              hosted: savedIdentity,
+              fileName: savedIdentity?.name ?? savedPath?.split(/[\\/]/).pop() ?? prev.fileName,
             }
           : prev,
       )
@@ -1277,7 +1521,8 @@ async function saveOnce(
     const rebasedPm = blocksToPmDoc(reparsed.blocks, readSections(reparsed), pmDocOptions(reparsed))
     let unchanged = false
     try {
-      unchanged = editor.state.doc.eq(editor.schema.nodeFromJSON(rebasedPm))
+      const saved = editor.schema.nodeFromJSON(rebasedPm)
+      unchanged = editor.state.doc.eq(saved) || rebaseSavedAttributes(editor, saved)
     } catch {
       /* unrepresentable → rewrite */
     }
@@ -1312,7 +1557,8 @@ async function saveOnce(
             ...prev,
             parsed: reparsed,
             filePath: savedPath,
-            fileName: savedPath?.split(/[\\/]/).pop() ?? prev.fileName,
+            hosted: savedIdentity,
+            fileName: savedIdentity?.name ?? savedPath?.split(/[\\/]/).pop() ?? prev.fileName,
           }
         : prev,
     )
@@ -1384,6 +1630,7 @@ async function saveOnce(
     if (!auto) showToast(t('appSaved'))
     return true
   } catch (err) {
+    explicitTarget?.onError?.(String(err))
     ctx.setStatus(t('appSaveFailed', { error: String(err) }))
     if (!auto) showToast(t('appSaveFailed', { error: String(err) }), 'error')
     return false
@@ -1400,7 +1647,7 @@ async function saveOnce(
  * preview is mounted (visually hidden behind the dialog) as its print source.
  */
 export function printDoc(ctx: FileActionContext): void {
-  if (!ctx.doc) return
+  if (!ctx.doc || !canOutputDocument(ctx)) return
   // the print sheet prints the live preview pages: needs the whole document mounted
   if (isPhasedContentPending()) {
     void waitForFullContent().then(() => printDoc(ctx))
@@ -1449,7 +1696,7 @@ async function printGroupsMerged(
         page.classList.toggle('pv-print-skip', i < g.from || i > g.to)
         page.classList.toggle('pv-print-tail', i === g.to)
       })
-      const part = await window.desktop.printPdfBuffer(g.w, g.h, scale)
+      const part = await getDocsHost().printPdfBuffer(g.w, g.h, scale)
       if (part.ok && part.base64) {
         parts.push(part.base64)
         continue
@@ -1468,7 +1715,7 @@ async function printGroupsMerged(
     appRoot?.classList.remove('pv-exporting')
     pvPages.forEach((page) => page.classList.remove('pv-print-skip', 'pv-print-tail'))
   }
-  const result = await window.desktop.saveMergedPdf(fileName, parts, outPath, links)
+  const result = await getDocsHost().saveMergedPdf(fileName, parts, outPath, links)
   const mixed = groups.some((g) => g.w !== groups[0].w || g.h !== groups[0].h)
   ctx.setStatus(
     result.ok
@@ -1500,11 +1747,18 @@ function deferExportToPreview(ctx: FileActionContext, outPath?: string): Promise
 // in the meantime, and the resume call claims (clears) it before re-entering.
 let printJobActive = false
 
+export function canOutputDocument(ctx: FileActionContext): boolean {
+  if (!ctx.editor || !hasActiveDocumentDraft(ctx.editor)) return true
+  ctx.setStatus(t('appDocumentDraftPending'))
+  return false
+}
+
 /** Resolves true only when a PDF was written to disk. */
 export async function exportPdf(ctx: FileActionContext, outPath?: string): Promise<boolean> {
   const { doc } = ctx
-  if (!doc) return false
+  if (!doc || !canOutputDocument(ctx)) return false
   await waitForFullContent()
+  if (!canOutputDocument(ctx)) return false
   if (printJobActive || ctx.pendingMixedExportRef.current) {
     ctx.setStatus(t('appExportingPdf'))
     return false
@@ -1541,7 +1795,7 @@ export async function exportPdf(ctx: FileActionContext, outPath?: string): Promi
       // preview open but uniform paper: single export at the preview size
       const g = groups[0]
       if (g) {
-        const result = await window.desktop.exportPdf(doc.fileName, g.w, g.h, outPath, scale, links)
+        const result = await getDocsHost().exportPdf(doc.fileName, g.w, g.h, outPath, scale, links)
         if (result.ok) {
           ctx.setStatus(t('appExportedPdf', { path: result.path ?? '' }))
           return true
@@ -1597,8 +1851,8 @@ const IMAGE_EXPORT_DPI = 192
     the picked folder. Resolves true only when every page was written. */
 export async function exportImages(ctx: FileActionContext): Promise<boolean> {
   const { doc } = ctx
-  if (!doc) return false
-  const target = await window.desktop.pickExportImagesTarget()
+  if (!doc || !canOutputDocument(ctx)) return false
+  const target = await getDocsHost().pickExportImagesTarget()
   if (!target) return false
   ctx.setStatus(t('appExportingImages'))
   const fail = (error: string) => {
@@ -1622,10 +1876,10 @@ export async function exportImages(ctx: FileActionContext): Promise<boolean> {
     },
   }
   if (!(await exportPdf(staged, target.pdfPath))) {
-    void window.desktop.takeExportPdf(target.pdfPath)
+    void getDocsHost().takeExportPdf(target.pdfPath)
     return false
   }
-  const pdf = await window.desktop.takeExportPdf(target.pdfPath)
+  const pdf = await getDocsHost().takeExportPdf(target.pdfPath)
   if (!pdf.ok || !pdf.base64) return fail(pdf.error ?? '')
   const baseName = doc.fileName.replace(/\.docx$/i, '')
   try {
@@ -1655,7 +1909,7 @@ export async function exportImages(ctx: FileActionContext): Promise<boolean> {
         for (let o = 0; o < u8.length; o += 0x8000) {
           b64 += String.fromCharCode(...u8.subarray(o, o + 0x8000))
         }
-        const r = await window.desktop.writeExportImage(
+        const r = await getDocsHost().writeExportImage(
           target.dir,
           `${baseName}-${String(i).padStart(pad, '0')}.png`,
           btoa(b64),
@@ -1675,8 +1929,9 @@ export async function exportImages(ctx: FileActionContext): Promise<boolean> {
 /** Resolves true only when an HTML file was written to disk. */
 export async function exportHtml(ctx: FileActionContext, outPath?: string): Promise<boolean> {
   const { doc, editor } = ctx
-  if (!doc || !editor) return false
+  if (!doc || !editor || !canOutputDocument(ctx)) return false
   await waitForFullContent()
+  if (!canOutputDocument(ctx)) return false
   ctx.setStatus(t('appExportingHtml'))
   const root = editor.view.dom as HTMLElement
   const textWidthPx = Number.parseFloat(
@@ -1687,7 +1942,7 @@ export async function exportHtml(ctx: FileActionContext, outPath?: string): Prom
     lang: getLang(),
     textWidthPx: Number.isFinite(textWidthPx) ? textWidthPx : root.clientWidth,
   })
-  const result = await window.desktop.exportHtml(doc.fileName, html, outPath)
+  const result = await getDocsHost().exportHtml(doc.fileName, html, outPath)
   ctx.setStatus(
     result.ok
       ? t('appExportedHtml', { path: result.path ?? '' })
@@ -1701,11 +1956,12 @@ export async function exportHtml(ctx: FileActionContext, outPath?: string): Prom
 /** Resolves true only when a Markdown file was written to disk. */
 export async function exportMarkdown(ctx: FileActionContext, outPath?: string): Promise<boolean> {
   const { doc, editor } = ctx
-  if (!doc || !editor) return false
+  if (!doc || !editor || !canOutputDocument(ctx)) return false
   await waitForFullContent()
+  if (!canOutputDocument(ctx)) return false
   ctx.setStatus(t('appExportingMarkdown'))
   const { markdown, images } = documentToMarkdown(editor)
-  const result = await window.desktop.exportMarkdown(doc.fileName, markdown, images, outPath)
+  const result = await getDocsHost().exportMarkdown(doc.fileName, markdown, images, outPath)
   const dropped = result.imagesDropped ?? 0
   ctx.setStatus(
     result.ok

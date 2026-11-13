@@ -1,10 +1,17 @@
-# Linux packaging: Flatpak, NixOS and Docker
+<!-- Modified for ForaOffice: identify inherited upstream-only packaging recipes. -->
 
-The release pipeline publishes AppImage, deb and rpm artifacts (see
-`apps/shell/electron-builder.cjs`). This directory adds community-maintained
-routes requested in genoffice#1858. All wrap the published release artifacts —
-they do not rebuild the Electron/Rust source tree — so they track the official
-binaries bit for bit.
+# Upstream GenOffice Linux packaging recipes
+
+These inherited Flatpak, NixOS and Docker recipes download published
+[GenOffice binaries](https://github.com/genspark-ai/genoffice/releases).
+They do not build this checkout and do not include ForaOffice's Docs SDK or
+other fork changes. Their GenOffice names, application IDs, publisher details,
+versions and download URLs identify the upstream product they actually install.
+
+For the development SDK built from this fork, follow the
+[Docs SDK guide](../apps/docs/sdk/README.md). Do not use these recipes as
+ForaOffice delivery or acceptance evidence. A future fork recipe must reference
+an actual verified fork artifact and its own appropriate branding.
 
 These files are provided as-is and are not exercised by CI; verify them on a
 real system before relying on them.
@@ -29,8 +36,10 @@ flatpak run com.genoffice.app
 
 Notes:
 
-- File type associations, the icon set and the desktop entry come from the repo
-  (`apps/shell/build/icons`); the deb's payload only provides the app itself.
+- File type associations and the desktop entry come from this recipe. Its icon
+  files currently come from the checkout (`apps/shell/build/icons`); those assets
+  must match the upstream product before distributing this wrapper, since fork
+  branding changes do not change the downloaded deb's identity.
 - The bundled `genoffice` command line works inside the sandbox, e.g.:
   `flatpak run --command=/app/extra/app/opt/GenOffice/resources/cli/genoffice com.genoffice.app --help`
 - The deb carries an in-app updater feed baked for the native install layout;
@@ -53,8 +62,9 @@ nix-build packaging/nix
 ./result/bin/genoffice
 ```
 
-The expression reads the repo's icon files, so run it from a repo checkout. On
-a new release, bump `version` and the `hash` in `nix/genoffice.nix`.
+The expression reads the repo's icon files, so run it from a repo checkout and
+check that the icons still identify the upstream product. On a new upstream
+release, bump `version` and the `hash` in `nix/genoffice.nix`.
 
 Known caveat: the nix store is mounted `nosuid`, so Chromium can abort with
 "The SUID sandbox helper binary was found, but is not configured correctly"

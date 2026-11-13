@@ -1,3 +1,4 @@
+// Modified for ForaOffice: fork product identity and project routing.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
@@ -2446,8 +2447,8 @@ export function SettingsModal({
                   label={t('setGithub')}
                   value={
                     githubStars === null
-                      ? 'github.com/genspark-ai/genoffice'
-                      : `github.com/genspark-ai/genoffice · ★ ${formatStars(githubStars)}`
+                      ? 'github.com/lanbingtech/foraoffice'
+                      : `github.com/lanbingtech/foraoffice · ★ ${formatStars(githubStars)}`
                   }
                   action={
                     <button

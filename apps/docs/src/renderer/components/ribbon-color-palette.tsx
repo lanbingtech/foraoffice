@@ -1,4 +1,5 @@
-import { ColorPicker } from '@genoffice/ui'
+// Modified for ForaOffice from GenOffice v0.12.852.
+import { ColorPicker } from '@genoffice/ui/editor'
 import { useI18n, type StringKey } from '../i18n/locale'
 
 const THEME_COLORS: Array<{ nameKey: StringKey; hex: string }> = [

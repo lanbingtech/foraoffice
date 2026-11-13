@@ -1,3 +1,13 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
+import {
+  getDocsHost,
+  getDocsHarness,
+  getDocsResources,
+  getDocsDocumentHost,
+  getDocsCheckers,
+} from './host/docs-host'
+import type { DocsEditorAction, DocsAiOperation } from '../shared/editor-action'
+import { submitDocsEditorAction } from './runtime/editor-actions'
 import { scriptFontHtml } from './editor/script-fonts'
 import { carryDocSeen } from './ai/tools'
 import { DOC_CSS_COMMITTED_EVENT, WRAP_WIDTHS_COMMITTED_EVENT } from './editor/cjk-punct-shrink'
@@ -11,8 +21,15 @@ import {
   useReducer,
   useRef,
   useState,
+  useSyncExternalStore,
 } from 'react'
+import { createDocsFileMenu, type DocsEditorUi } from './sdk/file-menu'
+import { createDocsRibbon } from './sdk/ribbon'
+import { QUICK_ACCESS_ICON_SIZE } from './components/ribbon-metrics'
+import { useDocsAutoSave } from './auto-save'
+import { hasActiveDocumentDraft } from './runtime/draft-landing'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, SetStateAction } from 'react'
+import { flushSync } from 'react-dom'
 import { EditorContent, useEditor } from '@tiptap/react'
 import type { Editor } from '@tiptap/core'
 import { handleDocsControl, type ControlRequest } from './control'
@@ -24,9 +41,8 @@ import {
   aiPanelInitiallyOpen,
   rememberAiPanelOpen,
   createZoomWheelClassifier,
-  useAutoSavePref,
   useAiSidebarEnabled,
-} from '@genoffice/ui'
+} from '@genoffice/ui/editor'
 import { commentAnchors, commentIdsAt, wordRangeAtCaret } from './editor/comments'
 import { setFieldInstr, toggleAllFieldCodes, type FieldRange } from './editor/field-codes'
 import { linkTarget } from './editor/link-actions'
@@ -98,21 +114,15 @@ import {
   type WatermarkSpec,
   type CommentImage,
 } from '@genoffice/docx-engine'
-import type {
-  AiDocContent,
-  AiSettings,
-  MenuCommand,
-  MergeDataSource,
-  OpenDocxResult,
-} from '../shared/ipc'
-import { AI_PROVIDERS } from '../shared/ipc'
+import type { AiDocContent, MenuCommand, MergeDataSource, OpenDocxResult } from '../shared/ipc'
 import {
   buildMailMergeFiles,
   type MailMergeRequest,
   type MailMergeResponse,
 } from './mail-merge/output'
 import { ZoteroDocumentController } from './zotero/controller'
-import { AiPanel, aiRevisionAuthor } from './ai/AiPanel'
+import { aiRevisionAuthor } from './ai/revision-author'
+import type { DocsAgentUi } from './agent-ui'
 import type { AiCommentsAccess, AiDocExtras, AiHeaderFooterAccess } from './ai/tools'
 import type { AiStyleInfo } from './ai/style-ops'
 import { applyResolvedPageSetup, describeSection, type AiPageSetupAccess } from './ai/page-setup'
@@ -502,6 +512,7 @@ import {
 } from './doc-state'
 import {
   applyAiDocContent as applyAiDocContentImpl,
+  canOutputDocument,
   exportPdf as exportPdfImpl,
   exportHtml as exportHtmlImpl,
   exportMarkdown as exportMarkdownImpl,
@@ -510,8 +521,10 @@ import {
   newFile as newFileImpl,
   printDoc as printDocImpl,
   save as saveImpl,
+  saveExplicit,
   suggestedSaveAsName,
   writeRecoveryCopy as writeRecoveryCopyImpl,
+  currentDocGeneration,
   type FileActionContext,
   type PendingPdfExport,
 } from './file-actions'
@@ -543,6 +556,12 @@ const WORD_COUNT_THROTTLE_MS = 400
 /** consecutive follow-up passes a pass may schedule for itself */
 import { runHeadlessDocumentExport } from './headless-export'
 import { installMcpBridge } from './mcp-bridge'
+import { createDocsRuntime, type RuntimeDocument } from './runtime/docs-runtime'
+import { createDocsCommandRouter } from './runtime/command-router'
+import { createDocsInspection } from './sdk/inspection'
+import { createDocsAnnotations } from './sdk/annotations'
+import type { DocsDocumentCommands } from '../shared/document-host'
+import { findNumId } from './ai/protocol'
 import {
   clampDocsZoom,
   DOCS_ZOOM_MAX,
@@ -725,16 +744,6 @@ function blockNoteScanRuns(b: Block): NonNullable<Block['runs']> {
   return out
 }
 
-const DEFAULT_SETTINGS: AiSettings = {
-  provider: 'anthropic',
-  providers: Object.fromEntries(
-    AI_PROVIDERS.map((p) => [
-      p.id,
-      { apiKey: '', model: p.defaultModel, baseUrl: p.needsBaseUrl ? '' : undefined },
-    ]),
-  ) as AiSettings['providers'],
-}
-
 /** Table menu items that are plain editor commands (the dialogs and Distribute Rows are handled inline) */
 const TABLE_MENU_COMMANDS: Partial<Record<MenuCommand, (widthPx: number) => Command>> = {
   'table-insert-rows-above': (w) => insertRowsOrColumns(1, 'above', w),
@@ -784,7 +793,34 @@ function shadowPlanDiff(
   return diffs
 }
 
-export function App() {
+export interface DocsAppRuntime {
+  ui: DocsEditorUi
+  documents: DocsDocumentCommands
+  runtime: ReturnType<typeof createDocsRuntime>
+  commands: ReturnType<typeof createDocsCommandRouter>
+  inspection: ReturnType<typeof createDocsInspection>
+  annotations: ReturnType<typeof createDocsAnnotations>
+}
+
+export function App({
+  onRuntime,
+  agentUi,
+  embedded = false,
+}: {
+  onRuntime?: (value: DocsAppRuntime | null) => void
+  agentUi?: DocsAgentUi
+  embedded?: boolean
+} = {}) {
+  const AgentPanel = agentUi?.Panel
+  const nativeAgentEnabled = !!agentUi
+  const externalActionRef = useRef<
+    | ((
+        kind: DocsEditorAction['kind'],
+        instruction: string,
+        operation?: DocsAiOperation,
+      ) => Promise<void>)
+    | null
+  >(null)
   // subscribe to language switches for re-render; strings all go through module-level t, so memoized callbacks never capture stale closures
   const { lang } = useI18n()
   const [doc, setDoc] = useState<DocState | null>(null)
@@ -795,6 +831,7 @@ export function App() {
     null,
   )
   const bootHandledRef = useRef(false)
+  const [bootComplete, setBootComplete] = useState(false)
   /** password prompt for an ECMA-376 encrypted docx; submit retries via openDocxDecrypt */
   const [docPwdPrompt, setDocPwdPrompt] = useState<{
     path: string
@@ -812,8 +849,9 @@ export function App() {
     errorKey: '' | 'appDocPwdWrong'
   } | null>(null)
   const [_recent, setRecent] = useState<string[]>([])
-  const [settings, setSettings] = useState<AiSettings>(DEFAULT_SETTINGS)
-  const [showAi, setShowAi] = useState(() => aiPanelInitiallyOpen('aidocs.showAi'))
+  const [showAi, setShowAi] = useState(
+    () => nativeAgentEnabled && aiPanelInitiallyOpen('aidocs.showAi'),
+  )
   // Settings › "show the AI sidebar" off hides the panel and its rail the way Word
   // treats the Copilot pane: an explicit Ask-AI action (ribbon, context menu,
   // shortcut, preset) still opens the panel for this document, and closing it
@@ -1105,6 +1143,9 @@ export function App() {
   const [themeColorsDirty, setThemeColorsDirty] = useState(false)
   const [commentComposing, setCommentComposing] = useState(false)
   const [trackChanges, setTrackChanges] = useState(false)
+  useEffect(() => {
+    getDocsHost().reportDocumentPath?.(doc?.filePath ?? null)
+  }, [doc?.filePath])
   // only the document toggle (ribbon / status bar / shortcut) maps to w:trackRevisions
   const [trackRevisionsDirty, setTrackRevisionsDirty] = useState(false)
   const setTrackChangesByUser = useCallback((on: boolean) => {
@@ -1179,7 +1220,11 @@ export function App() {
     otherName: string
     entries: CompareEntry[]
   } | null>(null)
-  const [autoSave, setAutoSave] = useAutoSavePref('aidocs.autoSave', window.desktop)
+  const {
+    autoSave,
+    setAutoSave,
+    canToggle: canToggleAutoSave,
+  } = useDocsAutoSave(doc?.hosted?.readOnly)
   // tab closed but this renderer kept alive (shell freeze workaround): go inert
   const [tornDown, setTornDown] = useState(false)
   const [aiPreset, setAiPreset] = useState<{
@@ -1187,6 +1232,31 @@ export function App() {
     nonce: number
     autoRun?: boolean
   } | null>(null)
+  const requestAgentAction = useCallback(
+    (kind: DocsEditorAction['kind'], instruction: string, operation?: DocsAiOperation) => {
+      if (nativeAgentEnabled) {
+        setShowAi(true)
+        if (instruction) setAiPreset({ text: instruction, nonce: Date.now(), autoRun: true })
+        return
+      }
+      const submit = externalActionRef.current
+      const result = submit
+        ? submit(kind, instruction, operation)
+        : Promise.reject(new Error('The document runtime is not ready'))
+      void result.catch((error: unknown) =>
+        setStatus(
+          t('appExternalAgentFailed', {
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        ),
+      )
+    },
+    [nativeAgentEnabled],
+  )
+  const toggleAgentPanel = useCallback(() => {
+    if (nativeAgentEnabled) setShowAi((value) => !value)
+    else requestAgentAction('ask', '')
+  }, [nativeAgentEnabled, requestAgentAction])
   // selection-scoped AI edit queue (anchors live as editor decorations)
   const [editQueue, setEditQueue] = useState<DocsEditQueueItem[]>([])
   const editQueueRef = useRef(editQueue)
@@ -1234,8 +1304,8 @@ export function App() {
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null)
   const ctxSeq = useRef(0)
   useEffect(() => {
-    window.desktop.armContextMenu?.()
-    return window.desktop.onContextMenuRequest?.((req) => {
+    getDocsHost().armContextMenu?.()
+    return getDocsHost().onContextMenuRequest?.((req) => {
       setCtxMenu((prev) =>
         prev && prev.seq === req.seq
           ? {
@@ -1249,8 +1319,8 @@ export function App() {
     })
   }, [])
   const [viewImage, setViewImage] = useState<string | null>(null)
-  useEffect(() => window.desktop.onViewImage?.((src) => setViewImage(src)), [])
-  const saveImageAs = useCallback((src: string) => void window.desktop.saveImageAs(src), [])
+  useEffect(() => getDocsHost().onViewImage?.((src) => setViewImage(src)), [])
+  const saveImageAs = useCallback((src: string) => void getDocsHost().saveImageAs(src), [])
   const [showFontDialog, setShowFontDialog] = useState(false)
   const [showParaDialog, setShowParaDialog] = useState(false)
   /** label the reader gives a span they are withholding from the model */
@@ -1483,7 +1553,7 @@ export function App() {
             for (const src of htmlImgSrcs.slice(0, 10)) {
               const ed = editorRef.current
               if (!ed) return
-              const fetched = await window.desktop.fetchImage(src)
+              const fetched = await getDocsHost().fetchImage(src)
               if (fetched) {
                 await insertImageFromDataUrl(
                   ed,
@@ -1552,7 +1622,6 @@ export function App() {
     editor.storage.trackChanges.trackMoves = tcOptions.trackMoves
     editor.storage.trackChanges.trackFormatting = tcOptions.trackFormatting
     editor.view.dispatch(editor.state.tr.setMeta('addToHistory', false))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tcOptions, editor])
 
   // every header/footer consumer (strips, gaps, heights, preview, AI, save) reads
@@ -1806,15 +1875,12 @@ export function App() {
   )
 
   useEffect(() => {
-    void window.desktop.getRecentFiles().then(setRecent)
-    const loadSettings = () => void window.desktop.getAiSettings().then(setSettings)
-    loadSettings()
-    return window.desktop.onAiSettingsChanged?.(loadSettings)
+    void getDocsHost().getRecentFiles().then(setRecent)
   }, [])
 
   useEffect(() => {
-    rememberAiPanelOpen('aidocs.showAi', showAi)
-  }, [showAi])
+    if (nativeAgentEnabled) rememberAiPanelOpen('aidocs.showAi', showAi)
+  }, [showAi, nativeAgentEnabled])
 
   useEffect(() => {
     saveLeftPane(leftPane)
@@ -1831,7 +1897,7 @@ export function App() {
   // userData/spell-diag.log for support to collect (never breaks the app)
   const spellDiag = (line: string) => {
     try {
-      window.desktop.spellDiag?.(line)
+      getDocsHost().spellDiag?.(line)
     } catch {
       /* diagnostics only */
     }
@@ -1975,7 +2041,7 @@ export function App() {
           const ch = node.data[after.anchorOffset - 1]
           if (ch === ' ' || ch === '\u00a0') node.deleteData(after.anchorOffset - 1, 1)
         }
-        void window.desktop
+        void getDocsHost()
           .respellKick()
           .catch(() => undefined)
           .then(async () => {
@@ -2081,6 +2147,7 @@ export function App() {
   const writeLocked = !!writeProtection?.hash && !modifyUnlocked
   /** body is read-only (readOnly/forms/comments restriction or write lock) */
   const isProtected =
+    doc?.hosted?.readOnly === true ||
     writeLocked ||
     editRestriction === 'readOnly' ||
     editRestriction === 'forms' ||
@@ -2100,14 +2167,14 @@ export function App() {
   // StreamingTailGuardExtension; saves wait for the full content).
   useEffect(() => {
     if (!editor) return
-    editor.setEditable(!readMode && !isProtected)
+    editor.setEditable(!readMode && !isProtected && !doc?.hosted?.readOnly, false)
     if (!readMode) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setReadMode(false)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [editor, readMode, isProtected])
+  }, [editor, readMode, isProtected, doc?.hosted?.readOnly])
 
   // Track Changes: the recorder plugin reads its toggle from extension storage
   useEffect(() => {
@@ -2141,12 +2208,12 @@ export function App() {
     document.title = doc ? doc.fileName : 'GenOffice Docs'
   }, [doc])
 
-  useEffect(() => window.desktop.onTeardown?.(() => setTornDown(true)), [])
+  useEffect(() => getDocsHost().onTeardown?.(() => setTornDown(true)), [])
 
   // keep the native View menu's checkmarks (AI Sidebar / Dark Mode) in sync
   // (the IPC field keeps its historical darkCanvas name)
   useEffect(() => {
-    window.desktop.reportViewMenuState?.({ aiSidebar: showAi, darkCanvas: darkPage })
+    getDocsHost().reportViewMenuState?.({ aiSidebar: showAi, darkCanvas: darkPage })
   }, [showAi, darkPage])
 
   // Crash-recovery copy: while the document is dirty, push a serialized
@@ -2162,11 +2229,6 @@ export function App() {
 
   // MCP bridge: let an external agent drive this visible editor. Commands arrive
   // from the shell main process and run against the live ctx (refs refresh per render).
-  useEffect(() => {
-    if (tornDown || !editor) return
-    return installMcpBridge({ getCtx: () => fileCtxRef.current })
-  }, [tornDown, editor])
-
   // Recompute the document-level line-height factor while editing:
   // docStyleCss decides it once at parse time, so typing CJK into a blank document
   // kept the Western factor until save/reopen (whole page ~8% shorter than the file).
@@ -2233,6 +2295,7 @@ export function App() {
     null,
   )
   fileCtxRef.current = {
+    commitDocumentState: (operation) => flushSync(operation),
     editor,
     doc,
     dirtyRef,
@@ -2244,7 +2307,9 @@ export function App() {
     setShowPrintDialog,
     setStatus,
     setRecent,
-    setShowAi,
+    setShowAi: (value) => {
+      if (nativeAgentEnabled) setShowAi(value)
+    },
     setDoc,
     setAiPanelKey,
     setDocCss,
@@ -2383,7 +2448,8 @@ export function App() {
     const outcome = await loadFileImpl(fileCtxRef.current, result)
     // a failed open with no document yet (boot, or the open that superseded the
     // boot open) must land on blank instead of the "Opening…" screen
-    if (outcome === 'failed' && !fileCtxRef.current.doc) await newFileImpl(fileCtxRef.current)
+    if (outcome === 'failed' && !fileCtxRef.current.doc && !getDocsDocumentHost())
+      await newFileImpl(fileCtxRef.current)
     return outcome
   }, [])
   const resetFile = useCallback(() => newFileImpl(fileCtxRef.current), [])
@@ -2398,7 +2464,7 @@ export function App() {
   // file renamed externally (renamed in the shell Home list) → sync the save path and title-bar file name (content unchanged)
   useEffect(
     () =>
-      window.desktop.onRenamedDocx(({ oldPath, newPath }) => {
+      getDocsHost().onRenamedDocx(({ oldPath, newPath }) => {
         setDoc((prev) =>
           prev && prev.filePath === oldPath
             ? {
@@ -2414,7 +2480,7 @@ export function App() {
 
   useEffect(() => {
     if (!editor) return
-    const unsubscribe = window.desktop.onOpenDocx((result) => {
+    const unsubscribe = getDocsHost().onOpenDocx((result) => {
       void commitOpenedFile(result)
     })
     // With no pending file the window lands directly in the editor on a blank document
@@ -2422,10 +2488,10 @@ export function App() {
     // effect twice but the pending queues can only be consumed once, so the consume
     // Promise lives in a ref and its result is processed only once.
     bootPendingRef.current ??= Promise.all([
-      window.desktop.consumePendingOpenDocx(),
+      getDocsHost().consumePendingOpenDocx(),
       // Still consume the one-shot new-blank flag so it doesn't leak into the next open
-      window.desktop.consumeNewBlankDoc(),
-      window.desktop.consumeAiDocContent(),
+      getDocsHost().consumeNewBlankDoc(),
+      getDocsHost().consumeAiDocContent(),
     ])
     void bootPendingRef.current
       .then(async ([pending, , aiContent]) => {
@@ -2436,62 +2502,106 @@ export function App() {
         // line explaining why (github.com/genspark-ai/genoffice issue #102).
         // 'password': the prompt is up; its cancel path lands on blank instead.
         const outcome = pending ? await loadFile(pending) : 'canceled'
-        if (outcome === 'canceled') await resetFile()
+        if (outcome === 'canceled' && !getDocsDocumentHost()) await resetFile()
         if (aiContent && !pending) {
           // fileCtxRef refreshes per render: wait until resetFile's setDoc landed
           for (let i = 0; i < 100 && !fileCtxRef.current.doc; i++) {
             await new Promise((resolve) => setTimeout(resolve, 20))
           }
-          await applyAiDocContentImpl(fileCtxRef.current, aiContent)
+          try {
+            const outcome = await applyAiDocContentImpl(fileCtxRef.current, aiContent)
+            if (aiContent.creationId)
+              getDocsHost().reportCreatedDocument({
+                creationId: aiContent.creationId,
+                outcome: outcome ?? {
+                  ok: false,
+                  committed: false,
+                  pending: true,
+                  error: 'The created Word document was not saved',
+                  errorCode: 'unavailable',
+                },
+              })
+          } catch (error) {
+            if (!aiContent.creationId) throw error
+            getDocsHost().reportCreatedDocument({
+              creationId: aiContent.creationId,
+              outcome: {
+                ok: false,
+                committed: null,
+                pending: true,
+                error: error instanceof Error ? error.message : String(error),
+                errorCode: 'host_failure',
+              },
+            })
+          }
         }
       })
       // Open failures also land on a blank document, or the tab stays at "Opening…" forever
-      .catch(() => {
+      .catch((error: unknown) => {
         if (bootHandledRef.current) return
         bootHandledRef.current = true
-        void resetFile().catch(() => {})
+        if (getDocsDocumentHost()) setStatus(t('appOpenFailed', { error: String(error) }))
+        if (!getDocsDocumentHost()) void resetFile().catch(() => {})
       })
+      .finally(() => setBootComplete(true))
     return unsubscribe
   }, [commitOpenedFile, editor, loadFile, resetFile])
 
+  const documentActionFailed = useCallback((error: unknown, creating = false) => {
+    setStatus(
+      creating
+        ? t('appNewFailed', { error: String(error) })
+        : t('appOpenFailed', { error: String(error) }),
+    )
+    return false
+  }, [])
+  const confirmCurrentDocumentReplace = useCallback(() => {
+    const currentEditor = fileCtxRef.current.editor
+    return currentEditor && !currentEditor.isDestroyed
+      ? getDocsHost().confirmDocumentReplace()
+      : Promise.resolve(false)
+  }, [])
   const openFile = useCallback(
     () =>
       runGuardedCandidate(
-        () => window.desktop.confirmDocumentReplace(),
-        () => window.desktop.openDocx(),
+        confirmCurrentDocumentReplace,
+        () => getDocsHost().openDocx(),
         commitOpenedFile,
         replacesDocument,
-      ),
-    [commitOpenedFile],
+      ).catch(documentActionFailed),
+    [commitOpenedFile, documentActionFailed, confirmCurrentDocumentReplace],
   )
 
   /** new document from the built-in blank template (AI can then generate into it) */
   const newFile = useCallback(
-    () => runGuardedDocumentAction(() => window.desktop.confirmDocumentReplace(), resetFile),
-    [resetFile],
+    () =>
+      runGuardedDocumentAction(confirmCurrentDocumentReplace, resetFile).catch((error: unknown) =>
+        documentActionFailed(error, true),
+      ),
+    [resetFile, documentActionFailed, confirmCurrentDocumentReplace],
   )
 
   const openRecent = useCallback(
     (path: string) =>
       runGuardedCandidate(
-        () => window.desktop.confirmDocumentReplace(),
-        () => window.desktop.openDocxPath(path),
+        confirmCurrentDocumentReplace,
+        () => getDocsHost().openDocxPath(path),
         commitOpenedFile,
         replacesDocument,
-      ),
-    [commitOpenedFile],
+      ).catch(documentActionFailed),
+    [commitOpenedFile, documentActionFailed, confirmCurrentDocumentReplace],
   )
 
   /** decrypt-and-open retry loop for the password prompt (wrong password stays in the dialog) */
   const submitDocPwd = async () => {
     if (!docPwdPrompt || docPwdPrompt.busy || !docPwdPrompt.value) return
     setDocPwdPrompt({ ...docPwdPrompt, busy: true, errorKey: '' })
-    const res = await window.desktop.openDocxDecrypt(docPwdPrompt.path, docPwdPrompt.value)
+    const res = await getDocsHost().openDocxDecrypt(docPwdPrompt.path, docPwdPrompt.value)
     if (res.ok) {
       // Open deferred the replace guard for the encrypted file (see
       // replacesDocument); it runs once, here, now that a real document exists.
       // Declining keeps both the prompt and the current document.
-      if (!(await window.desktop.confirmDocumentReplace())) {
+      if (!(await getDocsHost().confirmDocumentReplace())) {
         setDocPwdPrompt((current) => (current ? { ...current, busy: false } : current))
         return
       }
@@ -2519,7 +2629,7 @@ export function App() {
     let changed = false
     if (result.openPassword !== undefined) {
       const cur = fileCtxRef.current.doc
-      const res = await window.desktop.setDocPassword(cur?.filePath ?? null, result.openPassword)
+      const res = await getDocsHost().setDocPassword(cur?.filePath ?? null, result.openPassword)
       if (res.ok) {
         setDoc((d) => (d ? { ...d, encrypted: !!result.openPassword } : d))
         // the on-disk file only changes on the next save
@@ -2573,7 +2683,7 @@ export function App() {
 
   /** open the file dialog and read the recipient list the user chose */
   const pickMergeDataSource = useCallback(async () => {
-    const result = await window.desktop.pickMergeDataSource()
+    const result = await getDocsHost().pickMergeDataSource()
     if (!result) return
     if (!result.ok) {
       setStatus(result.error)
@@ -2594,7 +2704,7 @@ export function App() {
       try {
         const files = await buildMailMergeFiles(fileCtxRef.current, request)
         if (files.length === 0) return { ok: false, error: t('appMergeNothingToWrite') }
-        const written = await window.desktop.writeMergeOutput({
+        const written = await getDocsHost().writeMergeOutput({
           mode: request.mode,
           files: files.map((file) => ({
             name: file.name,
@@ -2623,10 +2733,14 @@ export function App() {
    * or synced is not ours to do quietly.
    */
   const nameWithAi = useCallback(async () => {
-    const proposed = await suggestedSaveAsName(fileCtxRef.current)
+    if (!nativeAgentEnabled) {
+      requestAgentAction('name_document', '', { operationId: 'name_document', parameters: {} })
+      return
+    }
+    const proposed = await suggestedSaveAsName(fileCtxRef.current, agentUi!.suggestFileName)
     if (!proposed) return
     await saveImpl(fileCtxRef.current, true, false, proposed)
-  }, [])
+  }, [nativeAgentEnabled, requestAgentAction, agentUi])
 
   // inserting a section break needs one save for the new section to take effect; the
   // flag is consumed in the render after state commit, guaranteeing the save closure
@@ -2959,7 +3073,7 @@ export function App() {
 
   useEffect(
     () =>
-      window.desktop.onZoteroRequest(async (request) => {
+      getDocsHost().onZoteroRequest(async (request) => {
         try {
           const activeEditor = editorRef.current
           if (!activeEditor) throw new Error('No active GenOffice document')
@@ -2974,9 +3088,9 @@ export function App() {
             })
           zoteroControllerRef.current = controller
           const result = await controller.handle(request)
-          window.desktop.respondToZotero({ requestId: request.requestId, ok: true, result })
+          getDocsHost().respondToZotero({ requestId: request.requestId, ok: true, result })
         } catch (error) {
-          window.desktop.respondToZotero({
+          getDocsHost().respondToZotero({
             requestId: request.requestId,
             ok: false,
             error: error instanceof Error ? error.message : String(error),
@@ -3090,7 +3204,7 @@ export function App() {
     if (headlessExportStartedRef.current) return
     headlessExportStartedRef.current = true
     void (async () => {
-      const target = await window.desktop.consumeHeadlessExport()
+      const target = await getDocsHost().consumeHeadlessExport()
       if (!target) return
       const report = await runHeadlessDocumentExport(
         target.outPath,
@@ -3103,7 +3217,7 @@ export function App() {
         },
         target.format === 'html' ? exportHtml : target.format === 'md' ? exportMarkdown : exportPdf,
       )
-      window.desktop.headlessExportDone(report)
+      getDocsHost().headlessExportDone(report)
     })()
   }, [exportPdf, exportHtml, exportMarkdown])
 
@@ -5859,6 +5973,9 @@ export function App() {
     singleHfPx,
     hfHeightsOf,
     measureSingleFlow,
+    colMode,
+    hasVertical,
+    watermarkDirty,
     colGeomsFor,
     header,
     footer,
@@ -6058,9 +6175,11 @@ export function App() {
     )
       return
     localStorage.setItem(AI_REWRITE_ACK_KEY, '1')
-    setShowAi(true)
-    setAiPreset({ text: t('ribbonEditorPrompt'), nonce: Date.now(), autoRun: true })
-  }, [])
+    requestAgentAction('edit', t('ribbonEditorPrompt'), {
+      operationId: 'proofread_document',
+      parameters: {},
+    })
+  }, [requestAgentAction])
 
   // "has unsaved changes" check shared by the close guard and autosave; refreshed on every
   // render (all edit paths forceRender), so the guard's query reads the latest value
@@ -6070,14 +6189,14 @@ export function App() {
 
   // close guard: the main process queries dirty state before closing a tab/window; choosing "Save" runs a full save and reports back
   useEffect(() => {
-    const offCheck = window.desktop.onCloseCheck?.(() => {
-      window.desktop.reportCloseCheck({
+    const offCheck = getDocsHost().onCloseCheck?.(() => {
+      getDocsHost().reportCloseCheck({
         dirty: !!doc && (anyDirtyRef.current || dirtyRef.current),
-        autoSave: autoSave && !!doc?.filePath,
+        autoSave: autoSave && !!(doc?.filePath || doc?.hosted),
         filePath: doc?.filePath ?? null,
       })
     })
-    const offSave = window.desktop.onCloseSaveRequest?.(() => {
+    const offSave = getDocsHost().onCloseSaveRequest?.(() => {
       // Closing must not report success while edits are still unpersisted, so a
       // save that raced with typing is retried until the file catches up.
       // save(false) never prompts — a pathless first save lands silently in the
@@ -6088,8 +6207,8 @@ export function App() {
         wasIncomplete: () => saveIncompleteRef.current,
         hasPath: () => true,
       }).then(
-        (ok) => window.desktop.reportCloseSaveResult(ok === true),
-        () => window.desktop.reportCloseSaveResult(false),
+        (ok) => getDocsHost().reportCloseSaveResult(ok === true),
+        () => getDocsHost().reportCloseSaveResult(false),
       )
     })
     return () => {
@@ -6100,7 +6219,9 @@ export function App() {
 
   // autosave: every 30s and on window blur, silently persist pending changes
   useEffect(() => {
-    if (tornDown || !autoSave || !doc || !doc.filePath) return
+    const policy = getDocsDocumentHost()?.autoSave
+    if (tornDown || !autoSave || !doc || (!doc.filePath && !doc.hosted) || doc.hosted?.readOnly)
+      return
     const tick = () => {
       if (!isDocDirty(fileCtxRef.current)) return
       if (editor?.view.composing) return // don't interrupt IME input
@@ -6108,8 +6229,8 @@ export function App() {
       if (active?.closest('td[contenteditable], .doc-textbox')) return // mid in-place edit
       void save(false, true)
     }
-    const id = window.setInterval(tick, 30_000)
-    window.addEventListener('blur', tick)
+    const id = window.setInterval(tick, Math.max(1000, policy?.intervalMs ?? 30_000))
+    if (policy?.onBlur !== false) window.addEventListener('blur', tick)
     return () => {
       window.clearInterval(id)
       window.removeEventListener('blur', tick)
@@ -6123,6 +6244,7 @@ export function App() {
   useEffect(() => {
     const handler = () => {
       const cur = fileCtxRef.current
+      if (getDocsDocumentHost()) return
       if (!cur.doc || cur.doc.filePath || !anyDirtyRef.current) return
       if (editor?.view.composing) return
       void save(false, true)
@@ -6142,7 +6264,7 @@ export function App() {
     }
     const handler = (e: KeyboardEvent) => {
       const canEdit = !!editor?.isEditable && focusInEditor()
-      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
         e.preventDefault()
         void save(e.shiftKey)
       }
@@ -6386,6 +6508,7 @@ export function App() {
     insertNote,
     insertField,
     runAiProofread,
+    toggleAgentPanel,
     trackChangesForced,
     isProtected,
     toggleTrackChangesByUser,
@@ -6404,7 +6527,7 @@ export function App() {
 
   // native application menu → renderer commands
   useEffect(() => {
-    return window.desktop.onMenuCommand((command, payload) => {
+    return getDocsHost().onMenuCommand((command, payload) => {
       const align = (value: 'left' | 'center' | 'right' | 'justify') =>
         editor && setSelectionAlign(editor, value)
       switch (command) {
@@ -6454,7 +6577,7 @@ export function App() {
           zoomFit('multi')
           break
         case 'toggle-ai':
-          setShowAi((v) => !v)
+          toggleAgentPanel()
           break
         case 'toggle-dark':
           updateDarkPage(!darkPageRef.current)
@@ -6617,6 +6740,7 @@ export function App() {
     openStats,
     startNewComment,
     runAiProofread,
+    toggleAgentPanel,
     toggleTableGridlines,
     tableSectionWidthPx,
     updateDarkPage,
@@ -6705,7 +6829,7 @@ export function App() {
       // no preventDefault: Blink must still request a context menu so the main
       // process receives the misspelling data it relays to this menu
       const seq = ++ctxSeq.current
-      window.desktop.claimContextMenu?.(seq)
+      getDocsHost().claimContextMenu?.(seq)
       // keyboard-invoked (Shift+F10 / menu key): no pointer, open at the caret
       const fromKeyboard = e.clientX === 0 && e.clientY === 0
       let x = e.clientX
@@ -6969,7 +7093,7 @@ export function App() {
       case 'picture':
         if (sub) {
           void (async () => {
-            const picked = await window.desktop.pickImage()
+            const picked = await getDocsHost().pickImage()
             if (!picked || !hfEditorRef.current) return
             const dataUrl = `data:${picked.mime};base64,${picked.base64}`
             const natural = await imageSizeOf(dataUrl)
@@ -7136,8 +7260,7 @@ export function App() {
     editor.view.focus()
   }
   const askSendNow = (text: string): void => {
-    setShowAi(true)
-    setAiPreset({ text, nonce: Date.now(), autoRun: true })
+    requestAgentAction('edit', text)
   }
 
   // AI comment tools run the same review-actions code paths as the comments pane
@@ -7508,6 +7631,267 @@ export function App() {
     [editor],
   )
 
+  const hostedId = doc?.hosted?.id
+  const runtimeIdentity = useMemo(
+    () => ({ generation: aiPanelKey, hostedId }),
+    [aiPanelKey, hostedId],
+  )
+  const sideState = fileCtxRef.current
+  const authoredStores = [
+    sideState.comments,
+    sideState.footnotes,
+    sideState.endnotes,
+    sideState.hfVariants,
+    sideState.sectionHfEdits,
+    sideState.hfLinks,
+    sideState.sections,
+    sideState.styleUpserts,
+    sideState.pendingNumbering,
+    sideState.defaultFonts,
+    sideState.pageColor,
+    sideState.titlePg,
+    sideState.evenOddHf,
+    sideState.mirrorMargins,
+    sideState.trackChanges,
+    sideState.protection,
+    sideState.writeProtection,
+    sideState.removePersonalInfo,
+    sideState.inkAnnotations,
+    sideState.watermark,
+    sideState.watermarkPicture,
+    sideState.watermarkStyle,
+    sideState.sources,
+    sideState.zoteroDocumentData,
+    sideState.themeFonts,
+    sideState.themeColors,
+    sideState.section,
+    sideState.pgNumEdit,
+    sideState.trailingStartType,
+  ]
+  const authoredStoresRef = useRef(authoredStores)
+  if (!authoredStores.every((value, index) => value === authoredStoresRef.current[index]))
+    authoredStoresRef.current = authoredStores
+  const runtimeStateVersion = authoredStoresRef.current
+  const runtimeDocumentRef = useRef<RuntimeDocument | null>(null)
+  runtimeDocumentRef.current =
+    editor && doc && !tornDown
+      ? {
+          editor,
+          identity: runtimeIdentity,
+          stateVersion: runtimeStateVersion,
+          numIds: {
+            bullet:
+              findNumId(doc.parsed.blocks, 'bullet') ?? (doc.isBlank ? BLANK_BULLET_NUM_ID : null),
+            ordered:
+              findNumId(doc.parsed.blocks, 'ordered') ??
+              (doc.isBlank ? BLANK_ORDERED_NUM_ID : null),
+          },
+          track: trackChanges ? { author: aiRevisionAuthor() } : undefined,
+          autoAcceptUntracked: true,
+          comments: aiCommentsAccess,
+          commentsAllowed: commentsAllowed && !readMode,
+          headerFooter: aiHfAccess,
+          pageSetup: aiPageSetupAccess,
+          extras: aiDocExtras,
+          notes: aiNotesAccess,
+        }
+      : null
+  fileCtxRef.current.getDocumentStateVersion = () => runtimeDocumentRef.current?.stateVersion
+  const docsRuntime = useMemo(
+    () =>
+      createDocsRuntime({
+        current: () => runtimeDocumentRef.current,
+        resources: getDocsResources,
+        apply<T>(operation: () => T): T {
+          let result!: T
+          flushSync(() => {
+            result = operation()
+          })
+          return result
+        },
+        save: (options) => saveExplicit(fileCtxRef.current, options),
+      }),
+    [],
+  )
+  const docsCommands = useMemo(() => createDocsCommandRouter(docsRuntime), [docsRuntime])
+  const hasRuntimeDocument = !!doc
+  useLayoutEffect(
+    () => () => docsCommands.releaseAll(),
+    [runtimeIdentity, editor, hasRuntimeDocument, tornDown, docsCommands],
+  )
+  const fileMenuBindings = useRef<Parameters<typeof createDocsFileMenu>[0]>({
+    current: () => ({ generation: 0, document: null }),
+    canExecute: () => false,
+    execute: () => undefined,
+  })
+  fileMenuBindings.current.current = () => {
+    const current = fileCtxRef.current.doc
+    return {
+      generation: currentDocGeneration(),
+      document: current
+        ? {
+            id: current.hosted?.id ?? current.filePath ?? '',
+            name: current.hosted?.name ?? current.fileName,
+            path: current.filePath,
+            dirty: isDocDirty(fileCtxRef.current),
+            readOnly: !editor || readMode || isProtected,
+          }
+        : null,
+    }
+  }
+  fileMenuBindings.current.canExecute = (command) => {
+    const operation = command.startsWith('export') ? 'export' : command
+    if (
+      getDocsDocumentHost()?.capabilities?.[
+        operation as import('../shared/document-host').DocsDocumentOperation
+      ] === false
+    )
+      return false
+    if (command === 'new' || command === 'open') return !!editor && !docLoading
+    if (!fileCtxRef.current.doc || !editor || docLoading) return false
+    if (hasActiveDocumentDraft(editor)) return false
+    if (command.startsWith('export')) return true
+    return !fileCtxRef.current.doc.hosted?.readOnly
+  }
+  fileMenuBindings.current.execute = (command) => {
+    switch (command) {
+      case 'new':
+        return newFile()
+      case 'open':
+        return openFile()
+      case 'save':
+        return save(false)
+      case 'saveAs':
+        return save(true)
+      case 'exportPdf':
+        return exportPdf()
+      case 'exportHtml':
+        return exportHtml()
+      case 'exportMarkdown':
+        return exportMarkdown()
+      case 'exportImages':
+        return exportImages()
+    }
+  }
+  const docsFileMenu = useMemo(
+    () =>
+      createDocsFileMenu({
+        current: () => fileMenuBindings.current.current(),
+        canExecute: (command) => fileMenuBindings.current.canExecute(command),
+        execute: (command) => fileMenuBindings.current.execute(command),
+      }),
+    [],
+  )
+  const fileMenuItems = useSyncExternalStore(docsFileMenu.subscribe, docsFileMenu.snapshot)
+  const docsRibbon = useMemo(() => createDocsRibbon(docsFileMenu.documentState), [docsFileMenu])
+  const ribbonConfiguration = useSyncExternalStore(docsRibbon.subscribe, docsRibbon.snapshot)
+  useLayoutEffect(() => {
+    docsFileMenu.refresh()
+    docsRibbon.refresh()
+  })
+  useEffect(() => () => docsFileMenu.dispose(), [docsFileMenu])
+  useEffect(() => () => docsRibbon.dispose(), [docsRibbon])
+  const docsUi = useMemo<DocsEditorUi>(
+    () => ({
+      ribbon: {
+        set: docsRibbon.set,
+        reset: docsRibbon.reset,
+        onAction: docsRibbon.onAction,
+      },
+      fileMenu: {
+        set: docsFileMenu.set,
+        reset: docsFileMenu.reset,
+        onAction: docsFileMenu.onAction,
+      },
+    }),
+    [docsFileMenu, docsRibbon],
+  )
+  const docsDocuments = useMemo<DocsDocumentCommands>(
+    () => ({
+      async new() {
+        const before = currentDocGeneration()
+        await newFile()
+        return currentDocGeneration() !== before
+      },
+      async open(id) {
+        const before = currentDocGeneration()
+        await (id === undefined ? openFile() : openRecent(id))
+        return currentDocGeneration() !== before
+      },
+      save: (saveAs = false) => save(saveAs),
+      state: docsFileMenu.documentState,
+      subscribe: docsFileMenu.onDocumentStateChanged,
+    }),
+    [newFile, openFile, openRecent, save, docsFileMenu],
+  )
+  const docsInspection = useMemo(() => createDocsInspection(() => runtimeDocumentRef.current), [])
+  const docsAnnotations = useMemo(
+    () => createDocsAnnotations(() => runtimeDocumentRef.current, docsInspection),
+    [docsInspection],
+  )
+  fileCtxRef.current.beforeDocumentReplace = () => {
+    docsCommands.releaseAll()
+    docsAnnotations.reset()
+  }
+  useEffect(() => {
+    if (runtimeDocumentRef.current) {
+      docsAnnotations.activate()
+      for (const [source, checker] of Object.entries(getDocsCheckers()))
+        docsAnnotations.registerChecker(source, checker)
+    }
+  }, [runtimeIdentity, docsAnnotations, editor])
+  useEffect(
+    () => () => {
+      docsAnnotations.dispose()
+      docsInspection.dispose()
+    },
+    [docsAnnotations, docsInspection],
+  )
+  externalActionRef.current = (kind, instruction, operation) =>
+    submitDocsEditorAction(
+      {
+        runtime: docsRuntime,
+        commands: docsCommands,
+        current: () => runtimeDocumentRef.current,
+        harness: getDocsHarness,
+      },
+      kind,
+      instruction,
+      operation,
+    )
+  useEffect(() => () => docsRuntime.dispose(), [docsRuntime])
+  useEffect(() => () => docsCommands.dispose(), [docsCommands])
+  const runtimeReady = !!editor && (!!doc || (bootComplete && !!getDocsDocumentHost())) && !tornDown
+  useEffect(() => {
+    if (!runtimeReady) return
+    onRuntime?.({
+      runtime: docsRuntime,
+      commands: docsCommands,
+      inspection: docsInspection,
+      annotations: docsAnnotations,
+      documents: docsDocuments,
+      ui: docsUi,
+    })
+    return () => onRuntime?.(null)
+  }, [
+    runtimeReady,
+    docsRuntime,
+    docsCommands,
+    docsInspection,
+    docsAnnotations,
+    docsDocuments,
+    docsUi,
+    onRuntime,
+  ])
+  useEffect(() => {
+    if (tornDown || !editor) return
+    return installMcpBridge({
+      getCtx: () => fileCtxRef.current,
+      getRuntime: () => docsRuntime,
+      router: docsCommands,
+    })
+  }, [tornDown, editor, docsRuntime, docsCommands])
+
   const ribbonActions = useStableCallbacks({
     allocateNumId: (kind: 'bullet' | 'ordered') => allocateListNumId(kind),
     createListDef: (levels: CustomNumberingLevel[]) => {
@@ -7536,7 +7920,7 @@ export function App() {
       else exportImages()
     },
     onNameWithAi: () => void nameWithAi(),
-    onToggleAi: () => setShowAi((v) => !v),
+    onToggleAi: toggleAgentPanel,
     onSection: (next: SectionSettings) => {
       // layout applies to the cursor's section; the final section's sectPr goes through SaveOptions.section (also drives canvas geometry)
       setSections((prev) =>
@@ -7623,10 +8007,9 @@ export function App() {
     onZoomFit: zoomFit,
     onZoomDialog: () => setShowZoomDialog(true),
     onDarkPage: updateDarkPage,
-    onAiPreset: (text: string) => {
+    onAiPreset: (text: string, operation: DocsAiOperation) => {
       // Word's Editor / Translate start working as soon as they're clicked
-      setShowAi(true)
-      setAiPreset({ text, nonce: Date.now(), autoRun: true })
+      requestAgentAction('edit', text, operation)
     },
     onHeader: (next: HeaderFooter) => commitHfAt(0, 'header', headerAreaView, next),
     onPageNumFormat: openPgNumModal,
@@ -7814,7 +8197,7 @@ export function App() {
           disabled={!hasDoc || !hasUnsavedChanges}
           onClick={() => void save(false)}
         >
-          <IconSave size={16} />
+          <IconSave size={QUICK_ACCESS_ICON_SIZE} />
         </button>
         <button
           className="qa-btn"
@@ -7823,7 +8206,7 @@ export function App() {
           disabled={!hasDoc || !histState.canUndo}
           onClick={() => editor?.chain().focus().undo().run()}
         >
-          <IconUndo size={16} />
+          <IconUndo size={QUICK_ACCESS_ICON_SIZE} />
         </button>
         <button
           className="qa-btn"
@@ -7832,7 +8215,7 @@ export function App() {
           disabled={!hasDoc || !histState.canRedo}
           onClick={() => editor?.chain().focus().redo().run()}
         >
-          <IconRedo size={16} />
+          <IconRedo size={QUICK_ACCESS_ICON_SIZE} />
         </button>
         <label className={`autosave-toggle ${autoSave ? 'on' : ''}`} data-tip={t('appAutoSaveTip')}>
           <span className="autosave-knob" />
@@ -7840,6 +8223,8 @@ export function App() {
           <input
             type="checkbox"
             checked={autoSave}
+            disabled={!canToggleAutoSave}
+            aria-label={t('appAutoSave')}
             onChange={(e) => setAutoSave(e.target.checked)}
           />
         </label>
@@ -7847,7 +8232,17 @@ export function App() {
       </>
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hasDoc, hasUnsavedChanges, autoSave, editor, save, lang, histState],
+    [
+      hasDoc,
+      hasUnsavedChanges,
+      autoSave,
+      canToggleAutoSave,
+      setAutoSave,
+      editor,
+      save,
+      lang,
+      histState,
+    ],
   )
 
   // ---- Multiple Pages: the grid is a function of zoom × pane width ----
@@ -8243,6 +8638,21 @@ export function App() {
 .editor-scroll .doc-page.measuring-columns { column-count: auto; width: ${colFlow.colWidthPx + twipsToPx(canvasSection?.marginLeft ?? section?.marginLeft ?? 0) + twipsToPx(canvasSection?.marginRight ?? section?.marginRight ?? 0)}px; }`}</style>
       )}
       <Ribbon
+        embedded={embedded}
+        ribbonConfiguration={ribbonConfiguration}
+        onRibbonAction={(id, rendered) => {
+          try {
+            docsRibbon.activate(id, rendered)
+          } catch (error) {
+            setStatus(String(error))
+          }
+        }}
+        fileMenuItems={fileMenuItems}
+        fileMenuToken={docsFileMenu.currentToken()}
+        canExecuteFileCommand={docsFileMenu.isEnabled}
+        onFileMenuAction={(id, token) => {
+          void docsFileMenu.activate(id, token).catch((error: unknown) => setStatus(String(error)))
+        }}
         actionsRef={ribbonActionsRef}
         quickActions={quickActions}
         mergeSource={mergeSource}
@@ -8330,18 +8740,18 @@ export function App() {
       />
 
       <div className="app-main">
-        {doc && (
+        {doc && AgentPanel && (
           <div
             className={`ai-dock${showAi ? '' : ' collapsed'}${
               !aiSidebarEnabled && !showAi ? ' ai-dock-off' : ''
             }`}
           >
             {/* always mounted: collapse must not drop state or in-flight runs */}
-            <AiPanel
+            <AgentPanel
               key={aiPanelKey}
+              runtime={docsRuntime}
               editor={editor}
               blocks={doc.parsed.blocks}
-              settings={settings}
               docEmpty={wordCount === 0}
               numIdFallback={
                 doc.isBlank ? { bullet: BLANK_BULLET_NUM_ID, ordered: BLANK_ORDERED_NUM_ID } : null
@@ -8409,6 +8819,8 @@ export function App() {
             )}
             {doc && (
               <AiAskPopover
+                key={aiPanelKey}
+                queueEnabled={nativeAgentEnabled}
                 editor={editor}
                 queueFull={editQueue.length >= EDIT_QUEUE_MAX}
                 getItem={getQueueItem}
@@ -8912,9 +9324,8 @@ export function App() {
           onUnredact={clearRedaction}
           onViewImage={setViewImage}
           onSaveImageAs={saveImageAs}
-          onAiPreset={(text) => {
-            setShowAi(true)
-            setAiPreset({ text, nonce: Date.now(), autoRun: true })
+          onAiPreset={(text, operation) => {
+            requestAgentAction('edit', text, operation)
           }}
           onRestartNumbering={restartNumbering}
           onContinueNumbering={continueNumbering}
@@ -9200,7 +9611,13 @@ export function App() {
         />
       )}
 
-      {doc && showPrintDialog && <PrintDialog onClose={closePrintDialog} setStatus={setStatus} />}
+      {doc && showPrintDialog && (
+        <PrintDialog
+          onClose={closePrintDialog}
+          setStatus={setStatus}
+          canPrint={() => canOutputDocument(fileCtxRef.current)}
+        />
+      )}
 
       {stats && <WordCountDialog stats={stats} onClose={() => setStats(null)} />}
 

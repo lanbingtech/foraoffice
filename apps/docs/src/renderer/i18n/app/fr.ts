@@ -1,6 +1,9 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { zh } from './zh'
 
 export const fr = {
+  appExternalAgentFailed: 'Impossible d’envoyer l’action à l’agent externe : {error}',
+  appDocumentDraftPending: 'Terminez ou abandonnez d’abord le brouillon du document.',
   appScTitle: 'Raccourcis clavier',
   appScFilter: 'Rechercher un raccourci',
   appScNone: 'Aucun raccourci correspondant',

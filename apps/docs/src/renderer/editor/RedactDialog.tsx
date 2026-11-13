@@ -1,5 +1,6 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { useI18n } from '../i18n/locale'
-import { useRedactLabelField } from '@genoffice/ui'
+import { useRedactLabelField } from '@genoffice/ui/editor'
 
 interface Props {
   /** the text the span covers, offered as a starting label */

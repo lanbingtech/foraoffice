@@ -1,3 +1,5 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
+import { getOptionalDocsHost } from './host/docs-host'
 import { useEffect, useState } from 'react'
 
 /**
@@ -31,8 +33,8 @@ export function useDocThemeIsDark(): boolean {
     // main.tsx's listeners (registered at bootstrap) update the attributes
     // first, so reading them in ours is safe; in follow mode the UI theme and
     // OS appearance still drive the result, hence the theme listeners too
-    const offDoc = window.desktop?.onDocumentThemeChanged?.(update)
-    const offUi = window.desktop?.onThemeChanged?.(update)
+    const offDoc = getOptionalDocsHost()?.onDocumentThemeChanged?.(update)
+    const offUi = getOptionalDocsHost()?.onThemeChanged?.(update)
     const mq = window.matchMedia?.('(prefers-color-scheme: dark)')
     mq?.addEventListener('change', update)
     return () => {
@@ -51,7 +53,7 @@ export function useUiThemeIsDark(): boolean {
     const update = (): void => setDark(uiThemeIsDark())
     // main.tsx's listener (registered at bootstrap) updates data-theme first,
     // so reading the attribute in ours is safe
-    const off = window.desktop?.onThemeChanged?.(update)
+    const off = getOptionalDocsHost()?.onThemeChanged?.(update)
     const mq = window.matchMedia?.('(prefers-color-scheme: dark)')
     mq?.addEventListener('change', update)
     return () => {

@@ -1,3 +1,5 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
+import { getOptionalDocsHost } from '../host/docs-host'
 import { ScriptFonts } from './script-fonts'
 import {
   asciiFamilyResolver,
@@ -241,6 +243,7 @@ import { InactiveSelectionExtension } from './inactive-selection'
 import { FieldCodesExtension } from './field-codes'
 import { FormattingMarksExtension } from './formatting-marks'
 import { AiQueueAnchorsExtension } from './ai-queue-anchors'
+import { DocsAnnotationsExtension } from '../sdk/annotations'
 import { CheckboxToggleExtension } from './checkbox-toggle'
 import { DoubleClickWordExtension } from './dblclick-word'
 import { OutlineViewExtension } from './outline-view'
@@ -3076,6 +3079,11 @@ export const DocTable = Node.create({
   },
   renderHTML({ node }) {
     const attrs: Record<string, string> = { class: 'doc-table' }
+    const revision = node.attrs.blockRevision as { kind?: string; author?: string } | null
+    if (revision?.kind === 'ins' || revision?.kind === 'del') {
+      attrs.class += ` doc-${revision.kind}`
+      attrs[`data-${revision.kind}-author`] = revision.author ?? ''
+    }
     if (node.attrs.docxIndex !== null) attrs['data-idx'] = String(node.attrs.docxIndex)
     if (propChangePending(node.attrs.tblPrChange) || propChangePending(node.attrs.tblGridChange))
       attrs['data-rev-fmt'] = '1'
@@ -3722,7 +3730,10 @@ export const ImageCopyExtension = Extension.create({
           return false
         }
       }
-      const write = window.desktop?.copyImageToClipboard?.(dataUrl, imageMetaJson(node.attrs))
+      const write = getOptionalDocsHost()?.copyImageToClipboard?.(
+        dataUrl,
+        imageMetaJson(node.attrs),
+      )
       // no bridge: keep the default HTML-only copy instead of an empty clipboard
       if (!write) return false
       event.preventDefault()
@@ -7396,6 +7407,7 @@ export const editorExtensions = [
   FloatTableSpacingExtension,
   InactiveSelectionExtension,
   AiQueueAnchorsExtension,
+  DocsAnnotationsExtension,
   CheckboxToggleExtension,
   DoubleClickWordExtension,
   OutlineViewExtension,

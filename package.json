@@ -1,8 +1,8 @@
 {
-  "name": "genoffice",
+  "name": "foraoffice",
   "version": "0.1.0",
   "private": true,
-  "description": "AI-native office suite (docs, sheets, slides, pdf, markdown, html)",
+  "description": "Embeddable office editors separated from hosts and agents; Docs SDK in development",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=22.12.0",
@@ -10,7 +10,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/genspark-ai/genoffice.git"
+    "url": "git+https://github.com/lanbingtech/foraoffice.git"
   },
   "workspaces": [
     "apps/*",
@@ -43,7 +43,11 @@
     "licenses": "node tools/check-licenses.mjs",
     "dist:mac": "npm run notices && npm run build:all && npm run native:build:universal -w @genoffice/sheets && npm run dist:mac -w @genoffice/shell",
     "dist:win": "npm run notices && npm run build:all && npm run dist:win -w @genoffice/shell",
-    "dist:linux": "npm run notices && npm run build:all && npm run dist:linux -w @genoffice/shell"
+    "dist:linux": "npm run notices && npm run build:all && npm run dist:linux -w @genoffice/shell",
+    "build:sdk": "npm run build:sdk -w @genoffice/docs",
+    "check:sdk-package": "node tools/check-docs-sdk-package.mjs",
+    "test:sdk:browser": "cross-env FORAOFFICE_SDK_TEST_HOST=browser playwright test --config e2e/playwright.config.ts e2e/docs-embedded-runtime.spec.ts e2e/docs-node-host.spec.ts e2e/docs-sdk-integration.spec.ts e2e/docs-sdk-ai-operations.spec.ts e2e/docs-sdk-table-selection.spec.ts",
+    "test:sdk:electron": "cross-env FORAOFFICE_SDK_TEST_HOST=electron playwright test --config e2e/playwright.config.ts e2e/docs-embedded-runtime.spec.ts e2e/docs-node-host.spec.ts e2e/docs-sdk-integration.spec.ts e2e/docs-sdk-ai-operations.spec.ts e2e/docs-sdk-table-selection.spec.ts"
   },
   "dependencies": {
     "ws": "^8.21.1"
@@ -66,5 +70,13 @@
     "pngjs": "^7.0.0",
     "prettier": "^3.9.6",
     "typescript-eslint": "^8.65.0"
+  },
+  "homepage": "https://github.com/lanbingtech/foraoffice",
+  "bugs": {
+    "url": "https://github.com/lanbingtech/foraoffice/issues"
+  },
+  "foraoffice": {
+    "modifiedFrom": "GenOffice v0.12.852",
+    "modifications": "Fork product identity, source/support routing and Docs SDK delivery"
   }
 }

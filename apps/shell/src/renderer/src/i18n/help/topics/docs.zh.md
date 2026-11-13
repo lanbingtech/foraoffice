@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Docs：文字处理
+
+> 本手册介绍 ForaOffice 中继承自 GenOffice 的桌面应用，包括其内置智能体和设置。嵌入式 Docs 的宿主自行提供服务及智能体接入；桌面功能不会自动成为 SDK 的能力。参见 [Docs SDK 接入指南](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md)。
 
 Docs 是类 Word 的文字处理器，读写真 .docx，分页排版所见即所得。
 

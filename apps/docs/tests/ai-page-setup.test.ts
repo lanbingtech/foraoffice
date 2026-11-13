@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { afterEach, describe, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'
 import { applySectionStartType, sectionFromSectPr, type SectionInfo } from '@genoffice/docx-engine'
@@ -186,7 +187,6 @@ describe('page setup tools', () => {
         null,
         undefined,
         undefined,
-        undefined,
         access,
       ) as { output: string; isError?: boolean }
 
@@ -223,7 +223,6 @@ describe('page setup tools', () => {
         null,
         undefined,
         undefined,
-        undefined,
         access,
       ) as { output: string; isError?: boolean; mutated: boolean }
     expect(run({ afterBlockIndex: 7 }).isError).toBe(true)
@@ -246,7 +245,6 @@ describe('page setup tools', () => {
         undefined,
         undefined,
         null,
-        undefined,
         undefined,
         undefined,
         access,

@@ -1,6 +1,9 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { zh } from './zh'
 
 export const zhTW = {
+  appExternalAgentFailed: '無法將操作提交給外部 Agent：{error}',
+  appDocumentDraftPending: '請先確認保留或放棄文件草稿。',
   appScTitle: '鍵盤快速鍵',
   appScFilter: '搜尋快速鍵',
   appScNone: '沒有相符的快速鍵',

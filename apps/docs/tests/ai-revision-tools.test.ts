@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { afterEach, describe, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
@@ -129,7 +130,6 @@ describe('accept_changes / reject_changes tools', () => {
         undefined,
         undefined,
         null,
-        undefined,
         undefined,
         undefined,
         undefined,

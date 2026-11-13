@@ -1,5 +1,6 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
-import { useDismissablePopover } from '@genoffice/ui'
+import { useDismissablePopover } from '@genoffice/ui/editor'
 import type { PageCut } from '../pagination-cuts'
 import type { Editor } from '@tiptap/core'
 import type { Node as PmNode } from '@tiptap/pm/model'

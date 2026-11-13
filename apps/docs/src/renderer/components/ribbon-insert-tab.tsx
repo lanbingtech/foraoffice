@@ -1,8 +1,9 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { useState } from 'react'
 import type { CSSProperties } from 'react'
 import { getMarkRange } from '@tiptap/core'
 import type { Editor } from '@tiptap/core'
-import { ShapePreview, WORDART_PRESETS, wordArtStrokePx } from '@genoffice/ui'
+import { ShapePreview, WORDART_PRESETS, wordArtStrokePx } from '@genoffice/ui/editor'
 import type { ChartDisplay, NewChart } from '@genoffice/docx-engine'
 import { hfHasPageField, hfPageNumberOnly, hfWithoutPageMarks } from '../editor/hf-dom'
 import { EquationGallery, EquationModal } from './EquationModal'

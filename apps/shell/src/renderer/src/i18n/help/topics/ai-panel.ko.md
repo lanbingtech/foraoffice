@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # AI 어시스턴트 패널
+
+> 이 설명서는 ForaOffice가 GenOffice에서 이어받은 데스크톱 앱과 내장 에이전트 및 설정을 설명합니다. Docs를 임베드하는 호스트는 자체 서비스와 에이전트 통합을 제공합니다. 데스크톱 기능이 자동으로 SDK 기능이 되지는 않습니다. [Docs SDK 안내](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md)를 확인하세요.
 
 어느 편집기에서든 AI 패널을 불러올 수 있습니다. 무언가를 선택하고, 지시하고, 스트리밍되는 결과를 봅니다.
 

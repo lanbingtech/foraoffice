@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -83,6 +84,7 @@ export async function renderToPngs(
     const stem = basename(path, extname(path))
     return pages.map((p) => {
       const out = join(opts.outDir, `${stem}-${String(p.index + 1).padStart(2, '0')}.png`)
+      assertAllowed(out, ctx.env, 'write')
       writeFileSync(out, p.png)
       return { page: p.index, path: out, width: p.width, height: p.height }
     })

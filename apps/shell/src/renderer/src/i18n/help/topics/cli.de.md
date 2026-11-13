@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Kommandozeile und Agenten
+
+> Dieses Handbuch beschreibt die von GenOffice übernommene Desktop-Anwendung in ForaOffice mit eingebautem Agenten und Einstellungen. Hosts für eingebettetes Docs stellen eigene Dienste und Agent-Integrationen bereit; Desktop-Funktionen sind nicht automatisch SDK-Funktionen. Siehe [Docs-SDK-Anleitung](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Jede Installation bringt den Befehl `genoffice` mit, der dieselben Engines antreibt wie das Fenster: dieselben Parser, denselben Writer, denselben Renderer. Eine Datei, die die App speichert, und eine Datei, die der Befehl schreibt, sind dieselbe Datei, und eine Prüfung, die der KI-Bereich der App besteht, besteht auch der Befehl.
 

@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Příkazová řádka a agenti
+
+> Tato příručka popisuje desktopovou aplikaci převzatou z GenOffice do ForaOffice, včetně vestavěného agenta a nastavení. Hostitelé vloženého Docs poskytují vlastní služby a integraci agenta; desktopové funkce nejsou automaticky možnostmi SDK. Viz [průvodce Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Každá instalace obsahuje příkaz `genoffice`, který používá stejné enginy jako okno — stejné parsery, stejný zapisovač, stejný vykreslovač. Soubor, který aplikace uloží, a soubor, který zapíše příkaz, je stejný soubor, a kontrola, kterou projde panel AI v aplikaci, projde i příkaz.
 

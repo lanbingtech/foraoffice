@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /**
  * Shared launcher for Electron E2E tests.
  *
@@ -30,6 +31,8 @@ interface LaunchOptions {
   settings?: Record<string, unknown>
   /** subdir of e2e/artifacts to store this launch's video in */
   videoDir: string
+  /** Disable screencasting when testing renderer CDP flows that it interferes with. */
+  recordVideo?: boolean
   /** absolute document path passed as argv, opened in an editor tab on launch */
   openFile?: string
   /** extra environment variables for the launched app */
@@ -85,16 +88,29 @@ export async function launchShell(options: LaunchOptions): Promise<LaunchedApp> 
     // (page.url() stays empty, no lifecycle events, evaluate hangs) — record
     // only where it works
     recordVideo:
-      process.platform === 'linux'
+      process.platform === 'linux' || options.recordVideo === false
         ? undefined
         : {
             dir: join(ARTIFACTS_DIR, options.videoDir),
             size: { width: 1280, height: 800 },
           },
   })
-  const page = await app.firstWindow()
-  await waitForDocumentReady(app, page)
-  return { app, page, userDataDir }
+  try {
+    const page = await app.firstWindow()
+    await waitForDocumentReady(app, page)
+    return { app, page, userDataDir }
+  } catch (error) {
+    const child = app.process()
+    const killTimer = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    }, 5_000)
+    try {
+      await app.close().catch(() => child.kill('SIGKILL'))
+    } finally {
+      clearTimeout(killTimer)
+    }
+    throw error
+  }
 }
 
 /**

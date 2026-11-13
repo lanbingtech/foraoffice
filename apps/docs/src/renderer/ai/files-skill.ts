@@ -1,3 +1,5 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
+import { getDocsHost } from '../host/docs-host'
 import { createAttachmentsSkill, type AgentSkill } from '@genoffice/agent-core'
 import type { AttachmentMeta } from '../../shared/ipc'
 import { t } from '../i18n/locale'
@@ -7,7 +9,7 @@ export function createFilesSkill(getAttachments: () => AttachmentMeta[]): AgentS
   return createAttachmentsSkill({
     list: getAttachments,
     read: async (path, offset, maxChars) => {
-      const result = await window.desktop.readAttachment(path, offset, maxChars)
+      const result = await getDocsHost().readAttachment(path, offset, maxChars)
       if (!result.ok) throw new Error(result.error ?? 'read failed')
       return {
         text: result.text ?? '',

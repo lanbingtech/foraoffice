@@ -1,7 +1,15 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+import { spawn } from 'node:child_process'
+vi.mock('node:child_process', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:child_process')>()
+  return { ...original, spawn: vi.fn(original.spawn) }
+})
 import {
   cliErrorMessage,
   createCliRunner,
@@ -16,6 +24,41 @@ function script(body: string): string {
 }
 
 describe('createCliRunner output cap', () => {
+  it('does not release a timed-out operation until the child has actually closed', async () => {
+    vi.useFakeTimers()
+    const child = Object.assign(new EventEmitter(), {
+      pid: 123,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      stdin: new PassThrough(),
+      kill: vi.fn(() => true),
+    })
+    vi.mocked(spawn).mockReturnValueOnce(child as unknown as ReturnType<typeof spawn>)
+    try {
+      let settled = false
+      const result = createCliRunner({ executable: process.execPath, entry: 'child.js' })
+        .run([], { timeoutMs: 1000 })
+        .then((outcome) => {
+          settled = true
+          return outcome
+        })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(child.kill).toHaveBeenCalledOnce()
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(child.kill).toHaveBeenLastCalledWith('SIGKILL')
+      expect(settled).toBe(false)
+      child.emit('close', null)
+      expect(await result).toMatchObject({
+        ok: false,
+        code: -1,
+        stderr: expect.stringContaining('timed out'),
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('kills a flooding child and bounds the buffered output', async () => {
     const runner = createCliRunner({
       executable: process.execPath,

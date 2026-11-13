@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /**
  * Floating "Ask AI" entry on a text selection, plus the anchored popover that
  * captures one instruction — sent immediately (a normal selection-scoped run)
@@ -6,8 +7,8 @@
  *
  * Mounted at the app root with fixed positioning; ProseMirror's coordsAtPos
  * already speaks viewport coordinates. Positions refresh while the document
- * scrolls; outside clicks commit non-empty text into the queue (it stays
- * editable there) instead of discarding it.
+ * scrolls; when a local queue is available, outside clicks commit non-empty
+ * text into that queue. Otherwise only explicit confirmation submits.
  */
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Editor } from '@tiptap/core'
@@ -32,6 +33,8 @@ interface AnchorRect {
 
 interface Props {
   editor: Editor
+  /** A local Agent can queue edits; external execution submits only on confirmation. */
+  queueEnabled?: boolean
   queueFull: boolean
   getItem: (qid: string) => DocsEditQueueItem | undefined
   /** run the instruction right away as a normal selection-scoped request */
@@ -94,6 +97,7 @@ function rangeRect(editor: Editor, from: number, to: number): AnchorRect | null 
 
 export function AiAskPopover({
   editor,
+  queueEnabled = true,
   queueFull,
   getItem,
   onSendNow,
@@ -149,6 +153,7 @@ export function AiAskPopover({
       setTrigger({ left: c.right + 6, top: c.bottom + 4 })
     }
     const hide = () => setTrigger(null)
+    update()
     editor.on('selectionUpdate', update)
     editor.on('focus', update)
     editor.on('blur', hide)
@@ -162,10 +167,11 @@ export function AiAskPopover({
       scroller?.removeEventListener('scroll', update)
       window.removeEventListener('resize', update)
     }
-  }, [editor])
+  }, [editor, open])
 
   // clicking a queued anchor in the document re-opens the popover on that item
   useEffect(() => {
+    if (!queueEnabled) return
     const onAnchorClick = (e: Event) => {
       const qid = (e as CustomEvent<{ qid: string }>).detail?.qid
       const item = qid ? getItem(qid) : undefined
@@ -176,7 +182,7 @@ export function AiAskPopover({
     }
     window.addEventListener(AI_QUEUE_ANCHOR_CLICK, onAnchorClick)
     return () => window.removeEventListener(AI_QUEUE_ANCHOR_CLICK, onAnchorClick)
-  }, [getItem])
+  }, [getItem, queueEnabled])
 
   // popover position follows scroll/resize; a vanished anchor closes it
   useLayoutEffect(() => {
@@ -192,29 +198,35 @@ export function AiAskPopover({
     }
   }, [open, anchorRect])
 
+  const positioned = rect !== null
   useEffect(() => {
-    if (open) {
+    if (open && positioned) {
       inputRef.current?.focus()
       inputRef.current?.select()
     }
-  }, [open])
+  }, [open, positioned])
 
   const close = useCallback(() => {
     setOpen(null)
     setText('')
     setInactiveSelectionShown(editor, false)
   }, [editor])
+  useEffect(() => () => setInactiveSelectionShown(editor, false), [editor])
+  const cancel = () => {
+    close()
+    editor.view.focus()
+  }
 
-  /** outside click keeps whatever was typed: a new note lands in the queue, an edit is saved */
+  /** Local queued edits survive outside clicks; unconfirmed external requests are discarded. */
   const commitOrClose = useCallback(() => {
     const state = openRef.current
     const value = textRef.current.trim()
-    if (state && value) {
+    if (queueEnabled && state && value) {
       if (state.mode === 'edit') onQueueUpdate(state.qid, value)
       else if (!queueFullRef.current) onQueueAdd(value)
     }
     close()
-  }, [onQueueAdd, onQueueUpdate, close])
+  }, [queueEnabled, onQueueAdd, onQueueUpdate, close])
 
   useEffect(() => {
     if (!open) return
@@ -277,7 +289,7 @@ export function AiAskPopover({
           if (e.key === 'Escape') {
             e.preventDefault()
             e.stopPropagation()
-            close()
+            cancel()
           }
         }}
       >
@@ -286,7 +298,7 @@ export function AiAskPopover({
           className="ai-ask-pop-close"
           data-tip={t('appClose')}
           aria-label={t('appClose')}
-          onClick={close}
+          onClick={cancel}
         >
           <svg viewBox="0 0 24 24" width="12" height="12" fill="none" aria-hidden>
             <path
@@ -312,7 +324,10 @@ export function AiAskPopover({
             if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
               e.preventDefault()
               if (!canSubmit) return
-              if (open.mode === 'edit') {
+              if (!queueEnabled) {
+                onSendNow(text)
+                close()
+              } else if (open.mode === 'edit') {
                 onQueueUpdate(open.qid, text.trim())
                 close()
               } else if (!queueFull) {
@@ -364,26 +379,33 @@ export function AiAskPopover({
             </>
           ) : (
             <>
-              <button
-                className="ai-ask-cancel"
-                disabled={!canSubmit}
-                onClick={() => {
-                  onSendNow(text.trim())
-                  close()
-                }}
-              >
-                {t('aiAskSendNow')}
-              </button>
+              {queueEnabled && (
+                <button
+                  className="ai-ask-cancel"
+                  disabled={!canSubmit}
+                  onClick={() => {
+                    onSendNow(text)
+                    close()
+                  }}
+                >
+                  {t('aiAskSendNow')}
+                </button>
+              )}
               <button
                 className="ai-ask-confirm"
-                disabled={!canSubmit || queueFull}
-                data-tip={queueFull ? t('aiQueueFullNotice', { max: EDIT_QUEUE_MAX }) : undefined}
+                disabled={!canSubmit || (queueEnabled && queueFull)}
+                data-tip={
+                  queueEnabled && queueFull
+                    ? t('aiQueueFullNotice', { max: EDIT_QUEUE_MAX })
+                    : undefined
+                }
                 onClick={() => {
-                  onQueueAdd(text.trim())
+                  if (queueEnabled) onQueueAdd(text.trim())
+                  else onSendNow(text)
                   close()
                 }}
               >
-                {t('aiAskQueue')}
+                {t(queueEnabled ? 'aiAskQueue' : 'aiAskSendNow')}
               </button>
             </>
           )}

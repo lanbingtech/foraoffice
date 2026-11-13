@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # 빠른 시작: 인터페이스와 기본 조작
+
+> 이 설명서는 ForaOffice가 GenOffice에서 이어받은 데스크톱 앱과 내장 에이전트 및 설정을 설명합니다. Docs를 임베드하는 호스트는 자체 서비스와 에이전트 통합을 제공합니다. 데스크톱 기능이 자동으로 SDK 기능이 되지는 않습니다. [Docs SDK 안내](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md)를 확인하세요.
 
 GenOffice는 전적으로 내 컴퓨터에서 동작하는 오피스 스위트입니다. 창 하나, 탭 한 줄에 6개의 편집기가 들어 있습니다. 문서(Docs), 스프레드시트(Sheets), 프레젠테이션(Slides), PDF, Markdown, HTML입니다. 다루는 파일은 진짜 .docx / .xlsx / .pptx / .pdf이며 Word, Excel, PowerPoint와 완전히 호환됩니다. 네트워크는 필요 없습니다.
 

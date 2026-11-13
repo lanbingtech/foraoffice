@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Docs: शब्द प्रसंस्करण
+
+> यह मैनुअल ForaOffice में विरासत GenOffice डेस्कटॉप ऐप, उसके अंतर्निहित एजेंट और सेटिंग्स का वर्णन करता है। एम्बेड किए गए Docs के होस्ट अपनी सेवाएँ और एजेंट एकीकरण देते हैं; डेस्कटॉप सुविधाएँ अपने आप SDK की क्षमताएँ नहीं बनतीं। [Docs SDK गाइड](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md) देखें।
 
 Docs, Word जैसा प्रोसेसर है: यह असली .docx पढ़ता और लिखता है, और पेजिंग वास्तविक रूप से WYSIWYG है।
 

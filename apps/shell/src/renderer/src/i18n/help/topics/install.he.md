@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: distinguish upstream installers from fork delivery. -->
+
 # התקנת GenOffice
+
+> ההוראות שהתקבלו להלן מתארות מתקינים של GenOffice המקורי. ההורדות אינן כוללות שינויי ForaOffice או Docs SDK ואינן מעידות על גרסאות, חתימות או פלטפורמות נתמכות של הפיצול. ראו את [מבוא הפרויקט](https://github.com/lanbingtech/foraoffice) ואת [מדריך Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 כל גרסה מתפרסמת ב[עמוד ההפצות](https://github.com/genspark-ai/genoffice/releases/latest). כולן מגיעות מ-`main`; ומתקיני macOS ו-Windows חתומים.
 

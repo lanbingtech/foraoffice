@@ -1,9 +1,11 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /**
  * Find & Replace engine: query compilation (literal / Word wildcards / regex),
  * width and case folding, document scanning and replacement expansion. Pure
  * functions over ProseMirror documents so the panel stays thin and testable.
  */
 import type { Node as PmNode } from '@tiptap/pm/model'
+import type { Transaction } from '@tiptap/pm/state'
 
 export type FindMode = 'literal' | 'wildcard' | 'regex'
 
@@ -553,6 +555,28 @@ export function expandReplacement(template: string, m: FindMatch, mode: FindMode
     add(ch)
   }
   return segs
+}
+
+/** Native UI and SDK replacement share the same text/paragraph and mark inheritance rules. */
+export function applyFindReplacement(
+  tr: Transaction,
+  match: FindMatch,
+  replacement: string,
+  mode: FindMode,
+): void {
+  const segments = expandReplacement(replacement, match, mode)
+  tr.insertText(segments.join('\u0000'), match.from, match.to)
+  const splits: number[] = []
+  let offset = 0
+  for (let index = 0; index < segments.length - 1; index++) {
+    offset += segments[index].length
+    splits.push(match.from + offset)
+    offset++
+  }
+  for (const position of splits.reverse()) {
+    tr.delete(position, position + 1)
+    tr.split(position)
+  }
 }
 
 /** `radius` characters of block text on either side of a match, with ellipses */

@@ -1,3 +1,5 @@
+# Modified for ForaOffice: document that this recipe installs upstream binaries.
+# This image does not build this checkout or contain the ForaOffice Docs SDK.
 # GenOffice headless batch conversion image (the batch-conversion slice of
 # the Docker ask, genoffice#1808; sibling of packaging/flatpak and
 # packaging/nix): wraps the official release deb and drives the app's own

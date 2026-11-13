@@ -1,6 +1,8 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { existsSync } from 'node:fs'
 import { ipcMain, webContents } from 'electron'
 import type { DocsControl, McpEditorCommandName } from './tools/document-tools'
+import { McpToolExecutionError, type McpInvocation } from './mcp-server'
 
 /**
  * Shell-main half of the MCP → docs-editor bridge.
@@ -26,9 +28,10 @@ const COMMAND_TIMEOUT_MS = 120_000
 
 interface PendingCommand {
   wcId: number
+  callerId?: string
   resolve: (result: unknown) => void
   reject: (error: Error) => void
-  timer: NodeJS.Timeout
+  cleanup: () => void
 }
 
 const readyIds = new Set<number>()
@@ -40,8 +43,28 @@ const readyWaiters = new Map<number, ReadyWaiter[]>()
 /** tabs whose 'destroyed' hook is attached (once per webContents id) */
 const watchedIds = new Set<number>()
 const pending = new Map<string, PendingCommand>()
+const callerTargets = new Map<string, Set<number>>()
 let requestSeq = 0
 let installed = false
+
+function takePending(requestId: string): PendingCommand | undefined {
+  const entry = pending.get(requestId)
+  if (!entry) return
+  pending.delete(requestId)
+  entry.cleanup()
+  return entry
+}
+
+function cancelRenderer(wcId: number, requestId: string, callerId?: string): void {
+  const wc = webContents.fromId(wcId)
+  if (wc && !wc.isDestroyed())
+    wc.send('docs:mcp-command', {
+      requestId: `mcp-cancel-${++requestSeq}`,
+      callerId,
+      command: 'cancel_operation',
+      payload: { requestId },
+    })
+}
 
 function takeWaiters(wcId: number): ReadyWaiter[] {
   const waiters = readyWaiters.get(wcId) ?? []
@@ -63,13 +86,16 @@ function watchDestroyed(wcId: number): void {
   wc.once('destroyed', () => {
     watchedIds.delete(wcId)
     readyIds.delete(wcId)
+    for (const [callerId, targets] of callerTargets) {
+      targets.delete(wcId)
+      if (!targets.size) callerTargets.delete(callerId)
+    }
     const closed = new Error('the document tab was closed')
     for (const waiter of takeWaiters(wcId)) waiter.reject(closed)
     // in-flight commands can never be answered either
     for (const [requestId, entry] of pending) {
       if (entry.wcId !== wcId) continue
-      pending.delete(requestId)
-      clearTimeout(entry.timer)
+      takePending(requestId)
       entry.reject(closed)
     }
   })
@@ -129,11 +155,16 @@ export function installDocsBridge(): void {
     // requestIds are guessable, so any docs tab could otherwise answer another
     // tab's command: the reply is only valid from the tab the command targeted
     if (entry.wcId !== event.sender.id) return
-    pending.delete(payload.requestId)
-    clearTimeout(entry.timer)
+    takePending(payload.requestId)
     if (payload.ok === true) entry.resolve(payload.result)
-    else
-      entry.reject(new Error(typeof payload.error === 'string' ? payload.error : 'command failed'))
+    else {
+      const message = typeof payload.error === 'string' ? payload.error : 'command failed'
+      entry.reject(
+        payload.result && typeof payload.result === 'object' && !Array.isArray(payload.result)
+          ? new McpToolExecutionError(message, payload.result as Record<string, unknown>)
+          : new Error(message),
+      )
+    }
   })
 }
 
@@ -151,10 +182,18 @@ export function createDocsControl(deps: DocsBridgeDeps): DocsControl {
     wcId: number,
     command: McpEditorCommandName,
     payload: unknown,
+    invocation?: McpInvocation,
   ): Promise<unknown> => {
     const wc = webContents.fromId(wcId)
     if (!wc || wc.isDestroyed()) throw new Error('the target document is no longer open')
     await waitForReady(wcId)
+    if (wc.isDestroyed()) throw new Error('The document tab was closed')
+    if (invocation?.signal.aborted) throw new Error('The document operation was canceled')
+    if (invocation) {
+      const targets = callerTargets.get(invocation.callerId) ?? new Set<number>()
+      targets.add(wcId)
+      callerTargets.set(invocation.callerId, targets)
+    }
     if (command === 'save_document') {
       const { path: target, overwrite } = (payload ?? {}) as { path?: unknown; overwrite?: unknown }
       if (typeof target !== 'string') throw new Error('save_document requires a path')
@@ -167,12 +206,35 @@ export function createDocsControl(deps: DocsBridgeDeps): DocsControl {
     const requestId = `mcp-${++requestSeq}`
     const result = new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
-        pending.delete(requestId)
+        takePending(requestId)
+        cancelRenderer(wcId, requestId, invocation?.callerId)
         reject(new Error(`the document command timed out after ${COMMAND_TIMEOUT_MS}ms`))
       }, COMMAND_TIMEOUT_MS)
-      pending.set(requestId, { wcId, resolve, reject, timer })
+      const onAbort = () => {
+        const entry = takePending(requestId)
+        if (!entry) return
+        cancelRenderer(wcId, requestId, invocation?.callerId)
+        reject(new Error('The document operation was canceled; inspect its state before retrying'))
+      }
+      pending.set(requestId, {
+        wcId,
+        callerId: invocation?.callerId,
+        resolve,
+        reject,
+        cleanup: () => {
+          clearTimeout(timer)
+          invocation?.signal.removeEventListener('abort', onAbort)
+        },
+      })
+      invocation?.signal.addEventListener('abort', onAbort, { once: true })
     })
-    wc.send('docs:mcp-command', { requestId, command, payload })
+    wc.send('docs:mcp-command', {
+      requestId,
+      callerId: invocation?.callerId,
+      bindingId: invocation?.bindingId,
+      command,
+      payload,
+    })
     return result
   }
 
@@ -190,5 +252,23 @@ export function createDocsControl(deps: DocsBridgeDeps): DocsControl {
       return wcId
     },
     runCommand,
+    closeCaller(callerId) {
+      for (const wcId of callerTargets.get(callerId) ?? []) {
+        const wc = webContents.fromId(wcId)
+        if (wc && !wc.isDestroyed())
+          wc.send('docs:mcp-command', {
+            requestId: `mcp-close-${++requestSeq}`,
+            callerId,
+            command: 'close_caller',
+            payload: {},
+          })
+      }
+      callerTargets.delete(callerId)
+      for (const [requestId, entry] of pending) {
+        if (entry.callerId !== callerId) continue
+        takePending(requestId)
+        entry.reject(new Error('The MCP caller disconnected'))
+      }
+    },
   }
 }

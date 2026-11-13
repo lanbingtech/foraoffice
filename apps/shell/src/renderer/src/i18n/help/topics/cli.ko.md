@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # 명령줄과 에이전트
+
+> 이 설명서는 ForaOffice가 GenOffice에서 이어받은 데스크톱 앱과 내장 에이전트 및 설정을 설명합니다. Docs를 임베드하는 호스트는 자체 서비스와 에이전트 통합을 제공합니다. 데스크톱 기능이 자동으로 SDK 기능이 되지는 않습니다. [Docs SDK 안내](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md)를 확인하세요.
 
 모든 설치본에는 `genoffice` 명령이 들어 있으며, 창이 쓰는 바로 그 엔진을 구동합니다. 같은 파서, 같은 writer, 같은 렌더러입니다. 앱이 저장한 파일과 명령이 쓴 파일은 같은 파일이고, 앱의 AI 패널이 통과한 검사는 명령도 통과합니다.
 

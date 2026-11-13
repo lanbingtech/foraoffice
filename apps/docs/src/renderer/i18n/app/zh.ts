@@ -1,5 +1,8 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /** app strings, zh: defines the key set every other locale shard must match. */
 export const zh = {
+  appExternalAgentFailed: '无法将操作提交给外部 Agent：{error}',
+  appDocumentDraftPending: '请先确认保留或放弃文档草稿。',
   appScTitle: '键盘快捷键',
   appScFilter: '搜索快捷键',
   appScNone: '没有匹配的快捷键',

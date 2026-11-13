@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { randomBytes } from 'node:crypto'
 import {
   chmodSync,
@@ -73,6 +74,52 @@ export function assertAllowed(
   env: NodeJS.ProcessEnv,
   purpose: 'read' | 'write',
 ): string {
+  // The portable host supplies separate read/write grants. Presence is explicit:
+  // an invalid or empty policy must never fall back to legacy unrestricted access.
+  if (env.GENOFFICE_FILE_POLICY !== undefined) {
+    const keys = [
+      'readRoots',
+      'writeRoots',
+      'readFiles',
+      'writeFiles',
+      'deniedRoots',
+      'deniedWriteFiles',
+    ] as const
+    let policy: Record<(typeof keys)[number], string[]>
+    try {
+      const parsed = JSON.parse(env.GENOFFICE_FILE_POLICY)
+      if (
+        !parsed ||
+        typeof parsed !== 'object' ||
+        Array.isArray(parsed) ||
+        keys.some(
+          (key) =>
+            !Array.isArray(parsed[key]) ||
+            parsed[key].some((path: unknown) => typeof path !== 'string' || !isAbsolute(path)),
+        )
+      )
+        throw new Error('Invalid policy')
+      policy = parsed
+    } catch {
+      throw new CliError(EXIT.file, 'Invalid GENOFFICE_FILE_POLICY; file access denied')
+    }
+    const real = realizedPath(abs)
+    // Grants are canonical snapshots from the trusted host. Re-resolving a
+    // replaced grant directory would turn a new symlink into a broader grant.
+    const roots = policy[purpose === 'read' ? 'readRoots' : 'writeRoots']
+    const files = policy[purpose === 'read' ? 'readFiles' : 'writeFiles']
+    const denied =
+      policy.deniedRoots.some((root) => isInside(root, real)) ||
+      (purpose === 'write' && policy.deniedWriteFiles.some((file) => realizedPath(file) === real))
+    if (denied || (!files.includes(real) && !roots.some((root) => isInside(root, real))))
+      throw new CliError(
+        EXIT.file,
+        `refusing to ${purpose} outside the authorized file grants: ${abs}`,
+        undefined,
+        { reason: 'outside_allowed_roots' },
+      )
+    return abs
+  }
   const roots = allowedRoots(env)
   if (!roots) return abs
   const real = realizedPath(abs)

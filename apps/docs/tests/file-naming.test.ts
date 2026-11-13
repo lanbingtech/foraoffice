@@ -1,3 +1,5 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
+import { suggestFileName } from '@genoffice/ui'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'
 import { TextSelection } from '@tiptap/pm/state'
@@ -252,7 +254,7 @@ beforeEach(() => {
 describe('the manual trigger: the reader asks the model for a name', () => {
   it('hands the model the projected text, never the withheld words', async () => {
     const opened = await namedWithSecret()
-    await suggestedSaveAsName(ctxFor(opened, FILE_NAME, '/tmp/existing.docx'))
+    await suggestedSaveAsName(ctxFor(opened, FILE_NAME, '/tmp/existing.docx'), suggestFileName)
     expect(sent).toHaveLength(1)
     expect(sent[0].content).not.toContain(SECRET)
     // and the marker is there, so the model can still tell something was hidden
@@ -261,22 +263,26 @@ describe('the manual trigger: the reader asks the model for a name', () => {
 
   it('offers the answer as a complete file name, extension and all', async () => {
     const opened = await namedWithSecret()
-    expect(await suggestedSaveAsName(ctxFor(opened, FILE_NAME, '/tmp/existing.docx'))).toBe(
-      `${ANSWER}.docx`,
-    )
+    expect(
+      await suggestedSaveAsName(ctxFor(opened, FILE_NAME, '/tmp/existing.docx'), suggestFileName),
+    ).toBe(`${ANSWER}.docx`)
   })
 
   it('proposes nothing when the model has nothing usable', async () => {
     // '' is the signal that leaves the dialog on the name the document had
     answer = ''
     const opened = await namedWithSecret()
-    expect(await suggestedSaveAsName(ctxFor(opened, FILE_NAME, '/tmp/existing.docx'))).toBe('')
+    expect(
+      await suggestedSaveAsName(ctxFor(opened, FILE_NAME, '/tmp/existing.docx'), suggestFileName),
+    ).toBe('')
   })
 
   it('proposes nothing when no provider is configured', async () => {
     providerConfigured = false
     const opened = await namedWithSecret()
-    expect(await suggestedSaveAsName(ctxFor(opened, FILE_NAME, '/tmp/existing.docx'))).toBe('')
+    expect(
+      await suggestedSaveAsName(ctxFor(opened, FILE_NAME, '/tmp/existing.docx'), suggestFileName),
+    ).toBe('')
   })
 })
 

@@ -1,6 +1,9 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { zh } from './zh'
 
 export const hi = {
+  appExternalAgentFailed: 'बाहरी एजेंट को कार्रवाई नहीं भेजी जा सकी: {error}',
+  appDocumentDraftPending: 'पहले दस्तावेज़ का मसौदा पूरा करें या हटाएँ।',
   appScTitle: 'कीबोर्ड शॉर्टकट',
   appScFilter: 'शॉर्टकट खोजें',
   appScNone: 'कोई मेल खाता शॉर्टकट नहीं',

@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, extname, join, resolve } from 'node:path'
 import {
@@ -243,6 +244,7 @@ export async function buildDeckFromDir(
   }
   const pages: unknown[] = []
   for (const file of files) {
+    assertAllowed(file, ctx.env, 'read')
     try {
       pages.push(JSON.parse(readFileSync(file, 'utf-8')))
     } catch (err) {

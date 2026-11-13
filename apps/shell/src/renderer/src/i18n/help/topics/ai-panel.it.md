@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Il pannello dell'assistente IA
+
+> Questo manuale descrive l’applicazione desktop ereditata da GenOffice in ForaOffice, inclusi agente e impostazioni integrati. Gli host che incorporano Docs forniscono servizi e integrazione agente propri; le funzioni desktop non sono automaticamente capacità dell’SDK. Vedere la [guida Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Ogni editor può richiamare il pannello IA: seleziona qualcosa, dai un'istruzione, guarda il risultato che arriva in streaming.
 

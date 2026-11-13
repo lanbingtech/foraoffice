@@ -1,6 +1,9 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { zh } from './zh'
 
 export const it = {
+  appExternalAgentFailed: 'Impossibile inviare l’azione all’agente esterno: {error}',
+  appDocumentDraftPending: 'Prima completa o scarta la bozza del documento.',
   appScTitle: 'Scelte rapide da tastiera',
   appScFilter: 'Cerca scelta rapida',
   appScNone: 'Nessuna scelta rapida corrispondente',

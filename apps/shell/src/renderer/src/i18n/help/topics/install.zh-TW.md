@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: distinguish upstream installers from fork delivery. -->
+
 # 安裝 GenOffice
+
+> 以下繼承的說明介紹上游 GenOffice 安裝包。這些下載不包含 ForaOffice 的修改或 Docs SDK，也不能證明本 fork 已發布安裝包、完成簽章或驗證所列平台。請以本 fork 的[專案介紹](https://github.com/lanbingtech/foraoffice)和 [Docs SDK 整合指南](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md)為準。
 
 每個版本都發布在 [Releases 頁面](https://github.com/genspark-ai/genoffice/releases/latest)。它們全部出自 `main`；macOS 與 Windows 的安裝程式已簽署。
 

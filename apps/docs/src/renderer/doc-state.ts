@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 /**
  * Shared document-state types and header/footer helpers used by App.tsx and
  * the extracted action modules (file-actions, review-actions, …).
@@ -17,6 +18,7 @@ export const EMPTY_HF_VARIANTS: HfVariantsState = {
 }
 
 export interface DocState {
+  hosted?: import('../shared/document-host').DocsHostedIdentity
   parsed: ParsedDocFull
   /** null until a new document is saved for the first time */
   filePath: string | null

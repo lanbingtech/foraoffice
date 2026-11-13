@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
@@ -50,6 +51,20 @@ async function runWithDesktop(
 }
 
 describe('create_document tool', () => {
+  it.each(['docx', 'pdf', 'html'])(
+    'refuses read-only context HTML before creating %s',
+    async (type) => {
+      const createDocument = vi.fn(async () => ({ ok: true }))
+      const result = await runWithDesktop(createDocument, {
+        type,
+        title: 'Must not be created',
+        content: '<p data-doc-readonly="protected">Image representation</p>',
+      })
+      expect(result).toMatchObject({ isError: true, mutated: false })
+      expect(createDocument).not.toHaveBeenCalled()
+    },
+  )
+
   it('defaults to docx and forwards the request', async () => {
     const createDocument = vi.fn(async () => ({ ok: true }))
     const exec = await runWithDesktop(createDocument, {
@@ -92,7 +107,7 @@ describe('create_document tool', () => {
 
   it('rejects docx content that parses into no blocks, so the model can retry', async () => {
     const createDocument = vi.fn(async () => ({ ok: true }))
-    const exec = await runWithDesktop(createDocument, { title: 'T', content: '<p></p>' })
+    const exec = await runWithDesktop(createDocument, { title: 'T', content: '<div></div>' })
     expect(exec.isError).toBe(true)
     expect(createDocument).not.toHaveBeenCalled()
   })
@@ -117,6 +132,11 @@ describe('create_document tool', () => {
 })
 
 describe('aiDocContentNodes (boot-time fill of the new docx tab)', () => {
+  it('does not downgrade read-only metadata failures into authored plain text', () => {
+    expect(() => aiDocContentNodes('<p data-doc-readonly="field">Field result</p>')).toThrow(
+      /read-only/i,
+    )
+  })
   it('parses restricted HTML into blocks with the aiChanged highlight stripped', () => {
     const nodes = aiDocContentNodes('<h1>Title</h1><p>Body</p>')
     expect(nodes.map((n) => n.type)).toEqual(['docHeading', 'docParagraph'])
@@ -138,7 +158,8 @@ describe('aiDocContentNodes (boot-time fill of the new docx tab)', () => {
     expect(texts.some((t) => t.includes('Two') && !t.includes('One'))).toBe(true)
   })
 
-  it('returns nothing for markup with no text at all', () => {
-    expect(aiDocContentNodes('<p></p>')).toEqual([])
+  it('preserves intentional empty paragraphs but not empty wrapper markup', () => {
+    expect(aiDocContentNodes('<p></p>')).toMatchObject([{ type: 'docParagraph' }])
+    expect(aiDocContentNodes('<div></div>')).toEqual([])
   })
 })

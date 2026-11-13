@@ -1,5 +1,8 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { afterEach, describe, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'
+import { createDocsRuntime } from '../src/renderer/runtime/docs-runtime'
+import { createNativeDocsWorkflows } from '../src/renderer/ai/native-workflows'
 import { AgentLoop, type AgentStreamCallbacks, type AgentTransport } from '@genoffice/agent-core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { createDocsSkill } from '../src/renderer/ai/docs-skill'
@@ -424,16 +427,21 @@ describe('web_search backend failures', () => {
     w.desktop = {
       webSearch: async () => ({ results: [], method: 'error', error: 'Serper 502' }),
     }
+    const runtime = createDocsRuntime({
+      current: () => ({ editor, identity: editor, numIds: NUM_IDS }),
+    })
     try {
-      const exec = await executeTool(
-        editor,
-        { id: 't', name: 'web_search', input: { query: 'genspark' } },
-        NUM_IDS,
-      )
+      const client = runtime.connect({ id: 'native-search' })
+      const exec = await createNativeDocsWorkflows(client).execute({
+        id: 't',
+        name: 'web_search',
+        input: { query: 'genspark' },
+      })
       expect(exec.isError).toBe(true)
       expect(exec.output).toContain('Serper 502')
       expect(exec.output).not.toContain('(no results)')
     } finally {
+      runtime.dispose()
       w.desktop = saved
     }
   })
@@ -836,7 +844,7 @@ describe('partial selection: context markers and replace_selection', () => {
 })
 
 describe('partial selection: table cells and code blocks', () => {
-  it('a range inside a table cell keeps whole-block semantics (no markers, no partial note)', async () => {
+  it('a range inside a table cell carries exact markers and supports partial replacement', async () => {
     const editor = createEditor([
       heading('Chapter 1 Overview', 1),
       {
@@ -861,16 +869,16 @@ describe('partial selection: table cells and code blocks', () => {
     editor.commands.setTextSelection({ from: 25, to: 28 })
     expect(editor.state.doc.textBetween(25, 28)).toBe('ity')
     const context = buildDocContext(editor)
-    expect(context).toContain('Current selection: block 1\n')
-    expect(context).not.toContain('<sel>')
-    expect(context).not.toContain('Selected text (')
+    expect(context).toContain('Current selection: block 1 (part of the text only')
+    expect(context).toContain('<td>C<sel>ity</sel> GDP</td>')
+    expect(context).toContain('Selected text (3 characters): "ity"')
     const exec = await executeTool(
       editor,
       { id: 'c', name: 'replace_selection', input: { html: 'x' } },
       NUM_IDS,
     )
-    expect(exec.isError).toBe(true)
-    expect(exec.output).toContain('replace_blocks')
+    expect(exec.isError).not.toBe(true)
+    expect(editor.state.doc.child(1).textContent).toBe('Cx GDP')
   })
 
   it('a code block marks the selected span inside its <pre>', () => {

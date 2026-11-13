@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import {
   mergePPrFormat,
   parseLazyMediaUrl,
@@ -1550,10 +1551,11 @@ export function tableStructureSignature(table: PmNode): string {
 
 function inlineFormattingSignature(content: PmNode[] | undefined): string[] {
   const styles: string[] = []
+  let position = 0
   for (const node of content ?? []) {
     // the schema re-sorts marks by rank on load, so the parse-side order must not count
     // a picture adds no text, so one placed next to another must count on its
-    // own, and a resized one must regenerate the cell (its drawing carries the size)
+    // own. Identity, size and position changes must regenerate its drawing too.
     const atom = node.type === 'docInlineImage'
     const style =
       node.type === 'text'
@@ -1563,9 +1565,17 @@ function inlineFormattingSignature(content: PmNode[] | undefined): string[] {
               .map((mark) => [mark.type, mark.attrs ?? null]),
           )
         : atom
-          ? JSON.stringify([node.type, node.attrs?.widthPx ?? null, node.attrs?.heightPx ?? null])
+          ? JSON.stringify([
+              node.type,
+              position,
+              node.attrs?.widthPx ?? null,
+              node.attrs?.heightPx ?? null,
+              node.attrs?.dataUrl ?? null,
+              node.attrs?.xml ?? null,
+            ])
           : node.type
     if (atom || styles[styles.length - 1] !== style) styles.push(style)
+    position += node.type === 'text' ? (node.text?.length ?? 0) : 1
   }
   return styles
 }

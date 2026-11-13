@@ -1,11 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Modified for ForaOffice: clarify the upstream-only wrapper's identity. -->
 <component type="desktop-application">
   <id>com.genoffice.app</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>Apache-2.0</project_license>
   <name>GenOffice</name>
-  <summary>AI-native office suite — Word, Excel, PowerPoint, PDF and Markdown in one app</summary>
+  <summary>Upstream GenOffice desktop suite, without ForaOffice SDK changes</summary>
   <description>
+    <p>
+      This inherited recipe downloads the upstream GenOffice release. It does
+      not build ForaOffice source or include the ForaOffice Docs SDK. The
+      publisher, application ID and release links below identify that upstream
+      application, not a ForaOffice release.
+    </p>
     <p>
       GenOffice is a unified, AI-native office suite. One local app hosts the
       word processor, spreadsheet, presentation and PDF modules behind a home

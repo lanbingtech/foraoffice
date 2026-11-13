@@ -1,6 +1,9 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { zh } from './zh'
 
 export const cs = {
+  appExternalAgentFailed: 'Akci se nepodařilo odeslat externímu agentovi: {error}',
+  appDocumentDraftPending: 'Nejprve dokončete nebo zahoďte koncept dokumentu.',
   appScTitle: 'Klávesové zkratky',
   appScFilter: 'Hledat zkratky',
   appScNone: 'Žádné odpovídající zkratky',

@@ -1,7 +1,8 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { useEffect, useState } from 'react'
 import type { Editor } from '@tiptap/core'
 import type { Selection, Transaction } from '@tiptap/pm/state'
-import { Dropdown, isSymbolFontFamily, type DropdownOption } from '@genoffice/ui'
+import { Dropdown, isSymbolFontFamily, type DropdownOption } from '@genoffice/ui/editor'
 import { useI18n, type StringKey } from '../i18n/locale'
 import { fontFamiliesFor, systemFamiliesBesidesCandidates } from '../font-list'
 import { fontSizeLabel, fontSizeOptions, parseFontSize } from '../font-sizes'

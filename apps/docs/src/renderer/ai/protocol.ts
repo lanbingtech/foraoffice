@@ -1,7 +1,9 @@
+// Modified for ForaOffice: fork product identity and project routing.
 import type { Editor } from '@tiptap/core'
 import { REDACT_MARK } from './redact'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { TextSelection } from '@tiptap/pm/state'
+import { TableMap } from '@tiptap/pm/tables'
 import {
   TABLE_HEADER_FILL,
   type Block,
@@ -9,27 +11,34 @@ import {
   type TableCell,
   type TableModel,
 } from '@genoffice/docx-engine'
-import { pmTableToModel, tableModelToPmNode, type PmMark, type PmNode } from '../editor/convert'
+import {
+  inlineToRuns,
+  pmTableToModel,
+  tableModelToPmNode,
+  type PmMark,
+  type PmNode,
+} from '../editor/convert'
 import { wordTableCell, wordTableModel } from '../editor/new-table'
 import { equationBlockJson, inlineEquationNodeJson } from '../editor/equation'
 import { inheritFrom, inheritTableFormatting, sameBlockRole } from './inherit-formatting'
 import { TRACK_AUTHOR, TRACK_IGNORE, type RevisionRange } from '../editor/revisions'
 import { aiRevisionAuthor } from './revision-author'
 import { countWords, documentTextForWordCount, leafTextForWordCount } from '../word-count'
-import { blockRangePositions, isTrackedDeleted, liveText } from './doc-utils'
 import {
-  modelTextOf,
-  projectedNodeText,
-  redactNode,
-  redactTextBetween,
-  type RedactableNode,
-} from './redact-view'
+  blockRangePositions,
+  hasDeletionRevision,
+  isTrackedDeleted,
+  liveInlineRanges,
+  liveText,
+  liveTextBetween,
+} from './doc-utils'
+import { modelTextOf, projectedNodeText, redactNode, type RedactableNode } from './redact-view'
 import { opSignatures } from './ops'
 import { pageSetupContextLines, type AiSectionState } from './page-setup'
 import { listRevisionEntries } from './revision-ops'
 import type { StoryRevision } from '../editor/story-revisions'
 
-export { blockRangePositions, isTrackedDeleted, liveText }
+export { blockRangePositions, isTrackedDeleted, liveInlineRanges, liveText, liveTextBetween }
 
 /**
  * Agent protocol: the model runs a multi-turn tool-use loop — it reads the document skeleton
@@ -90,7 +99,7 @@ export const OPS_GUIDE = [
   'Discipline:',
   '- Read the "document block list" before issuing ops; anything like "paragraph N / a certain section" must be addressed with block indexes from the list — never guess;',
   '- Only give the fields the user explicitly asked to change;',
-  '- Protected blocks such as images cannot be modified with style ops (they are skipped); to change table content, use read_blocks to get the <table> and rewrite it wholesale with replace_blocks (the table keeps its column widths, borders, shading and cell formatting; cells whose text you leave unchanged keep their content untouched).',
+  '- Protected blocks such as images cannot be modified with style ops (they are skipped). Rewrite selected text inside one table cell paragraph with replace_selection; for whole-table changes, use read_blocks to get the <table> and rewrite it with replace_blocks (the table keeps its column widths, borders, shading and cell formatting; cells whose text you leave unchanged keep their content untouched).',
   '',
   'Known error cases (must avoid):',
   'BC-1 Giving fields the user did not ask for, wiping existing formatting by mistake;',
@@ -102,11 +111,13 @@ export const OPS_GUIDE = [
 export const HTML_RULES = [
   'The html tool input is a restricted HTML fragment. Rules:',
   '- Only these tags are allowed: h1 h2 h3 h4 h5 h6 p ul ol li strong em u s a br table thead tbody tr th td pre code blockquote',
+  '- An explicit <p></p> is an empty paragraph and is preserved. <p><br></p> instead contains a real line break; empty wrapper <div> elements do not create paragraphs.',
   '- Tables: use <th> for the first (header) row; cells contain plain text only (<br> may split lines); nested tables / merged cells are not supported; once inserted the table is protected as a whole, only cell text remains editable',
   '- Use <pre> for code samples (monospace font + shading, line breaks preserved); use <blockquote> for quotations (indent + left bar)',
   '- Use <formula>LaTeX</formula> for math (produces native Word equations): as a top-level block it becomes its own centered paragraph; placed inside <p>/<li>/<h*> text it is an inline formula flowing with the text, e.g. <p>From <formula>E = mc^2</formula> we know…</p>; supports the common subset of \\frac \\sqrt super/subscripts \\sum \\int \\lim matrix environments Greek letters etc., the align environment is not supported; invalid LaTeX fails the whole call — fix and retry',
   '- Do not include <html>/<body>, markdown code fences, or explanatory text',
   "- <sel>…</sel> appears only in the context to mark the user's selection; it is not a tag you may write",
+  '- Elements with data-doc-readonly are read-only context, not replacement content or object references. Copying them into an HTML write is refused without changes. Edit surrounding text in place or exclude those blocks; use explicit structure operations when deletion is intended.',
   '- <img src="doc:B.I"> in read_blocks output is picture I of block B. To keep a picture when you replace its block, copy that exact tag into the new HTML where the picture should sit; a replaced range whose pictures you leave out loses them (the tool result says so). Any other <img> is ignored — new pictures go through insert_picture',
   '- <span style="color:#RRGGBB;font-size:Npt"> appears only in read_blocks output, on runs whose color or size differs from the rest of the block (color:auto / font-size:default = back to the block\'s normal style); it is read-only — writing <span> has no effect, change colors and sizes with the apply_ops formatting commands',
   '- Organize long content into sections with h2/h3 (unless the user only wants a single paragraph)',
@@ -118,7 +129,7 @@ export const HTML_RULES = [
  * answer in chat.
  */
 export const AGENT_SYSTEM_PROMPT = [
-  'You are the document assistant built into the local document editor GenOffice Docs. You read and modify the currently open document exclusively through tools; there is no other modification channel.',
+  'You are the document assistant built into the local document editor ForaOffice Docs. You read and modify the currently open document exclusively through tools; there is no other modification channel.',
   '',
   '# Intent resolution',
   '- The user asks to modify/generate/translate/format → call the appropriate tools, then summarize what was done in one or two sentences;',
@@ -201,8 +212,11 @@ export interface SelectionScope {
   to?: number
 }
 
-export function getSelectionScope(editor: Editor): SelectionScope {
-  const { from, to, empty } = editor.state.selection
+export function getSelectionScope(
+  editor: Editor,
+  selection: { from: number; to: number; empty: boolean } = editor.state.selection,
+): SelectionScope {
+  const { from, to, empty } = selection
   const doc = editor.state.doc
   let startIndex = -1
   let endIndex = -1
@@ -240,9 +254,21 @@ export function partialSelection(
   const { from, to } = blockRangePositions(editor, scope.startIndex, scope.endIndex)
   const first = doc.child(scope.startIndex)
   const last = doc.child(scope.endIndex)
-  // character precision exists only for top-level text blocks; a range that
-  // starts or ends inside a table / protected block keeps whole-block semantics
-  if (!first.isTextblock || !last.isTextblock) return null
+  if (!first.isTextblock || !last.isTextblock) {
+    // A cell paragraph is partial relative to its top-level table, even when
+    // every character of that paragraph is selected. Cell/node selections
+    // and ranges crossing paragraphs keep their whole-block semantics.
+    const $from = doc.resolve(Math.max(from, Math.min(scope.from, to)))
+    const $to = doc.resolve(Math.max(from, Math.min(scope.to, to)))
+    if (
+      first.type.name !== 'docTable' ||
+      scope.startIndex !== scope.endIndex ||
+      !$from.sameParent($to) ||
+      !$from.parent.isTextblock
+    )
+      return null
+    return { from: $from.pos, to: $to.pos }
+  }
   if (scope.from <= from + 1 && scope.to >= to - 1) return null
   return {
     from: Math.min(Math.max(scope.from, from), to),
@@ -346,9 +372,9 @@ function inlineAtomToHtml(node: PmNode, image?: ImageSrcMapper, refs?: ImageRefs
     return refs ? `<img src="${IMAGE_REF_PREFIX}${refs.block}.${refs.next++}">` : ''
   }
   if (node.type === 'docInlineMath') {
-    // editor-created formulas round-trip as LaTeX; parsed-from-docx ones
-    // degrade to the flat token strip (structure lost if the model rewrites)
-    const source = String(node.attrs?.latex ?? '') || String(node.attrs?.text ?? '')
+    const latex = String(node.attrs?.latex ?? '')
+    const source = latex || String(node.attrs?.text ?? '')
+    if (!image && !latex) return `<span data-doc-readonly="formula">${escapeHtml(source)}</span>`
     return source ? `<formula>${escapeHtml(source)}</formula>` : ''
   }
   if (node.type === 'docRuby') return escapeHtml(String(node.attrs?.base ?? ''))
@@ -393,6 +419,14 @@ function inlineToHtml(
   for (const node of content) {
     // del-marked runs are pending deletions, not current content (but they still occupy positions)
     const deleted = (node.marks ?? []).some((m: PmMark) => m.type === 'del')
+    if ((node.marks ?? []).some((m: PmMark) => m.type === REDACT_MARK)) {
+      const end = pos + (node.type === 'text' ? (node.text ?? '').length : 1)
+      if (pending && pending.from > pos && pending.from < end) boundary(pending.from)
+      else boundary(pos)
+      if (!deleted) html += escapeHtml(projectedNodeText(node))
+      pos = end
+      continue
+    }
     if (node.type === 'text') {
       const text = node.text ?? ''
       const marks = node.marks ?? []
@@ -402,14 +436,27 @@ function inlineToHtml(
       cuts.push(end)
       for (let i = 0; i < cuts.length - 1; i++) {
         boundary(cuts[i])
-        if (!deleted)
-          html += wrapInlineText(text.slice(cuts[i] - pos, cuts[i + 1] - pos), marks, base)
+        if (!deleted) {
+          const part = wrapInlineText(text.slice(cuts[i] - pos, cuts[i + 1] - pos), marks, base)
+          html +=
+            !image && marks.some((mark) => mark.type === 'instrField' || mark.type === 'refField')
+              ? `<span data-doc-readonly="field">${part}</span>`
+              : part
+        }
       }
       pos = end
       continue
     }
     boundary(pos)
-    if (!deleted) html += inlineAtomToHtml(node, image, refs)
+    if (!deleted) {
+      const part = inlineAtomToHtml(node, image, refs)
+      html +=
+        !image &&
+        node.type !== 'docInlineImage' &&
+        (node.marks ?? []).some((mark) => mark.type === 'instrField' || mark.type === 'refField')
+          ? `<span data-doc-readonly="field">${part}</span>`
+          : part
+    }
     pos += 1
   }
   boundary(pos)
@@ -424,6 +471,16 @@ function inlineToPlainText(content: PmNode[] | undefined): string {
     .filter((n) => !(n.marks ?? []).some((m: PmMark) => m.type === 'del'))
     .map((n) => (n.type === 'hardBreak' ? '\n' : n.type === 'text' ? (n.text ?? '') : ''))
     .join('')
+}
+
+function readOnlyInlineKind(content: PmNode[] | undefined): 'field' | 'formula' | undefined {
+  for (const node of content ?? []) {
+    const marks = node.marks ?? []
+    if (marks.some((mark) => mark.type === 'del' || mark.type === REDACT_MARK)) continue
+    if (marks.some((mark) => mark.type === 'instrField' || mark.type === 'refField')) return 'field'
+    if (node.type === 'docInlineMath' && !node.attrs?.latex) return 'formula'
+  }
+  return undefined
 }
 
 /** <pre> body: escaped plain text, the selected span delimited by <sel>…</sel> like the rich blocks */
@@ -464,43 +521,65 @@ function isQuoteParagraph(node: PmNode): boolean {
   return node.attrs?.borders === QUOTE_BLOCK_PRESET.borders && Number(node.attrs?.indentLeft) > 0
 }
 
-/** table block -> restricted <table> HTML so the model can read and rewrite it */
-function tableToHtml(table: TableModel): string {
-  const headerRow = isHeaderRowTable(table)
-  const rows = table.rows.map((row, r) => {
-    const tag = headerRow && r === 0 ? 'th' : 'td'
-    const cells = row
-      .map((cell) => `<${tag}>${cell.paras.map(escapeHtml).join('<br>')}</${tag}>`)
-      .join('')
-    return `<tr>${cells}</tr>`
-  })
-  return `<table>${rows.join('')}</table>`
-}
-
 function isHeaderRowTable(table: TableModel): boolean {
   return table.rows.length > 1 && table.rows[0].every((c) => c.bold || c.fill !== undefined)
 }
 
 /**
- * Export variant: cells keep their inline pictures (the table model is text
- * only). The grid comes from the model so merged cells keep their columns;
- * each non-continuation entry maps to the row's next physical cell node.
+ * The model supplies the merged-cell grid; physical nodes supply live inline
+ * content and exact selection positions. Export also keeps inline pictures.
  */
-function tableToHtmlWithImages(node: PmNode, image: ImageSrcMapper): string {
-  const model = pmTableToModel(node)
+function tableToHtml(
+  node: ProseMirrorNode,
+  start: number,
+  sel?: InlineSelection | null,
+  image?: ImageSrcMapper,
+  refs?: ImageRefs,
+): string {
+  const model = pmTableToModel(node.toJSON() as PmNode)
   const headerRow = isHeaderRowTable(model)
+  const grid = TableMap.get(node)
   const rows = model.rows.map((row, r) => {
     const tag = headerRow && r === 0 ? 'th' : 'td'
-    const physical = node.content?.[r]?.content ?? []
-    let next = 0
+    const physical = node.child(r)
+    if (hasDeletionRevision(physical)) return ''
+    let column = 0
     const cells = row
       .map((entry) => {
+        const cellOffset = grid.map[r * grid.width + column]
+        column += entry.colSpan ?? 1
         if (entry.vMerge === 'continue') return `<${tag}></${tag}>`
-        const cell = physical[next++]
-        const paras = (cell?.content ?? [])
-          .filter((n) => n.type === 'docParagraph' || n.type === 'docListItem')
-          .map((n) => inlineToHtml(n.content, undefined, image))
-        return `<${tag}>${paras.join('<br>')}</${tag}>`
+        const cell = node.nodeAt(cellOffset)!
+        const contentStart = start + cellOffset + 2
+        const paras: string[] = []
+        let readOnly: string | undefined
+        if (!hasDeletionRevision(cell))
+          cell.forEach((paragraph, offset) => {
+            if (!paragraph.isTextblock || hasDeletionRevision(paragraph)) return
+            const inlineStart = contentStart + offset + 1
+            const from = sel ? Math.max(0, sel.from - inlineStart) : 0
+            const to = sel ? Math.min(paragraph.content.size, sel.to - inlineStart) : 0
+            const selection = from < to ? { from, to } : undefined
+            const json = paragraph.toJSON() as PmNode
+            if (!image) readOnly ??= readOnlyInlineKind(redactNode(json).content)
+            paras.push(
+              sel || image
+                ? inlineToHtml(json.content, selection, image, refs)
+                : (redactNode(json).content ?? [])
+                    .map((child) =>
+                      child.type === 'docInlineImage'
+                        ? inlineToHtml([child], undefined, undefined, refs)
+                        : escapeHtml(
+                            inlineToRuns([child])
+                              .filter((run) => !run.del)
+                              .map((run) => run.text)
+                              .join(''),
+                          ),
+                    )
+                    .join(''),
+            )
+          })
+        return `<${tag}${readOnly ? ` data-doc-readonly="${readOnly}"` : ''}>${paras.join('<br>')}</${tag}>`
       })
       .join('')
     return `<tr>${cells}</tr>`
@@ -566,7 +645,10 @@ export function serializeRangeToHtml(
     } else if (node.type === 'docParagraph') {
       flushList()
       if (isCodeParagraph(node)) {
-        parts.push(`<pre>${codeToHtml(node.content, inlineSel(i))}</pre>`)
+        const readOnly = !image && readOnlyInlineKind(node.content)
+        parts.push(
+          `<pre${readOnly ? ` data-doc-readonly="${readOnly}"` : ''}>${codeToHtml(node.content, inlineSel(i))}</pre>`,
+        )
       } else if (isQuoteParagraph(node)) {
         parts.push(
           `<blockquote>${inlineToHtml(node.content, inlineSel(i), image, refs)}</blockquote>`,
@@ -576,7 +658,8 @@ export function serializeRangeToHtml(
       }
     } else if (node.type === 'docTable') {
       flushList()
-      parts.push(image ? tableToHtmlWithImages(node, image) : tableToHtml(pmTableToModel(node)))
+      const position = blockRangePositions(editor, startIndex + i, startIndex + i).from
+      parts.push(tableToHtml(editor.state.doc.child(startIndex + i), position, sel, image, refs))
     } else {
       flushList()
       const formula = node.attrs?.formulaDisplay as { tokens?: string[]; latex?: string } | null
@@ -585,7 +668,7 @@ export function serializeRangeToHtml(
         parts.push(`<formula>${escapeHtml(formula.latex)}</formula>`)
       } else if (formula?.tokens?.length) {
         parts.push(
-          `<p>[Protected formula: ${escapeHtml(formula.tokens.join(' '))}, structure is read-only, kept as is]</p>`,
+          `<p data-doc-readonly="formula">[Protected formula: ${escapeHtml(formula.tokens.join(' '))}, read-only representation; exclude from HTML replacement]</p>`,
         )
       } else {
         const label = String(node.attrs?.label ?? node.attrs?.blockType ?? 'content')
@@ -594,7 +677,7 @@ export function serializeRangeToHtml(
           .replace(/\s+/g, ' ')
           .trim()
         parts.push(
-          `<p>[Protected content: ${escapeHtml(label)}${preview ? ` — visible text: "${escapeHtml(clip(preview, 300))}"` : ''}, kept as is]</p>`,
+          `<p data-doc-readonly="protected">[Protected content: ${escapeHtml(label)}${preview ? ` — visible text: "${escapeHtml(clip(preview, 300))}"` : ''}, read-only representation; exclude from HTML replacement]</p>`,
         )
       }
     }
@@ -948,9 +1031,7 @@ export function buildDocContext(
     : ''
   // `textBetween` would read the words; the context quotes the selection back
   // to the model, so it has to be the projected read
-  const selectedText = partial
-    ? redactTextBetween(editor.getJSON() as RedactableNode, partial.from, partial.to)
-    : ''
+  const selectedText = partial ? liveTextBetween(editor, partial.from, partial.to) : ''
   const selectionLines = partial
     ? [
         `Content selected by the user (blocks ${scope.startIndex}-${scope.endIndex}; ONLY the span inside <sel>…</sel> is selected, the rest of these blocks is shown for context):`,
@@ -1123,42 +1204,57 @@ function parseList(
   })
 }
 
-/** paragraph texts of one table cell: <br> and nested <p>/<div> split paragraphs */
-function cellParas(cell: Element): string[] {
-  const paras: string[] = []
-  let current = ''
+/** Cell paragraphs retain image references; <br> and nested <p>/<div> split them. */
+function cellParas(cell: Element): PmNode[][] {
+  const paras: PmNode[][] = []
+  let current: PmNode[] = []
+  const hasContent = () => current.some((node) => node.type !== 'text' || node.text?.trim())
   const push = () => {
-    paras.push(current.replace(/\s+/g, ' ').trim())
-    current = ''
+    for (const node of current)
+      if (node.type === 'text') node.text = node.text!.replace(/\s+/g, ' ')
+    if (current[0]?.type === 'text') current[0].text = current[0].text!.trimStart()
+    const last = current.at(-1)
+    if (last?.type === 'text') last.text = last.text!.trimEnd()
+    paras.push(current.filter((node) => node.type !== 'text' || node.text))
+    current = []
   }
   const walk = (node: Node) => {
     node.childNodes.forEach((child) => {
       if (child.nodeType === Node.TEXT_NODE) {
-        current += child.textContent ?? ''
+        const text = child.textContent ?? ''
+        const last = current.at(-1)
+        if (last?.type === 'text') last.text += text
+        else current.push({ type: 'text', text })
         return
       }
       if (child.nodeType !== Node.ELEMENT_NODE) return
       const el = child as Element
       const tag = el.tagName.toLowerCase()
       if (tag === 'br') push()
-      else if (tag === 'p' || tag === 'div') {
-        if (current.trim()) push()
+      else if (tag === 'img') {
+        const ref = IMAGE_REF_RE.exec(el.getAttribute('src') ?? '')
+        if (ref)
+          current.push({
+            type: IMAGE_REF_NODE,
+            attrs: { block: Number(ref[1]), index: Number(ref[2]) },
+          })
+      } else if (tag === 'p' || tag === 'div') {
+        if (hasContent()) push()
         walk(el)
         push()
       } else walk(el)
     })
   }
   walk(cell)
-  if (current.trim()) push()
-  const out = paras.filter((p, i) => p !== '' || (i > 0 && i < paras.length - 1))
-  return out.length > 0 ? out : ['']
+  if (hasContent()) push()
+  const out = paras.filter((p, i) => p.length > 0 || (i > 0 && i < paras.length - 1))
+  return out.length > 0 ? out : [[]]
 }
 
 /**
- * <table> -> protected table block: display TableModel + generated w:tbl
- * fragment. Cell texts are patched into the fragment at save time via the
- * existing genXml branch of pmDocToSavePlan (patchTableCellTexts), so the
- * model row/col counts must mirror the generated grid.
+ * Build an editable table with the normal table defaults. Text establishes
+ * its grid and paragraphs; image-reference nodes then occupy their original
+ * inline positions until resolveImageRefs supplies the document images.
  */
 function parseTable(el: Element): PmNode | null {
   const trs = Array.from(el.querySelectorAll('tr'))
@@ -1167,13 +1263,33 @@ function parseTable(el: Element): PmNode | null {
   const cols = Math.max(...rawRows.map((r) => r.length))
   if (cols === 0) return null
   const headerRow = rawRows[0].some((c) => c.tagName.toLowerCase() === 'th')
-  const rows: TableCell[][] = rawRows.map((cells, r) => {
+  const contents = rawRows.map((cells) => cells.map(cellParas))
+  const rows: TableCell[][] = contents.map((cells, r) => {
     const style = headerRow && r === 0 ? { bold: true, fill: TABLE_HEADER_FILL } : undefined
-    const row = cells.map((cell) => wordTableCell(cellParas(cell), style))
+    const row = cells.map((paras) =>
+      wordTableCell(
+        paras.map((content) => content.map((node) => node.text ?? '').join('')),
+        style,
+      ),
+    )
     while (row.length < cols) row.push(wordTableCell([''], style))
     return row
   })
-  return tableModelToPmNode(wordTableModel(rows, cols))
+  const table = tableModelToPmNode(wordTableModel(rows, cols))
+  contents.forEach((cells, r) =>
+    cells.forEach((paras, c) => {
+      const cell = table.content![r].content![c]
+      paras.forEach((content, p) => {
+        if (!content.some((node) => node.type === IMAGE_REF_NODE)) return
+        const paragraph = cell.content![p]
+        const marks = paragraph.content?.find((node) => node.type === 'text')?.marks
+        paragraph.content = content.map((node) =>
+          node.type === 'text' && marks ? { ...node, marks } : node,
+        )
+      })
+    }),
+  )
+  return table
 }
 
 /** <pre> -> mono/shaded paragraph; newlines preserved as hard breaks */
@@ -1217,6 +1333,7 @@ const IMAGE_REF_NODE = '__imageRef'
 function inlineImagesOf(block: ProseMirrorNode): ProseMirrorNode[] {
   const out: ProseMirrorNode[] = []
   block.descendants((n) => {
+    if (hasDeletionRevision(n)) return false
     if (
       n.type.name === 'docInlineImage' &&
       !n.attrs.rule &&
@@ -1270,7 +1387,17 @@ export function countInlineImages(editor: Editor, start: number, end: number): n
   return n
 }
 
+export function readOnlyHtmlError(html: string): string | null {
+  if (!/data-doc-readonly/i.test(html)) return null
+  const parsed = new DOMParser().parseFromString(html, 'text/html')
+  return parsed.querySelector('[data-doc-readonly]')
+    ? 'HTML contains read-only document metadata, not editable content or an object reference. No changes were made. Exclude the protected range or edit its surrounding text in place; use explicit structure operations for intentional deletion.'
+    : null
+}
+
 export function parseHtmlFragment(raw: string, numIds: NumIds): PmNode[] {
+  const readOnly = readOnlyHtmlError(raw)
+  if (readOnly) throw new Error(readOnly)
   let text = raw.trim()
   const fence = /```(?:html)?\s*([\s\S]*?)```/.exec(text)
   if (fence) text = fence[1].trim()
@@ -1325,7 +1452,7 @@ export function parseHtmlFragment(raw: string, numIds: NumIds): PmNode[] {
       pushFormula(el)
     } else if (tag === 'p' || tag === 'div') {
       const inline = parseInline(el, [])
-      if (inline.length > 0) out.push(blockNode('docParagraph', {}, inline))
+      if (tag === 'p' || inline.length > 0) out.push(blockNode('docParagraph', {}, inline))
     } else {
       // unknown block-ish tag: salvage the text
       const t = (el.textContent ?? '').trim()
@@ -1343,6 +1470,8 @@ const BLOCK_TAG = /<\/?(h[1-6]|p|div|ul|ol|li|table|thead|tbody|tr|th|td|pre|blo
  * inside one text block, so a multi-block answer belongs to replace_blocks.
  */
 export function parseInlineFragment(raw: string): PmNode[] {
+  const readOnly = readOnlyHtmlError(raw)
+  if (readOnly) throw new Error(readOnly)
   let text = raw.trim()
   const fence = /```(?:html)?\s*([\s\S]*?)```/.exec(text)
   if (fence) text = fence[1].trim()
@@ -1549,19 +1678,23 @@ export function replaceInlineRange(
   track?: AiTrack,
 ): void {
   const tr = editor.state.tr
-  const blockPos = tr.doc.resolve(from).before(1)
+  const blockPos = tr.doc.resolve(from).before()
+  const ranges = liveInlineRanges(tr.doc, from, to)
   const inserted = nodes.reduce((size, n) => size + n.nodeSize, 0)
   if (track) {
     const date = revisionDate()
     const { ins, del } = editor.schema.marks
     tr.insert(to, nodes)
     if (inserted > 0) tr.addMark(to, to + inserted, ins.create({ author: track.author, date }))
-    tr.addMark(from, to, del.create({ author: track.author, date }))
+    for (const range of ranges)
+      tr.addMark(range.from, range.to, del.create({ author: track.author, date }))
     tr.setSelection(TextSelection.create(tr.doc, to, to + inserted))
     tr.setMeta(TRACK_IGNORE, true)
   } else {
-    tr.replaceWith(from, to, nodes)
-    tr.setSelection(TextSelection.create(tr.doc, from, from + inserted))
+    for (const range of [...ranges].reverse()) tr.delete(range.from, range.to)
+    const at = tr.mapping.map(to, -1)
+    tr.insert(at, nodes)
+    tr.setSelection(TextSelection.create(tr.doc, at, at + inserted))
     const block = tr.doc.nodeAt(blockPos)
     if (block) tr.setNodeMarkup(blockPos, undefined, { ...block.attrs, aiChanged: true })
     tr.setMeta(TRACK_AUTHOR, aiRevisionAuthor())

@@ -1,6 +1,9 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { zh } from './zh'
 
 export const pl = {
+  appExternalAgentFailed: 'Nie udało się wysłać działania do zewnętrznego agenta: {error}',
+  appDocumentDraftPending: 'Najpierw zakończ lub odrzuć wersję roboczą dokumentu.',
   appScTitle: 'Skróty klawiaturowe',
   appScFilter: 'Szukaj skrótu',
   appScNone: 'Brak pasujących skrótów',

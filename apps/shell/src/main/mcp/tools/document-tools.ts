@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { existsSync } from 'node:fs'
 import { basename, extname, isAbsolute, join } from 'node:path'
 import { z } from 'zod'
@@ -7,7 +8,11 @@ import {
   readDocxTextViaCli,
   readDocxPropertiesViaCli,
 } from '../headless-cli'
-import type { McpToolDefinition } from '../mcp-server'
+import type { McpInvocation, McpToolDefinition } from '../mcp-server'
+import { docsToolCatalog, DOCS_READ_TOOLS } from '../../../../../docs/src/shared/tool-catalog'
+import { DOCS_RUNTIME_TOOLS } from '../../../../../docs/src/shared/runtime-tools'
+import { formatDocsMcpResult } from '../../../../../docs/src/shared/mcp-result'
+import { DOCS_RESOURCE_TOOLS } from '../../../../../docs/src/shared/resource-tools'
 import { capabilityReport, generateExtension } from './formats'
 import type { FamilyDriver, SessionHost, TargetResolver } from './session-tools'
 import { contentTarget } from './session-tools'
@@ -56,6 +61,7 @@ export type McpEditorCommandName =
   | 'insert_picture'
   | 'read_document'
   | 'save_document'
+  | 'execute_tool'
 
 /**
  * Visible-editor control: opens a docs tab and pushes editor commands into it,
@@ -67,7 +73,13 @@ export interface DocsControl {
   /** open a fresh blank docs tab; resolves to its webContents id */
   openBlankTab: () => Promise<number>
   /** run one editor command in that tab and resolve its result */
-  runCommand: (wcId: number, command: McpEditorCommandName, payload: unknown) => Promise<unknown>
+  runCommand: (
+    wcId: number,
+    command: McpEditorCommandName,
+    payload: unknown,
+    invocation?: McpInvocation,
+  ) => Promise<unknown>
+  closeCaller?: (callerId: string) => void
 }
 
 const DOCX_EXT = `.${generateExtension('docx')}`
@@ -346,8 +358,8 @@ export function documentDriver(docs: DocsControl): FamilyDriver {
   return {
     family: 'docx',
     openBlankTab: () => docs.openBlankTab(),
-    save: async (wcId, path, overwrite) =>
-      docs.runCommand(wcId, 'save_document', { path, overwrite }),
+    save: async (wcId, path, overwrite, invocation) =>
+      docs.runCommand(wcId, 'save_document', { path, overwrite }, invocation),
   }
 }
 
@@ -363,149 +375,50 @@ export function documentDriver(docs: DocsControl): FamilyDriver {
 function createDocxContentTools(deps: DocToolDeps, host: SessionHost): McpToolDefinition[] {
   const docs = deps.docs
   if (!docs) return []
-
   const target = contentTarget(host, deps.resolveTarget, 'docx')
-  const documentField = z
-    .string()
-    .optional()
-    .describe(
-      "tab id or path of an open Word document to edit instead of the session's own tab " +
-        '(from open_documents {action:"list"}); the edit lands in that live document, and a ' +
-        'mutating tool switches the UI to that tab first so the user sees it happen',
-    )
-
+  const legacyCommands = new Set([
+    'insert_content',
+    'replace_blocks',
+    'apply_ops',
+    'insert_picture',
+  ])
   return [
-    {
-      name: 'insert_content',
-      description:
-        'Insert content into the visible document as HTML (headings, paragraphs, bold/italic, lists, ' +
-        'tables, links). Appends at the end unless afterBlockIndex is given.',
-      inputSchema: {
-        html: z.string().describe('restricted HTML fragment to insert'),
-        afterBlockIndex: z
-          .number()
-          .int()
-          .optional()
-          .describe('insert after this block index; default appends at the end'),
-        document: documentField,
-      },
-      handler: async (args) => {
-        const wc = await target(args.document, { focus: true })
-        return docs.runCommand(wc, 'insert_content', args)
-      },
-    },
-    {
-      name: 'replace_blocks',
-      description:
-        'Replace a range of blocks in the visible document with new HTML content. ' +
-        'Use read_document to learn block indexes.',
-      inputSchema: {
-        startBlockIndex: z.number().int().describe('first block index to replace (inclusive)'),
-        endBlockIndex: z.number().int().describe('last block index to replace (inclusive)'),
-        html: z.string().describe('restricted HTML fragment the range is replaced with'),
-        document: documentField,
-      },
-      handler: async (args) => {
-        const wc = await target(args.document, { focus: true })
-        return docs.runCommand(wc, 'replace_blocks', args)
-      },
-    },
-    {
-      name: 'apply_ops',
-      description:
-        'Apply formatting commands to the visible document (font, paragraph format, heading level, ' +
-        'find/replace, list/indent, etc.). `ops` is the same batch format the built-in AI editor accepts; ' +
-        'the whole batch is atomic. Use read_document for block indexes.',
-      inputSchema: {
-        ops: z.array(z.any()).describe('array of op objects'),
-        dryRun: z
-          .boolean()
-          .optional()
-          .describe('validate and plan the batch without changing the document'),
-        document: documentField,
-      },
-      handler: async (args) => {
-        const wc = await target(args.document, { focus: true })
-        return docs.runCommand(wc, 'apply_ops', {
-          ops: args.ops,
-          dryRun: args.dryRun === true,
-        })
-      },
-    },
-    {
-      name: 'insert_picture',
-      description:
-        'Insert a picture into the visible document from a direct image link (png/jpg/gif), ' +
-        'at a given size, inline after a block or floating at a position with text wrap. ' +
-        'Use read_document for block indexes.',
-      inputSchema: {
-        url: z.string().describe('direct image link (png/jpg/gif)'),
-        afterBlockIndex: z
-          .number()
-          .int()
-          .optional()
-          .describe('insert after this block (-1 = start of document); default: end of document'),
-        width: z
-          .union([z.number(), z.string()])
-          .optional()
-          .describe(
-            'display width, "2.54cm", "1in", "72pt", "96px" or a bare number of points; ' +
-              'default natural size capped at 480px',
-          ),
-        height: z
-          .union([z.number(), z.string()])
-          .optional()
-          .describe('display height; omit to keep the aspect ratio'),
-        float: z
-          .object({
-            anchor: z
-              .enum(['paragraph', 'page', 'margin'])
-              .optional()
-              .describe(
-                'what x/y measure from: the anchor paragraph (default), the page corner, ' +
-                  'or the margin box corner',
-              ),
-            x: z
-              .union([z.number(), z.string()])
-              .optional()
-              .describe(
-                'horizontal offset, "2.54cm", "1in", "72pt", "96px" or a bare number of points',
-              ),
-            y: z
-              .union([z.number(), z.string()])
-              .optional()
-              .describe(
-                'vertical offset, "2.54cm", "1in", "72pt", "96px" or a bare number of points',
-              ),
-            wrap: z
-              .enum(['square', 'tight', 'topAndBottom', 'behind', 'inFront'])
-              .optional()
-              .describe('how text wraps around the floating picture (default square)'),
-          })
-          .optional()
-          .describe(
-            'omit for an inline picture in its own paragraph; give it to float the picture ' +
-              'at a position',
-          ),
-        altText: z.string().optional().describe('alternative text (accessibility)'),
-        document: documentField,
-      },
-      handler: async (args) => {
-        const wc = await target(args.document, { focus: true })
-        return docs.runCommand(wc, 'insert_picture', args)
-      },
-    },
+    ...[...docsToolCatalog(), ...DOCS_RUNTIME_TOOLS, ...DOCS_RESOURCE_TOOLS].map(
+      (tool): McpToolDefinition => ({
+        name: tool.name,
+        description: tool.description,
+        formatResult: (result) => formatDocsMcpResult(result, tool.name),
+        inputSchema: z.fromJSONSchema({
+          ...tool.inputSchema,
+          properties: {
+            ...(tool.inputSchema.properties as Record<string, unknown>),
+            document: {
+              type: 'string',
+              description: 'An open document id or path; omit for the active session document.',
+            },
+          },
+        }),
+        handler: async (args, invocation) => {
+          const { document, ...input } = args
+          const wc = await target(document, { focus: !DOCS_READ_TOOLS.has(tool.name) })
+          return legacyCommands.has(tool.name)
+            ? docs.runCommand(wc, tool.name as McpEditorCommandName, input, invocation)
+            : docs.runCommand(wc, 'execute_tool', { name: tool.name, input }, invocation)
+        },
+      }),
+    ),
     {
       name: 'read_document',
       description:
-        'Read the visible document as a block list: one "index|type|text" line per block, where the ' +
-        'index is what apply_ops and insert_content address. Long blocks are clipped for reading; ' +
-        'the list is an overview, not a lossless copy (use read_docx for full text).',
-      inputSchema: { document: documentField },
-      handler: async (args) => {
-        const wc = await target(args.document)
-        return docs.runCommand(wc, 'read_document', {})
+        "Read the current live document context and refresh this caller's editing baseline.",
+      inputSchema: {
+        document: z
+          .string()
+          .optional()
+          .describe('An open document id or path; omit for the active session document.'),
       },
+      handler: async (args, invocation) =>
+        docs.runCommand(await target(args.document), 'read_document', {}, invocation),
     },
   ]
 }

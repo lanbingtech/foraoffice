@@ -1,3 +1,4 @@
+# Modified for ForaOffice from GenOffice v0.12.852.
 node_modules
 out/
 dist/
@@ -18,7 +19,15 @@ electron-builder.env
 /.task/
 /docs-archive/
 .idea/
-.claude/
+
+# Local AI agent configuration, skills, and workflow metadata
+/.agents/
+/.claude/
+/.codex/
+/.cursor/
+/AGENTS.md
+/CLAUDE.md
+/docs/agents/
 
 # Local build artifacts dropped in the repo root
 /*.dmg
@@ -29,7 +38,6 @@ electron-builder.env
 # Playwright artifacts
 /test-results/
 
-.cursor/rules/git-remote.mdc
 __pycache__/
 /notes/
 /MEMORY.md
@@ -41,3 +49,8 @@ __pycache__/
 # One-off verification tests kept while chasing a fix; promote to a real test
 # file (or delete) instead of committing them under this name.
 _scratch-*
+
+# Temporary investigations and execution plans belong outside the repository.
+/.scratch/
+/docs/diagnostics/
+/docs/superpowers/plans/

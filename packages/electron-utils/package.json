@@ -1,4 +1,5 @@
 {
+  "x-foraoffice-modification": "Modified for ForaOffice from GenOffice v0.12.852.",
   "name": "@genoffice/electron-utils",
   "version": "0.1.0",
   "license": "Apache-2.0",
@@ -8,6 +9,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./atomic-write": "./src/atomic-write.ts",
+    "./print-html-pdf": "./src/print-html-pdf.ts",
     "./disk-watch": "./src/disk-watch.ts",
     "./drop-open": "./src/drop-open.ts",
     "./font-catalog": "./src/font-catalog.ts",
@@ -15,11 +17,13 @@
     "./generated-images": "./src/generated-images.ts",
     "./headless-export": "./src/headless-export.ts",
     "./main-proxy": "./src/main-proxy.ts",
+    "./ooxml-encryption": "./src/ooxml-encryption.ts",
     "./print-cups": "./src/print-cups.ts",
     "./printer-options": "./src/printer-options.ts",
     "./print-job": "./src/print-job.ts",
     "./print-window": "./src/print-window.ts",
     "./remote-image": "./src/remote-image.ts",
+    "./image-data": "./src/image-data.ts",
     "./remote-table": "./src/remote-table.ts",
     "./renderer-protocol": "./src/renderer-protocol.ts",
     "./renderer-scheme": "./src/renderer-scheme.ts",

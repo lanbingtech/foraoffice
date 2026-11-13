@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { afterEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { request as httpRequest } from 'node:http'
@@ -58,6 +59,48 @@ async function startService(): Promise<number> {
 }
 
 describe('MCP server core', () => {
+  it('assigns independent transport identities even when clients claim the same name and caller id', async () => {
+    const port = await freePort()
+    service = new McpServerService({
+      port,
+      tools: [
+        {
+          name: 'identity',
+          description: 'Return the trusted transport caller',
+          inputSchema: { callerId: z.string().optional() },
+          handler: (_args, context) => ({ callerId: context?.callerId }),
+        },
+      ],
+    })
+    await service.start()
+    const first = new Client({ name: 'same-name', version: '1' })
+    const second = new Client({ name: 'same-name', version: '1' })
+    try {
+      await first.connect(
+        new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)),
+      )
+      await second.connect(
+        new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)),
+      )
+      const call = async (client: Client) => {
+        const result = await client.callTool({
+          name: 'identity',
+          arguments: { callerId: 'forged' },
+        })
+        const content = result.content as Array<{ type: string; text: string }>
+        return JSON.parse(content[0].text).callerId
+      }
+      const firstId = await call(first)
+      expect(firstId).toEqual(expect.any(String))
+      expect(firstId).not.toBe('forged')
+      expect(await call(first)).toBe(firstId)
+      expect(await call(second)).not.toBe(firstId)
+    } finally {
+      await first.close()
+      await second.close()
+    }
+  })
+
   it('answers /health on loopback', async () => {
     const port = await startService()
     const res = await fetch(`http://127.0.0.1:${port}/health`)

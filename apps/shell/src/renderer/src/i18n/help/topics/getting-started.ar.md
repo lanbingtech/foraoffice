@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # بدء سريع: الواجهة والأساسيات
+
+> يصف هذا الدليل تطبيق GenOffice المكتبي الموروث في ForaOffice، بما فيه الوكيل والإعدادات المدمجة. توفر التطبيقات التي تضمّن Docs خدماتها وتكامل وكيلها؛ ولا تُعد ميزات سطح المكتب تلقائياً من إمكانات SDK. راجع [دليل Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 GenOffice حزمة مكتبية تعمل بالكامل على جهازك: نافذة واحدة وصف واحد من علامات التبويب يضم ستة محرّرات — Docs (معالجة النصوص)، وSheets (جداول البيانات)، وSlides (العروض التقديمية)، وPDF، وMarkdown، وHTML. الملفات ملفات .docx / .xlsx / .pptx / .pdf حقيقية، وتتوافق تمامًا مع Word وExcel وPowerPoint. لا حاجة إلى أي اتصال بالشبكة.
 

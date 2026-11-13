@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { Node as PmNode } from '@tiptap/pm/model'
 import { asciiFamilyResolver, runFaceDecls } from '../text-layout/run-faces'
 import {
@@ -9,7 +10,7 @@ import {
 import {} from '@tiptap/pm/state'
 import type { EditorView } from '@tiptap/pm/view'
 import {} from '@tiptap/pm/tables'
-import { WORDART_PRESETS, wordArtStrokePx } from '@genoffice/ui'
+import { WORDART_PRESETS, wordArtStrokePx } from '@genoffice/ui/wordart-presets'
 import {
   autospaceMode,
   cssAutoLineMult,

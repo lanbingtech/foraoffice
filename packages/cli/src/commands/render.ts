@@ -1,7 +1,8 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { flagBool, flagString } from '../args'
-import { readInput, resolveInput } from '../fs'
+import { assertAllowed, readInput, resolveInput } from '../fs'
 import { contactSheet, cropPng } from '../formats/png'
 import { describeDeck, openDeck, type ElementSummary } from '../formats/pptx'
 import {
@@ -121,6 +122,7 @@ export const renderCommand: CommandDef = {
           pad,
         )
         const out = join(outDir, `${stem}-${String(page.page + 1).padStart(2, '0')}-${t.id}.png`)
+        assertAllowed(out, ctx.env, 'write')
         writeFileSync(out, cropped)
         crops.push({ page: page.page, path: out, width: rect.w, height: rect.h, el: t.id })
       }
@@ -137,6 +139,7 @@ export const renderCommand: CommandDef = {
         positive(flagString(args, 'tile'), DEFAULT_TILE_PX, 'tile'),
       )
       const out = join(outDir, `${stem}-grid.png`)
+      assertAllowed(out, ctx.env, 'write')
       writeFileSync(out, sheet.png)
       detail.grid = {
         path: out,

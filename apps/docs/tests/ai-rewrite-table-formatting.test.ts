@@ -1,8 +1,10 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { afterEach, describe, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'
 import {
   BLANK_BULLET_NUM_ID,
   BLANK_ORDERED_NUM_ID,
+  inlinePictureDrawingXml,
   parseDocx,
   saveDocx,
 } from '@genoffice/docx-engine'
@@ -101,8 +103,8 @@ afterEach(() => {
   for (const editor of liveEditors.splice(0)) editor.destroy()
 })
 
-async function open(bodyXml: string, withNumbering = false) {
-  const parsed = await parseDocx(await buildDocx({ bodyXml, withNumbering }))
+async function open(bodyXml: string, withNumbering = false, withImage = false) {
+  const parsed = await parseDocx(await buildDocx({ bodyXml, withNumbering, withImage }))
   const editor = new Editor({
     element: document.createElement('div'),
     extensions: editorExtensions,
@@ -151,6 +153,99 @@ async function saveAndReparse(editor: Editor, parsed: Awaited<ReturnType<typeof 
 }
 
 describe('replace_blocks keeps a rewritten table formatted like the table it replaces', () => {
+  it('persists swaps of equal-size images without changing table text or geometry', async () => {
+    const secondPng =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+    const image = (rId: string, docPrId: number) =>
+      `<w:tc><w:p><w:r>${inlinePictureDrawingXml({ rId, docPrId, widthPx: 100, heightPx: 80 })}</w:r></w:p></w:tc>`
+    const parsed = await parseDocx(
+      await buildDocx({
+        withImage: true,
+        binaryParts: [
+          {
+            path: 'word/media/image2.png',
+            base64: secondPng,
+            extension: 'png',
+            contentType: 'image/png',
+          },
+        ],
+        extraRels:
+          '<Relationship Id="rId11" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image2.png"/>',
+        bodyXml: `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="4500"/></w:tblGrid><w:tr>${image('rId10', 1)}${image('rId11', 2)}</w:tr></w:tbl>`,
+      }),
+    )
+    const editor = new Editor({
+      element: document.createElement('div'),
+      extensions: editorExtensions,
+      content: blocksToPmDoc(parsed.blocks) as never,
+    })
+    liveEditors.push(editor)
+    const before = parsed.blocks[0].table!.rows[0].map(
+      (nextCell) => nextCell.richParas![0].runs.find((run) => run.image)!.image!.dataUrl,
+    )
+    expect(before[0]).not.toBe(before[1])
+    await replaceBlocks(
+      editor,
+      0,
+      0,
+      '<table><tr><td><img src="doc:0.1"></td><td><img src="doc:0.0"></td></tr></table>',
+    )
+    const saved = await saveAndReparse(editor, parsed)
+    expect(
+      saved.rows[0].map(
+        (nextCell) => nextCell.richParas![0].runs.find((run) => run.image)!.image!.dataUrl,
+      ),
+    ).toEqual([before[1], before[0]])
+  })
+
+  it('persists moving an image within unchanged cell text', async () => {
+    const { editor, parsed } = await open(
+      '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="7500"/></w:tblGrid><w:tr><w:tc><w:p>' +
+        `<w:r><w:t>AB</w:t></w:r><w:r>${inlinePictureDrawingXml({ rId: 'rId10', docPrId: 1, widthPx: 100, heightPx: 80 })}</w:r><w:r><w:t>CD</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`,
+      false,
+      true,
+    )
+    await replaceBlocks(editor, 0, 0, '<table><tr><td>A<img src="doc:0.0">BCD</td></tr></table>')
+    const saved = await saveAndReparse(editor, parsed)
+    const runs = saved.rows[0][0].richParas![0].runs
+    const at = runs.findIndex((run) => run.image)
+    expect(at).toBeGreaterThanOrEqual(0)
+    expect(
+      runs
+        .slice(0, at)
+        .map((run) => run.text)
+        .join(''),
+    ).toBe('A')
+  })
+
+  it.each([false, true])(
+    'saved replacement keeps exactly the explicitly requested images: %s',
+    async (keep) => {
+      const { editor, parsed } = await open(
+        '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="4500"/></w:tblGrid>' +
+          `<w:tr>${cell('Old label', BODY_RPR)}<w:tc><w:p><w:r>${inlinePictureDrawingXml({ rId: 'rId10', docPrId: 1, widthPx: 100, heightPx: 80 })}</w:r></w:p></w:tc></w:tr></w:tbl>`,
+        false,
+        true,
+      )
+      expect(serializeRangeToHtml(editor, 0, 0)).toContain('<img src="doc:0.0">')
+      await replaceBlocks(
+        editor,
+        0,
+        0,
+        `<table>${[0, 1, 2].map((i) => `<tr><td>Parameter ${i}</td><td>${keep && i === 0 ? '<img src="doc:0.0">' : ''}</td></tr>`).join('')}</table>`,
+      )
+      const saved = await saveAndReparse(editor, parsed)
+      expect(saved.rows).toHaveLength(3)
+      expect(saved.colWidthsTwips).toEqual([3000, 4500])
+      const images = saved.rows.flatMap((row) =>
+        row.flatMap((nextCell) =>
+          (nextCell.richParas ?? []).flatMap((p) => p.runs.filter((run) => run.image)),
+        ),
+      )
+      expect(images).toHaveLength(keep ? 1 : 0)
+    },
+  )
+
   it('the model only ever sees plain cell text', async () => {
     const { editor } = await open(STYLED_TABLE)
     const html = serializeRangeToHtml(editor, 0, 0)

@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 // A failed run marks the error bubble with a "Sign in to Genspark" button only
 // when Genspark is the active provider — a BYOK user's failure (their own
 // provider's rate limit, say) must not advertise a Genspark sign-in (genoffice#1948).
@@ -7,7 +8,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { AiPanel } from '../src/renderer/ai/AiPanel'
-import { AI_PROVIDERS, type AiProviderId, type AiSettings } from '../src/shared/ipc'
+import { AI_PROVIDERS } from '@genoffice/ai-provider/browser'
+import { type AiProviderId, type AiSettings } from '../src/shared/ipc'
 
 type ChunkListener = (chunk: { requestId: string; type: string; error?: string }) => void
 

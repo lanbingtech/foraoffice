@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # O painel do assistente de IA
+
+> Este manual descreve o aplicativo desktop herdado do GenOffice no ForaOffice, incluindo agente e configurações integrados. Os hospedeiros que incorporam Docs fornecem serviços e integração com agentes próprios; recursos desktop não são automaticamente capacidades do SDK. Consulte o [guia do Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Todos os editores podem chamar o painel de IA: selecione algo, dê uma instrução e veja o resultado a chegar.
 

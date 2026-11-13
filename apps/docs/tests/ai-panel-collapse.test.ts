@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 // The AI panel stays mounted while collapsed (rail only),
 // so the conversation, draft, and in-flight runs survive collapse/expand.
 import { beforeAll, describe, expect, it, vi } from 'vitest'
@@ -6,7 +7,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { AiPanel } from '../src/renderer/ai/AiPanel'
-import { AI_PROVIDERS, type AiSettings } from '../src/shared/ipc'
+import { AI_PROVIDERS } from '@genoffice/ai-provider/browser'
+import { type AiSettings } from '../src/shared/ipc'
 
 const settings: AiSettings = {
   provider: 'anthropic',

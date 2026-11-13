@@ -1,4 +1,10 @@
-import { McpServerService, DEFAULT_MCP_PORT, type McpToolDefinition } from './mcp-server'
+// Modified for ForaOffice from GenOffice v0.12.852.
+import {
+  McpServerService,
+  DEFAULT_MCP_PORT,
+  type McpInvocation,
+  type McpToolDefinition,
+} from './mcp-server'
 import { McpLogger } from './mcp-logger'
 import type { CliRunner } from './cli-runner'
 import { createDocumentTools, documentDriver, type DocsControl } from './tools/document-tools'
@@ -113,7 +119,7 @@ export function revealMcpLogFile(): void {
   logger?.ensureFile()
 }
 
-function buildTools(): McpToolDefinition[] {
+function buildTools(connection: McpInvocation): McpToolDefinition[] {
   if (!deps) throw new Error('MCP runtime not configured')
   // get_app_info advertises what the registered tool families can generate
   const extraFormats = [
@@ -125,8 +131,19 @@ function buildTools(): McpToolDefinition[] {
   // buildTools runs once per client session (see the server's toolsFactory), so
   // each connected client gets its own active session rather than sharing one.
   const host = createSessionHost()
+  const baseDocs = deps.docsControl
+  connection.signal.addEventListener('abort', () => baseDocs?.closeCaller?.(connection.callerId), {
+    once: true,
+  })
+  const docs: DocsControl | undefined = baseDocs
+    ? {
+        ...baseDocs,
+        runCommand: (wcId, command, payload, invocation) =>
+          baseDocs.runCommand(wcId, command, payload, invocation ?? connection),
+      }
+    : undefined
   const drivers: FamilyDriver[] = [
-    ...(deps.docsControl ? [documentDriver(deps.docsControl)] : []),
+    ...(docs ? [documentDriver(docs)] : []),
     ...(deps.slidesControl ? [slidesDriver(deps.slidesControl)] : []),
     ...(deps.sheetsControl ? [sheetsDriver(deps.sheetsControl)] : []),
   ]
@@ -147,7 +164,7 @@ function buildTools(): McpToolDefinition[] {
           const opened = deps.openPath(filePath)
           if (!opened) throw new Error(`could not open ${filePath} in GenOffice`)
         },
-        docs: deps.docsControl,
+        docs,
         extraFormats,
         ...(cli ? { cli } : {}),
         ...(deps.resolveTarget ? { resolveTarget: deps.resolveTarget } : {}),

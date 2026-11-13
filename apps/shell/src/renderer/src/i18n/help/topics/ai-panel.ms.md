@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Panel pembantu AI
+
+> Manual ini menerangkan aplikasi desktop warisan GenOffice dalam ForaOffice, termasuk ejen dan tetapan terbina dalam. Hos yang membenamkan Docs menyediakan perkhidmatan dan integrasi ejen sendiri; ciri desktop tidak menjadi keupayaan SDK secara automatik. Lihat [panduan Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Setiap editor boleh memanggil panel AI. Pilih sesuatu, berikan arahan, dan lihat hasilnya dipaparkan secara berperingkat.
 

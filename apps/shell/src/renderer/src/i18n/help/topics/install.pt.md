@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: distinguish upstream installers from fork delivery. -->
+
 # Instalar o GenOffice
+
+> As instruções herdadas abaixo descrevem instaladores do GenOffice original. Os downloads não incluem mudanças do ForaOffice nem Docs SDK e não comprovam versões, assinaturas ou plataformas compatíveis deste fork. Consulte a [introdução do projeto](https://github.com/lanbingtech/foraoffice) e o [guia do Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Todas as versões são publicadas na [página de lançamentos](https://github.com/genspark-ai/genoffice/releases/latest). Todas vêm de `main`; e os instaladores para macOS e Windows estão assinados.
 

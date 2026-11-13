@@ -1,3 +1,4 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import { VIEW_IMAGE_CHANNEL, type MarkdownImage, type PdfInternalLink } from '../shared/ipc'
@@ -99,6 +100,7 @@ const api: DesktopApi = {
   consumePendingOpenDocx: () => ipcRenderer.invoke('docs:consume-pending-open'),
   consumeNewBlankDoc: () => ipcRenderer.invoke('docs:consume-new-blank'),
   consumeAiDocContent: () => ipcRenderer.invoke('docs:consume-ai-doc-content'),
+  reportCreatedDocument: (result) => ipcRenderer.send('docs:created-document', result),
   consumeHeadlessExport: () => ipcRenderer.invoke('docs:consume-headless-export'),
   headlessExportDone: (result: { ok: boolean; error?: string }) =>
     ipcRenderer.send('docs:headless-export-done', result),
@@ -144,8 +146,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('docs:save-as', defaultName, data, sourcePath ?? null),
   saveDocxNew: (defaultName: string, data: ArrayBuffer) =>
     ipcRenderer.invoke('docs:save-new', defaultName, data),
-  saveDocxTo: (path: string, data: ArrayBuffer, overwrite: boolean) =>
-    ipcRenderer.invoke('docs:save-to', path, data, overwrite === true),
+  saveDocxTo: (path: string, data: ArrayBuffer, overwrite: boolean, sourcePath?: string | null) =>
+    ipcRenderer.invoke('docs:save-to', path, data, overwrite === true, sourcePath ?? null),
   onMcpCommand: (handler) => {
     const listener = (_event: IpcRendererEvent, message: Parameters<typeof handler>[0]) =>
       handler(message)

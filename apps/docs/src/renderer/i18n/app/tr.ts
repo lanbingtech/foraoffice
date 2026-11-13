@@ -1,6 +1,9 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { zh } from './zh'
 
 export const tr = {
+  appExternalAgentFailed: 'İşlem harici aracıya gönderilemedi: {error}',
+  appDocumentDraftPending: 'Önce belge taslağını tamamlayın veya silin.',
   appScTitle: 'Klavye Kısayolları',
   appScFilter: 'Kısayollarda ara',
   appScNone: 'Eşleşen kısayol yok',

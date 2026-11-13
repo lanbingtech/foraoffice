@@ -1,0 +1,19 @@
+.ribbon-extension-menu {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.rb-big[aria-pressed='true'] .rb-big-icon,
+.rb-big[aria-pressed='true']:hover .rb-big-icon,
+.qa-btn[aria-pressed='true'],
+.qa-btn[aria-pressed='true']:hover {
+  background: var(--active-bg);
+}
+
+[data-ribbon-extension] button:focus-visible,
+.ribbon-extension-menu > button:focus-visible,
+.qa-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}

@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # AI 助手面板
+
+> 本手册介绍 ForaOffice 中继承自 GenOffice 的桌面应用，包括其内置智能体和设置。嵌入式 Docs 的宿主自行提供服务及智能体接入；桌面功能不会自动成为 SDK 的能力。参见 [Docs SDK 接入指南](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md)。
 
 每个编辑器都能唤起 AI 面板：选中内容、下指令、看流式结果。
 

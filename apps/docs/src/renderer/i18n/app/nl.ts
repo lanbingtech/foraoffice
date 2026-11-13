@@ -1,6 +1,9 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
 import type { zh } from './zh'
 
 export const nl = {
+  appExternalAgentFailed: 'De actie kon niet naar de externe agent worden verzonden: {error}',
+  appDocumentDraftPending: 'Voltooi of verwijder eerst het documentconcept.',
   appScTitle: 'Sneltoetsen',
   appScFilter: 'Sneltoets zoeken',
   appScNone: 'Geen overeenkomende sneltoetsen',

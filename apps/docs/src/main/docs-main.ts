@@ -1,5 +1,20 @@
+// Modified for ForaOffice: fork product identity and project routing.
+import { tDocsNative as tMain } from '../shared/native-i18n'
 import { createHash, randomUUID } from 'node:crypto'
 import { handOffBytes } from './byte-handoff'
+import { RecoveryCopies } from '../services/recovery-copies'
+import { archiveOriginal as archiveDocxOriginal } from '../services/original-archive'
+import {
+  readDocxForOpen,
+  DocxOpenTooLargeError,
+  MAX_DOCX_OPEN_BYTES,
+} from '../services/document-io'
+import { readPickedImage } from '../services/picked-image'
+import { createDocsDocumentCreation } from '../services/document-creation'
+import { writeMarkdownMedia as writeSharedMarkdownMedia } from '../services/markdown-media'
+import { createDocsFileAccess } from '../services/file-access'
+import { isDocsSaveOutcome, type DocsSaveOutcome } from '../shared/operation-result'
+export { sanitizeDocumentFileBase as sanitizeAiDocFileBase } from '../services/document-creation'
 import {
   appendFileSync,
   existsSync,
@@ -11,17 +26,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
-import {
-  copyFile,
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  rm,
-  stat,
-  unlink,
-  writeFile,
-} from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -43,7 +48,6 @@ import {
   abortOnDestroyed,
   appMenuLabels,
   appMenuTemplate,
-  buildPrintableHtml,
   configuredDefaultSaveDir,
   contextMenuLabels,
   fetchRemoteImage,
@@ -75,7 +79,7 @@ import {
   writeLegacyImportSkip,
 } from '@genoffice/electron-utils'
 import { configureMetricsCache, familyVerticalMetrics } from '@genoffice/font-metrics'
-import { createI18n, getUiLang, normalizeLang, setUiLang } from '@genoffice/i18n'
+import { getUiLang, normalizeLang, setUiLang } from '@genoffice/i18n'
 import { ProjectStore } from '@genoffice/project-store'
 import type {
   IpcMainInvokeEvent,
@@ -152,8 +156,8 @@ import type {
   SpellLanguages,
 } from '../shared/ipc'
 import { ATTACHMENT_IMAGE_EXTS, MARKDOWN_MEDIA_DIR_TOKEN, type MarkdownImage } from '../shared/ipc'
-import { MERGE_DATA_SOURCE_EXTENSIONS, readMergeDataSource } from './merge-data-source'
-import { mergeOutputFileName, mergeOutputPath } from './merge-output'
+import { MERGE_DATA_SOURCE_EXTENSIONS } from './merge-data-source'
+import { createDocsMailMergeServices } from '../services/mail-merge-services'
 import { ClickClaims } from '../shared/context-menu-claims'
 import {
   OPENABLE_DOC_EXTENSIONS,
@@ -167,7 +171,6 @@ import {
   forgetLazyMediaOwner,
   materializeLazyDocx,
   moveLazyMediaSource,
-  openLazyDocx,
   pointLazyMediaAt,
   readLazyMedia,
   registerLazyMediaProtocol,
@@ -176,7 +179,6 @@ import { inlineLazyMediaInHtml } from './lazy-media-inline'
 import {
   commitDocPasswordSave,
   currentDocPasswordIntentRevision,
-  decryptDocx,
   decryptRecoveryCopy,
   discardDocPasswordIntents,
   DocxDecryptError,
@@ -186,7 +188,6 @@ import {
   isEncryptedDocx,
   markDiskEncrypted,
   prepareRecoveryDocx,
-  rememberDocPassword,
   renameDocPassword,
   setDocPassword,
   snapshotDocPassword,
@@ -224,3337 +225,6 @@ import { registerZoteroIpc, teardownZoteroIpc } from './zotero-ipc'
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL
 
-const tMain = createI18n({
-  zh: {
-    dlgOpenDoc: '打开文档',
-    filterWord: 'Word 文档',
-    odtImportMsg: '转换 .{ext} 文档？',
-    odtImportDetail:
-      'GenOffice 只编辑 .docx，不编辑 ODF。正文、标题、列表、表格和图片会转换过来；脚注、批注和文本框不会完整保留。原文件不会被修改，转换出的 .docx 是一份独立副本，之后的保存都写入它。', // public-hygiene: allow
-    hwpImportDetail:
-      'GenOffice 只编辑 .docx，不编辑 HWP。正文、表格、图片、页眉和页脚会转换过来；公式、脚注和嵌入对象不会转换，自动编号会变成普通文本。原文件不会被修改，转换出的 .docx 是一份独立副本，之后的保存都写入它。', // public-hygiene: allow
-    odtImportConvertBtn: '转换并打开',
-    importSkipConfirm: '下次直接转换，不再提示',
-    docImportMsg: '转换 .{ext} 文档？',
-    docImportDetail:
-      'GenOffice 只编辑 .docx，不编辑 Word 97-2003 旧版 .doc。正文、标题、列表、表格和图片会转换过来；脚注、批注和文本框不会完整保留。原文件不会被修改，转换出的 .docx 是一份独立副本，之后的保存都写入它。', // public-hygiene: allow
-    docImportConvertBtn: '转换并打开',
-    dlgSaveAs: '另存为',
-    closeUnsavedMsg: '此文档有未保存的更改。',
-    closeUnsavedDetail: '关闭前是否保存？',
-    closeNoReplyMsg: '文档没有响应,可能有未保存的更改。',
-    closeNoReplyDetail: '仍要关闭吗?未保存的更改将丢失。',
-    btnCloseAnyway: '仍要关闭',
-    autosaveFoundTitle: '发现自动恢复版本',
-    autosaveDiskNewer: '注意：此恢复副本保存后，磁盘上的文件又被修改过。恢复将替换这些较新的更改。',
-    autosaveFoundBody: '上次会话有未保存的更改。要恢复自动保存的版本吗?',
-    autosaveRestore: '恢复',
-    autosaveDiscard: '放弃',
-    btnDontSave: '不保存',
-    btnCancel: '取消',
-    extModifiedMsg: '文件已被其他程序修改。',
-    extModifiedDetail: '仍要保存并覆盖磁盘上的更改吗?',
-    btnOverwrite: '覆盖',
-    dlgInsertImage: '插入图片',
-    filterImages: '图片',
-    dlgMergeDataSource: '选择收件人列表',
-    filterMergeDataSource: 'Excel 或 CSV',
-    dlgAddAttachment: '添加附件',
-    filterSupported: '支持的文件',
-    filterAll: '所有文件',
-    dlgExportPdf: '导出为 PDF',
-    dlgExportHtml: '导出为 HTML',
-    dlgExportMarkdown: '导出为 Markdown',
-    dlgPickExportDir: '选择导出目录',
-    errUnsupportedExt: '暂不支持 .{ext} 类型',
-    errNotFile: '不是文件',
-    errTooLarge: '超过 {mb}MB 上限',
-    errImageTooLarge: '图片超过 5MB 上限',
-    errUnreadable: '无法读取',
-    errFileTooLarge: '文件超过大小上限',
-    errParseFailed: '文件解析失败',
-    errImageNoText: '图片附件不提供文本,已作为图像随用户消息发送,直接看图即可',
-    errNotImage: '不是支持的图片类型',
-    errGskNotLoggedIn: '未登录 Genspark:请点击下方「登录 Genspark」完成登录后重试',
-    errNoApiKey: '未配置 {provider} 的 API Key',
-    errAiRegion: '该模型的厂商不向当前地区提供服务，请换一个模型或切换网络',
-    errAiBusy: 'AI 服务当前繁忙，请稍后重试',
-    errNoModel: '未配置模型名称',
-    menuFile: '文件',
-    menuNewDoc: '新建文档',
-    menuNewWindow: '新建窗口',
-    menuOpen: '打开…',
-    menuOpenRecent: '打开最近的文档',
-    menuNoRecent: '无最近文档',
-    menuClose: '关闭',
-    menuSave: '保存',
-    menuSaveAs: '另存为…',
-    menuPageSetup: '页面设置…',
-    menuExportPdf: '导出为 PDF…',
-    menuExportHtml: '导出为 HTML…',
-    menuExportMarkdown: '导出为 Markdown…',
-    menuExportImages: '导出为图片…',
-    menuPrint: '打印…',
-    menuEdit: '编辑',
-    menuUndo: '撤销',
-    menuRedo: '重做',
-    menuCut: '剪切',
-    menuCopy: '复制',
-    menuPaste: '粘贴',
-    menuPasteMatch: '粘贴并匹配格式',
-    menuFindReplace: '查找和替换…',
-    menuGoTo: '定位…',
-    menuSelectAll: '全选',
-    menuView: '视图',
-    menuZoom: '缩放',
-    menuZoomIn: '放大',
-    menuZoomOut: '缩小',
-    menuZoom100: '实际大小 (100%)',
-    menuPageWidth: '页宽',
-    menuWholePage: '整页',
-    menuMultiPage: '多页',
-    menuAiSidebar: 'AI 侧栏',
-    menuDarkMode: '深色模式',
-    menuFullscreen: '进入全屏',
-    menuInsert: '插入',
-    menuInsertTable: '表格…',
-    menuInsertImage: '图片…',
-    menuInsertPageBreak: '分页符',
-    menuInsertLink: '超链接…',
-    menuInsertEquation: '公式…',
-    menuComment: '批注',
-    menuFormat: '格式',
-    menuBold: '加粗',
-    menuItalic: '斜体',
-    menuUnderline: '下划线',
-    menuAlign: '对齐',
-    menuAlignLeft: '左对齐',
-    menuAlignCenter: '居中',
-    menuAlignRight: '右对齐',
-    menuAlignJustify: '两端对齐',
-    menuFont: '字体…',
-    menuParagraph: '段落…',
-    menuTools: '工具',
-    menuTable: '表格',
-    menuTableInsert: '插入',
-    menuTableInsertTable: '表格…',
-    menuTableColsLeft: '在左侧插入列',
-    menuTableColsRight: '在右侧插入列',
-    menuTableRowsAbove: '在上方插入行',
-    menuTableRowsBelow: '在下方插入行',
-    menuTableCells: '单元格…',
-    menuTableDelete: '删除',
-    menuTableDeleteTable: '表格',
-    menuTableDeleteColumns: '列',
-    menuTableDeleteRows: '行',
-    menuTableSelect: '选择',
-    menuTableSelectCell: '单元格',
-    menuTableSelectColumn: '列',
-    menuTableSelectRow: '行',
-    menuTableSelectTable: '表格',
-    menuTableMergeCells: '合并单元格',
-    menuTableSplitCells: '拆分单元格…',
-    menuTableSplitTable: '拆分表格',
-    menuTableAutoFit: '自动调整',
-    menuTableAutoFitContents: '根据内容自动调整表格',
-    menuTableAutoFitWindow: '根据窗口自动调整表格',
-    menuTableFixedWidth: '固定列宽',
-    menuTableDistributeRows: '平均分布各行',
-    menuTableDistributeColumns: '平均分布各列',
-    menuTableRepeatHeader: '重复标题行',
-    menuTableGridlines: '查看网格线',
-    menuTableProperties: '表格属性…',
-    menuWordCount: '字数统计…',
-    menuAutoCorrect: '自动更正选项…',
-    menuPreferences: '偏好设置…',
-    menuAiProofread: 'AI 校对',
-    menuWindow: '窗口',
-    menuHelp: '帮助',
-    menuShortcuts: '键盘快捷键',
-  },
-  en: {
-    dlgOpenDoc: 'Open Document',
-    filterWord: 'Word Documents',
-    odtImportMsg: 'Convert this .{ext} document?',
-    odtImportDetail:
-      'GenOffice edits .docx, not ODF. Body text, headings, lists, tables and images carry over; footnotes, comments and text boxes are not fully preserved. The original file is never changed; the converted .docx is a separate copy that later saves write to.',
-    hwpImportDetail:
-      'GenOffice edits .docx, not HWP. Body text, tables, images, headers and footers carry over; equations, footnotes and embedded objects are not converted, and automatic numbering becomes plain text. The original file is never changed; the converted .docx is a separate copy that later saves write to.',
-    odtImportConvertBtn: 'Convert and open',
-    importSkipConfirm: 'Convert without asking next time',
-    docImportMsg: 'Convert this .{ext} document?',
-    docImportDetail:
-      'GenOffice edits .docx, not Word 97-2003 documents. Body text, headings, lists, tables and images carry over; footnotes, comments and text boxes are not fully preserved. The original file is never changed; the converted .docx is a separate copy that later saves write to.',
-    docImportConvertBtn: 'Convert and open',
-    dlgSaveAs: 'Save As',
-    closeUnsavedMsg: 'This document has unsaved changes.',
-    closeUnsavedDetail: 'Do you want to save them before closing?',
-    closeNoReplyMsg: 'The document is not responding and may have unsaved changes.',
-    closeNoReplyDetail: 'Close anyway? Unsaved changes will be lost.',
-    btnCloseAnyway: 'Close Anyway',
-    autosaveFoundTitle: 'Recovered version found',
-    autosaveDiskNewer:
-      'Note: the file on disk was modified after this recovery copy was saved. Restoring replaces those newer changes.',
-    autosaveFoundBody:
-      'There are unsaved changes from your last session. Restore the autosaved version?',
-    autosaveRestore: 'Restore',
-    autosaveDiscard: 'Discard',
-    btnDontSave: "Don't Save",
-    btnCancel: 'Cancel',
-    extModifiedMsg: 'The file has been modified by another program.',
-    extModifiedDetail: 'Save anyway and overwrite the changes on disk?',
-    btnOverwrite: 'Overwrite',
-    dlgInsertImage: 'Insert Image',
-    filterImages: 'Images',
-    dlgMergeDataSource: 'Select Recipient List',
-    filterMergeDataSource: 'Excel or CSV',
-    dlgAddAttachment: 'Add Attachments',
-    filterSupported: 'Supported Files',
-    filterAll: 'All Files',
-    dlgExportPdf: 'Export as PDF',
-    dlgExportHtml: 'Export as HTML',
-    dlgExportMarkdown: 'Export as Markdown',
-    dlgPickExportDir: 'Choose Export Folder',
-    errUnsupportedExt: '.{ext} files are not supported',
-    errNotFile: 'not a file',
-    errTooLarge: 'exceeds the {mb}MB limit',
-    errImageTooLarge: 'image exceeds the 5MB limit',
-    errUnreadable: 'cannot be read',
-    errFileTooLarge: 'File exceeds the size limit',
-    errParseFailed: 'Failed to parse file',
-    errImageNoText: 'Image attachments have no text; the image is sent along with the user message',
-    errNotImage: 'not a supported image type',
-    errGskNotLoggedIn:
-      'Not signed in to Genspark: click “Sign in to Genspark” below, sign in, then retry',
-    errNoApiKey: 'No API key configured for {provider}',
-    errAiRegion:
-      "This model's provider does not serve your current region — pick another model or change your network",
-    errAiBusy: 'The AI service is busy right now — please try again in a moment',
-    errNoModel: 'No model name configured',
-    menuFile: 'File',
-    menuNewDoc: 'New Document',
-    menuNewWindow: 'New Window',
-    menuOpen: 'Open…',
-    menuOpenRecent: 'Open Recent',
-    menuNoRecent: 'No Recent Documents',
-    menuClose: 'Close',
-    menuSave: 'Save',
-    menuSaveAs: 'Save As…',
-    menuPageSetup: 'Page Setup…',
-    menuExportPdf: 'Export as PDF…',
-    menuExportHtml: 'Export as HTML…',
-    menuExportMarkdown: 'Export as Markdown…',
-    menuExportImages: 'Export as Images…',
-    menuPrint: 'Print…',
-    menuEdit: 'Edit',
-    menuUndo: 'Undo',
-    menuRedo: 'Redo',
-    menuCut: 'Cut',
-    menuCopy: 'Copy',
-    menuPaste: 'Paste',
-    menuPasteMatch: 'Paste and Match Style',
-    menuFindReplace: 'Find and Replace…',
-    menuGoTo: 'Go To…',
-    menuSelectAll: 'Select All',
-    menuView: 'View',
-    menuZoom: 'Zoom',
-    menuZoomIn: 'Zoom In',
-    menuZoomOut: 'Zoom Out',
-    menuZoom100: 'Actual Size (100%)',
-    menuPageWidth: 'Page Width',
-    menuWholePage: 'Whole Page',
-    menuMultiPage: 'Multiple Pages',
-    menuAiSidebar: 'AI Sidebar',
-    menuDarkMode: 'Dark Mode',
-    menuFullscreen: 'Enter Full Screen',
-    menuInsert: 'Insert',
-    menuInsertTable: 'Table…',
-    menuInsertImage: 'Image…',
-    menuInsertPageBreak: 'Page Break',
-    menuInsertLink: 'Hyperlink…',
-    menuInsertEquation: 'Equation…',
-    menuComment: 'Comment',
-    menuFormat: 'Format',
-    menuBold: 'Bold',
-    menuItalic: 'Italic',
-    menuUnderline: 'Underline',
-    menuAlign: 'Align',
-    menuAlignLeft: 'Align Left',
-    menuAlignCenter: 'Center',
-    menuAlignRight: 'Align Right',
-    menuAlignJustify: 'Justify',
-    menuFont: 'Font…',
-    menuParagraph: 'Paragraph…',
-    menuTools: 'Tools',
-    menuTable: 'Table',
-    menuTableInsert: 'Insert',
-    menuTableInsertTable: 'Table…',
-    menuTableColsLeft: 'Columns to the Left',
-    menuTableColsRight: 'Columns to the Right',
-    menuTableRowsAbove: 'Rows Above',
-    menuTableRowsBelow: 'Rows Below',
-    menuTableCells: 'Cells…',
-    menuTableDelete: 'Delete',
-    menuTableDeleteTable: 'Table',
-    menuTableDeleteColumns: 'Columns',
-    menuTableDeleteRows: 'Rows',
-    menuTableSelect: 'Select',
-    menuTableSelectCell: 'Cell',
-    menuTableSelectColumn: 'Column',
-    menuTableSelectRow: 'Row',
-    menuTableSelectTable: 'Table',
-    menuTableMergeCells: 'Merge Cells',
-    menuTableSplitCells: 'Split Cells…',
-    menuTableSplitTable: 'Split Table',
-    menuTableAutoFit: 'AutoFit and Distribute',
-    menuTableAutoFitContents: 'AutoFit to Contents',
-    menuTableAutoFitWindow: 'AutoFit to Window',
-    menuTableFixedWidth: 'Fixed Column Width',
-    menuTableDistributeRows: 'Distribute Rows Evenly',
-    menuTableDistributeColumns: 'Distribute Columns Evenly',
-    menuTableRepeatHeader: 'Repeat Header Rows',
-    menuTableGridlines: 'View Gridlines',
-    menuTableProperties: 'Table Properties…',
-    menuWordCount: 'Word Count…',
-    menuAutoCorrect: 'AutoCorrect Options…',
-    menuPreferences: 'Preferences…',
-    menuAiProofread: 'AI Proofread',
-    menuWindow: 'Window',
-    menuHelp: 'Help',
-    menuShortcuts: 'Keyboard Shortcuts',
-  },
-  vi: {
-    dlgOpenDoc: 'Mở tài liệu',
-    filterWord: 'Tài liệu Word',
-    odtImportMsg: 'Chuyển đổi tài liệu .{ext} này?',
-    odtImportDetail:
-      'GenOffice chỉnh sửa .docx chứ không chỉnh sửa ODF. Nội dung, tiêu đề, danh sách, bảng và hình ảnh được chuyển đổi; chú thích cuối trang, bình luận và hộp văn bản không được giữ đầy đủ. Tệp gốc không bao giờ bị sửa; bản .docx sau chuyển đổi là một bản sao độc lập để tiếp tục chỉnh sửa và lưu.',
-    hwpImportDetail:
-      'GenOffice chỉnh sửa .docx chứ không chỉnh sửa HWP. Nội dung, bảng, hình ảnh, đầu trang và chân trang được chuyển đổi; công thức, chú thích cuối trang và đối tượng nhúng không được chuyển đổi, còn đánh số tự động trở thành văn bản thường. Tệp gốc không bao giờ bị sửa; bản .docx sau chuyển đổi là một bản sao độc lập để tiếp tục chỉnh sửa và lưu.',
-    odtImportConvertBtn: 'Chuyển đổi và mở',
-    importSkipConfirm: 'Lần sau chuyển đổi ngay, không hỏi lại',
-    docImportMsg: 'Chuyển đổi tài liệu .{ext} này?',
-    docImportDetail:
-      'GenOffice chỉnh sửa .docx chứ không chỉnh sửa tài liệu Word 97-2003 (.doc). Nội dung, tiêu đề, danh sách, bảng và hình ảnh được chuyển đổi; chú thích cuối trang, bình luận và hộp văn bản không được giữ đầy đủ. Tệp gốc không bao giờ bị sửa; bản .docx sau chuyển đổi là một bản sao độc lập để tiếp tục chỉnh sửa và lưu.',
-    docImportConvertBtn: 'Chuyển đổi và mở',
-    dlgSaveAs: 'Lưu dưới dạng',
-    closeUnsavedMsg: 'Tài liệu này có những thay đổi chưa được lưu.',
-    closeUnsavedDetail: 'Bạn có muốn lưu các thay đổi trước khi đóng không?',
-    closeNoReplyMsg: 'Tài liệu không phản hồi và có thể có những thay đổi chưa được lưu.',
-    closeNoReplyDetail: 'Vẫn đóng? Các thay đổi chưa lưu sẽ bị mất.',
-    btnCloseAnyway: 'Vẫn đóng',
-    autosaveFoundTitle: 'Tìm thấy phiên bản khôi phục',
-    autosaveDiskNewer:
-      'Lưu ý: tệp trên đĩa đã được sửa đổi sau khi bản sao khôi phục này được lưu. Khôi phục sẽ thay thế những thay đổi mới hơn đó.',
-    autosaveFoundBody:
-      'Có những thay đổi chưa được lưu từ phiên làm việc trước của bạn. Khôi phục phiên bản đã lưu tự động?',
-    autosaveRestore: 'Khôi phục',
-    autosaveDiscard: 'Bỏ qua',
-    btnDontSave: 'Không lưu',
-    btnCancel: 'Hủy',
-    extModifiedMsg: 'Tệp đã được sửa đổi bởi một chương trình khác.',
-    extModifiedDetail: 'Vẫn lưu và ghi đè các thay đổi trên ổ đĩa?',
-    btnOverwrite: 'Ghi đè',
-    dlgInsertImage: 'Chèn hình ảnh',
-    filterImages: 'Hình ảnh',
-    dlgMergeDataSource: 'Chọn danh sách người nhận',
-    filterMergeDataSource: 'Excel hoặc CSV',
-    dlgAddAttachment: 'Thêm tệp đính kèm',
-    filterSupported: 'Các tệp được hỗ trợ',
-    filterAll: 'Tất cả các tệp',
-    dlgExportPdf: 'Xuất dưới dạng PDF',
-    dlgExportHtml: 'Xuất dưới dạng HTML',
-    dlgExportMarkdown: 'Xuất dưới dạng Markdown',
-    dlgPickExportDir: 'Chọn thư mục xuất',
-    errUnsupportedExt: 'Tệp .{ext} không được hỗ trợ',
-    errNotFile: 'không phải là tệp',
-    errTooLarge: 'vượt quá giới hạn {mb}MB',
-    errImageTooLarge: 'hình ảnh vượt quá giới hạn 5MB',
-    errUnreadable: 'không thể đọc được',
-    errFileTooLarge: 'Tệp vượt quá giới hạn kích thước',
-    errParseFailed: 'Không thể phân tích tệp',
-    errImageNoText:
-      'Tệp đính kèm hình ảnh không có văn bản; hình ảnh được gửi cùng với tin nhắn của người dùng',
-    errNotImage: 'loại hình ảnh không được hỗ trợ',
-    errGskNotLoggedIn:
-      'Chưa đăng nhập vào Genspark: nhấp vào “Đăng nhập vào Genspark” bên dưới, đăng nhập, sau đó thử lại',
-    errNoApiKey: 'Chưa cấu hình khóa API cho {provider}',
-    errAiRegion:
-      'Nhà cung cấp của mô hình này không phục vụ khu vực hiện tại của bạn — hãy chọn mô hình khác hoặc đổi mạng',
-    errAiBusy: 'Dịch vụ AI hiện đang bận — vui lòng thử lại sau giây lát',
-    errNoModel: 'Chưa cấu hình tên mô hình',
-    menuFile: 'Tệp',
-    menuNewDoc: 'Tài liệu mới',
-    menuNewWindow: 'Cửa sổ mới',
-    menuOpen: 'Mở…',
-    menuOpenRecent: 'Mở gần đây',
-    menuNoRecent: 'Không có tài liệu gần đây',
-    menuClose: 'Đóng',
-    menuSave: 'Lưu',
-    menuSaveAs: 'Lưu dưới dạng…',
-    menuPageSetup: 'Thiết lập trang…',
-    menuExportPdf: 'Xuất dưới dạng PDF…',
-    menuExportHtml: 'Xuất dưới dạng HTML…',
-    menuExportMarkdown: 'Xuất dưới dạng Markdown…',
-    menuExportImages: 'Xuất dưới dạng hình ảnh…',
-    menuPrint: 'In…',
-    menuEdit: 'Chỉnh sửa',
-    menuUndo: 'Hoàn tác',
-    menuRedo: 'Làm lại',
-    menuCut: 'Cắt',
-    menuCopy: 'Sao chép',
-    menuPaste: 'Dán',
-    menuPasteMatch: 'Dán và khớp kiểu định dạng',
-    menuFindReplace: 'Tìm kiếm và thay thế…',
-    menuGoTo: 'Đi tới…',
-    menuSelectAll: 'Chọn tất cả',
-    menuView: 'Xem',
-    menuZoom: 'Thu phóng',
-    menuZoomIn: 'Phóng to',
-    menuZoomOut: 'Thu nhỏ',
-    menuZoom100: 'Kích thước thực tế (100%)',
-    menuPageWidth: 'Chiều rộng trang',
-    menuWholePage: 'Toàn bộ trang',
-    menuMultiPage: 'Nhiều trang',
-    menuAiSidebar: 'Thanh bên AI',
-    menuDarkMode: 'Chế độ tối',
-    menuFullscreen: 'Vào chế độ toàn màn hình',
-    menuInsert: 'Chèn',
-    menuInsertTable: 'Bảng…',
-    menuInsertImage: 'Hình ảnh…',
-    menuInsertPageBreak: 'Ngắt trang',
-    menuInsertLink: 'Siêu liên kết…',
-    menuInsertEquation: 'Phương trình…',
-    menuComment: 'Bình luận',
-    menuFormat: 'Định dạng',
-    menuBold: 'In đậm',
-    menuItalic: 'In nghiêng',
-    menuUnderline: 'Gạch chân',
-    menuAlign: 'Căn chỉnh',
-    menuAlignLeft: 'Căn trái',
-    menuAlignCenter: 'Căn giữa',
-    menuAlignRight: 'Căn phải',
-    menuAlignJustify: 'Căn đều',
-    menuFont: 'Phông chữ…',
-    menuParagraph: 'Đoạn văn…',
-    menuTools: 'Công cụ',
-    menuTable: 'Bảng',
-    menuTableInsert: 'Chèn',
-    menuTableInsertTable: 'Bảng…',
-    menuTableColsLeft: 'Chèn cột bên trái',
-    menuTableColsRight: 'Chèn cột bên phải',
-    menuTableRowsAbove: 'Chèn hàng phía trên',
-    menuTableRowsBelow: 'Chèn hàng phía dưới',
-    menuTableCells: 'Ô…',
-    menuTableDelete: 'Xóa',
-    menuTableDeleteTable: 'Bảng',
-    menuTableDeleteColumns: 'Cột',
-    menuTableDeleteRows: 'Hàng',
-    menuTableSelect: 'Chọn',
-    menuTableSelectCell: 'Ô',
-    menuTableSelectColumn: 'Cột',
-    menuTableSelectRow: 'Hàng',
-    menuTableSelectTable: 'Bảng',
-    menuTableMergeCells: 'Hợp nhất các ô',
-    menuTableSplitCells: 'Tách ô…',
-    menuTableSplitTable: 'Tách bảng',
-    menuTableAutoFit: 'Tự động điều chỉnh',
-    menuTableAutoFitContents: 'Tự động điều chỉnh theo nội dung',
-    menuTableAutoFitWindow: 'Tự động điều chỉnh theo cửa sổ',
-    menuTableFixedWidth: 'Chiều rộng cột cố định',
-    menuTableDistributeRows: 'Phân bố hàng đều nhau',
-    menuTableDistributeColumns: 'Phân bố cột đều nhau',
-    menuTableRepeatHeader: 'Lặp lại hàng tiêu đề',
-    menuTableGridlines: 'Xem đường lưới',
-    menuTableProperties: 'Thuộc tính bảng…',
-    menuWordCount: 'Đếm từ…',
-    menuAutoCorrect: 'Tùy chọn tự sửa lỗi…',
-    menuPreferences: 'Tùy chọn…',
-    menuAiProofread: 'Hiệu đính bằng AI',
-    menuWindow: 'Cửa sổ',
-    menuHelp: 'Trợ giúp',
-    menuShortcuts: 'Phím tắt bàn phím',
-  },
-  tr: {
-    dlgOpenDoc: 'Belge Aç',
-    filterWord: 'Word Belgeleri',
-    odtImportMsg: 'Bu .{ext} belgesi dönüştürülsün mü?',
-    odtImportDetail:
-      'GenOffice ODF değil .docx düzenler. Gövde metni, başlıklar, listeler, tablolar ve resimler aktarılır; dipnotlar, açıklamalar ve metin kutuları tam olarak korunmaz. Özgün dosya hiçbir zaman değiştirilmez; dönüştürülen .docx, sonraki kaydetmelerin yazıldığı ayrı bir kopyadır.',
-    hwpImportDetail:
-      'GenOffice HWP değil .docx düzenler. Gövde metni, tablolar, resimler, üst bilgiler ve alt bilgiler aktarılır; denklemler, dipnotlar ve gömülü nesneler dönüştürülmez, otomatik numaralandırma düz metne dönüşür. Özgün dosya hiçbir zaman değiştirilmez; dönüştürülen .docx, sonraki kaydetmelerin yazıldığı ayrı bir kopyadır.',
-    odtImportConvertBtn: 'Dönüştür ve aç',
-    importSkipConfirm: 'Bir dahaki sefere sormadan dönüştür',
-    docImportMsg: 'Bu .{ext} belgesi dönüştürülsün mü?',
-    docImportDetail:
-      'GenOffice Word 97-2003 (.doc) belgelerini değil .docx düzenler. Gövde metni, başlıklar, listeler, tablolar ve resimler aktarılır; dipnotlar, açıklamalar ve metin kutuları tam olarak korunmaz. Özgün dosya hiçbir zaman değiştirilmez; dönüştürülen .docx, sonraki kaydetmelerin yazıldığı ayrı bir kopyadır.',
-    docImportConvertBtn: 'Dönüştür ve aç',
-    dlgSaveAs: 'Farklı Kaydet',
-    closeUnsavedMsg: 'Bu belgede kaydedilmemiş değişiklikler var.',
-    closeUnsavedDetail: 'Kapatmadan önce kaydetmek ister misiniz?',
-    closeNoReplyMsg: 'Belge yanıt vermiyor ve kaydedilmemiş değişiklikler içeriyor olabilir.',
-    closeNoReplyDetail: 'Yine de kapatılsın mı? Kaydedilmemiş değişiklikler kaybolacak.',
-    btnCloseAnyway: 'Yine de Kapat',
-    autosaveFoundTitle: 'Kurtarılan sürüm bulundu',
-    autosaveDiskNewer:
-      'Not: diskteki dosya bu kurtarma kopyası kaydedildikten sonra değiştirilmiş. Geri yüklemek bu daha yeni değişikliklerin yerini alır.',
-    autosaveFoundBody:
-      'Son oturumunuzdan kaydedilmemiş değişiklikler var. Otomatik kaydedilen sürüm geri yüklensin mi?',
-    autosaveRestore: 'Geri Yükle',
-    autosaveDiscard: 'At',
-    btnDontSave: 'Kaydetme',
-    btnCancel: 'İptal',
-    extModifiedMsg: 'Dosya başka bir program tarafından değiştirildi.',
-    extModifiedDetail: 'Yine de kaydedilip diskteki değişikliklerin üzerine yazılsın mı?',
-    btnOverwrite: 'Üzerine Yaz',
-    dlgInsertImage: 'Resim Ekle',
-    filterImages: 'Resimler',
-    dlgMergeDataSource: 'Alıcı Listesi Seç',
-    filterMergeDataSource: 'Excel veya CSV',
-    dlgAddAttachment: 'Ek Ekle',
-    filterSupported: 'Desteklenen Dosyalar',
-    filterAll: 'Tüm Dosyalar',
-    dlgExportPdf: 'PDF Olarak Dışa Aktar',
-    dlgExportHtml: 'HTML Olarak Dışa Aktar',
-    dlgExportMarkdown: 'Markdown Olarak Dışa Aktar',
-    dlgPickExportDir: 'Dışa Aktarma Klasörünü Seç',
-    errUnsupportedExt: '.{ext} dosyaları desteklenmiyor',
-    errNotFile: 'bir dosya değil',
-    errTooLarge: '{mb}MB sınırını aşıyor',
-    errImageTooLarge: 'resim 5MB sınırını aşıyor',
-    errUnreadable: 'okunamıyor',
-    errFileTooLarge: 'Dosya boyut sınırını aşıyor',
-    errParseFailed: 'Dosya ayrıştırılamadı',
-    errImageNoText: 'Resim eklerinde metin yok; resim kullanıcı iletisiyle birlikte gönderilir',
-    errNotImage: 'desteklenen bir resim türü değil',
-    errGskNotLoggedIn:
-      "Genspark'a giriş yapılmadı: aşağıdaki “Genspark'a giriş yap” düğmesine tıklayın, giriş yapın ve yeniden deneyin",
-    errNoApiKey: '{provider} için API anahtarı yapılandırılmamış',
-    errAiRegion:
-      'Bu modelin sağlayıcısı bulunduğunuz bölgeye hizmet vermiyor — başka bir model seçin veya ağınızı değiştirin',
-    errAiBusy: 'AI hizmeti şu anda yoğun — lütfen biraz sonra yeniden deneyin',
-    errNoModel: 'Model adı yapılandırılmamış',
-    menuFile: 'Dosya',
-    menuNewDoc: 'Yeni Belge',
-    menuNewWindow: 'Yeni Pencere',
-    menuOpen: 'Aç…',
-    menuOpenRecent: 'Son Kullanılanları Aç',
-    menuNoRecent: 'Son Kullanılan Belge Yok',
-    menuClose: 'Kapat',
-    menuSave: 'Kaydet',
-    menuSaveAs: 'Farklı Kaydet…',
-    menuPageSetup: 'Sayfa Yapısı…',
-    menuExportPdf: 'PDF Olarak Dışa Aktar…',
-    menuExportHtml: 'HTML Olarak Dışa Aktar…',
-    menuExportMarkdown: 'Markdown Olarak Dışa Aktar…',
-    menuExportImages: 'Resim Olarak Dışa Aktar…',
-    menuPrint: 'Yazdır…',
-    menuEdit: 'Düzenle',
-    menuUndo: 'Geri Al',
-    menuRedo: 'Yinele',
-    menuCut: 'Kes',
-    menuCopy: 'Kopyala',
-    menuPaste: 'Yapıştır',
-    menuPasteMatch: 'Stili Eşleştirerek Yapıştır',
-    menuFindReplace: 'Bul ve Değiştir…',
-    menuGoTo: 'Git…',
-    menuSelectAll: 'Tümünü Seç',
-    menuView: 'Görünüm',
-    menuZoom: 'Yakınlaştır',
-    menuZoomIn: 'Yakınlaştır',
-    menuZoomOut: 'Uzaklaştır',
-    menuZoom100: 'Gerçek Boyut (%100)',
-    menuPageWidth: 'Sayfa Genişliği',
-    menuWholePage: 'Tüm Sayfa',
-    menuMultiPage: 'Birden Çok Sayfa',
-    menuAiSidebar: 'AI Kenar Çubuğu',
-    menuDarkMode: 'Koyu Mod',
-    menuFullscreen: 'Tam Ekrana Geç',
-    menuInsert: 'Ekle',
-    menuInsertTable: 'Tablo…',
-    menuInsertImage: 'Resim…',
-    menuInsertPageBreak: 'Sayfa Sonu',
-    menuInsertLink: 'Köprü…',
-    menuInsertEquation: 'Denklem…',
-    menuComment: 'Açıklama',
-    menuFormat: 'Biçim',
-    menuBold: 'Kalın',
-    menuItalic: 'İtalik',
-    menuUnderline: 'Altı Çizili',
-    menuAlign: 'Hizala',
-    menuAlignLeft: 'Sola Hizala',
-    menuAlignCenter: 'Ortala',
-    menuAlignRight: 'Sağa Hizala',
-    menuAlignJustify: 'İki Yana Yasla',
-    menuFont: 'Yazı Tipi…',
-    menuParagraph: 'Paragraf…',
-    menuTools: 'Araçlar',
-    menuTable: 'Tablo',
-    menuTableInsert: 'Ekle',
-    menuTableInsertTable: 'Tablo…',
-    menuTableColsLeft: 'Sola Sütun',
-    menuTableColsRight: 'Sağa Sütun',
-    menuTableRowsAbove: 'Üste Satır',
-    menuTableRowsBelow: 'Alta Satır',
-    menuTableCells: 'Hücreler…',
-    menuTableDelete: 'Sil',
-    menuTableDeleteTable: 'Tablo',
-    menuTableDeleteColumns: 'Sütunlar',
-    menuTableDeleteRows: 'Satırlar',
-    menuTableSelect: 'Seç',
-    menuTableSelectCell: 'Hücre',
-    menuTableSelectColumn: 'Sütun',
-    menuTableSelectRow: 'Satır',
-    menuTableSelectTable: 'Tablo',
-    menuTableMergeCells: 'Hücreleri Birleştir',
-    menuTableSplitCells: 'Hücreleri Böl…',
-    menuTableSplitTable: 'Tabloyu Böl',
-    menuTableAutoFit: 'Otomatik Sığdır ve Dağıt',
-    menuTableAutoFitContents: 'İçeriğe Otomatik Sığdır',
-    menuTableAutoFitWindow: 'Pencereye Otomatik Sığdır',
-    menuTableFixedWidth: 'Sabit Sütun Genişliği',
-    menuTableDistributeRows: 'Satırları Eşit Dağıt',
-    menuTableDistributeColumns: 'Sütunları Eşit Dağıt',
-    menuTableRepeatHeader: 'Başlık Satırlarını Yinele',
-    menuTableGridlines: 'Kılavuz Çizgilerini Göster',
-    menuTableProperties: 'Tablo Özellikleri…',
-    menuWordCount: 'Sözcük Sayısı…',
-    menuAutoCorrect: 'Otomatik Düzelt Seçenekleri…',
-    menuPreferences: 'Tercihler…',
-    menuAiProofread: 'AI Düzeltme Okuması',
-    menuWindow: 'Pencere',
-    menuHelp: 'Yardım',
-    menuShortcuts: 'Klavye Kısayolları',
-  },
-  ja: {
-    dlgOpenDoc: '文書を開く',
-    filterWord: 'Word 文書',
-    odtImportMsg: 'この .{ext} 文書を変換しますか？',
-    odtImportDetail:
-      'GenOffice は ODF ではなく .docx を編集します。本文・見出し・リスト・表・画像は変換されますが、脚注・コメント・テキストボックスは完全には保持されません。元のファイルは変更されず、変換後の .docx は独立したコピーとして以後の保存先になります。',
-    hwpImportDetail:
-      'GenOffice は HWP ではなく .docx を編集します。本文・表・画像・ヘッダー・フッターは変換されますが、数式・脚注・埋め込みオブジェクトは変換されず、自動番号は通常のテキストになります。元のファイルは変更されず、変換後の .docx は独立したコピーとして以後の保存先になります。',
-    odtImportConvertBtn: '変換して開く',
-    importSkipConfirm: '次回から確認せずに変換する',
-    docImportMsg: 'この .{ext} 文書を変換しますか？',
-    docImportDetail:
-      'GenOffice は Word 97-2003 形式（.doc）ではなく .docx を編集します。本文・見出し・リスト・表・画像は変換されますが、脚注・コメント・テキストボックスは完全には保持されません。元のファイルは変更されず、変換後の .docx は独立したコピーとして以後の保存先になります。',
-    docImportConvertBtn: '変換して開く',
-    dlgSaveAs: '名前を付けて保存',
-    closeUnsavedMsg: 'このドキュメントに未保存の変更があります。',
-    closeUnsavedDetail: '閉じる前に保存しますか？',
-    closeNoReplyMsg: 'ドキュメントが応答していません。未保存の変更がある可能性があります。',
-    closeNoReplyDetail: 'それでも閉じますか?未保存の変更は失われます。',
-    btnCloseAnyway: '閉じる',
-    autosaveFoundTitle: '自動回復バージョンがあります',
-    autosaveDiskNewer:
-      '注意: この回復コピーの保存後にディスク上のファイルが変更されています。復元するとその新しい変更は置き換えられます。',
-    autosaveFoundBody: '前回のセッションに未保存の変更があります。自動保存版を復元しますか?',
-    autosaveRestore: '復元',
-    autosaveDiscard: '破棄',
-    btnDontSave: '保存しない',
-    btnCancel: 'キャンセル',
-    extModifiedMsg: 'このファイルは別のプログラムによって変更されています。',
-    extModifiedDetail: 'このまま保存してディスク上の変更を上書きしますか?',
-    btnOverwrite: '上書き',
-    dlgInsertImage: '画像の挿入',
-    filterImages: '画像',
-    dlgMergeDataSource: '受信者リストを選択',
-    filterMergeDataSource: 'Excel または CSV',
-    dlgAddAttachment: '添付ファイルの追加',
-    filterSupported: 'サポートされているファイル',
-    filterAll: 'すべてのファイル',
-    dlgExportPdf: 'PDF としてエクスポート',
-    dlgExportHtml: 'HTML としてエクスポート',
-    dlgExportMarkdown: 'Markdown としてエクスポート',
-    dlgPickExportDir: 'エクスポート先フォルダーの選択',
-    errUnsupportedExt: '.{ext} 形式には対応していません',
-    errNotFile: 'ファイルではありません',
-    errTooLarge: '{mb}MB の上限を超えています',
-    errImageTooLarge: '画像が 5MB の上限を超えています',
-    errUnreadable: '読み取れません',
-    errFileTooLarge: 'ファイルがサイズ上限を超えています',
-    errParseFailed: 'ファイルの解析に失敗しました',
-    errImageNoText:
-      '画像の添付ファイルはテキストを提供しません。画像としてユーザーメッセージと一緒に送信されるため、そのまま画像をご確認ください',
-    errNotImage: 'サポートされていない画像形式です',
-    errGskNotLoggedIn:
-      'Genspark にサインインしていません。下の「Genspark にサインイン」からサインインして再試行してください',
-    errNoApiKey: '{provider} の API キーが設定されていません',
-    errAiRegion:
-      'このモデルの提供元は現在の地域ではサービスを提供していません。別のモデルを選ぶか、ネットワークを切り替えてください',
-    errAiBusy: 'AI サービスが混み合っています。しばらくしてからもう一度お試しください',
-    errNoModel: 'モデル名が設定されていません',
-    menuFile: 'ファイル',
-    menuNewDoc: '新規文書',
-    menuNewWindow: '新規ウィンドウ',
-    menuOpen: '開く…',
-    menuOpenRecent: '最近使った文書を開く',
-    menuNoRecent: '最近使った文書はありません',
-    menuClose: '閉じる',
-    menuSave: '保存',
-    menuSaveAs: '名前を付けて保存…',
-    menuPageSetup: 'ページ設定…',
-    menuExportPdf: 'PDF としてエクスポート…',
-    menuExportHtml: 'HTML としてエクスポート…',
-    menuExportMarkdown: 'Markdown としてエクスポート…',
-    menuExportImages: '画像としてエクスポート…',
-    menuPrint: '印刷…',
-    menuEdit: '編集',
-    menuUndo: '元に戻す',
-    menuRedo: 'やり直す',
-    menuCut: '切り取り',
-    menuCopy: 'コピー',
-    menuPaste: '貼り付け',
-    menuPasteMatch: '貼り付けて書式を合わせる',
-    menuFindReplace: '検索と置換…',
-    menuGoTo: 'ジャンプ…',
-    menuSelectAll: 'すべて選択',
-    menuView: '表示',
-    menuZoom: 'ズーム',
-    menuZoomIn: '拡大',
-    menuZoomOut: '縮小',
-    menuZoom100: '実際のサイズ (100%)',
-    menuPageWidth: 'ページ幅',
-    menuWholePage: 'ページ全体',
-    menuMultiPage: '複数ページ',
-    menuAiSidebar: 'AI サイドバー',
-    menuDarkMode: 'ダークモード',
-    menuFullscreen: 'フルスクリーンにする',
-    menuInsert: '挿入',
-    menuInsertTable: '表…',
-    menuInsertImage: '画像…',
-    menuInsertPageBreak: '改ページ',
-    menuInsertLink: 'ハイパーリンク…',
-    menuInsertEquation: '数式…',
-    menuComment: 'コメント',
-    menuFormat: '書式',
-    menuBold: '太字',
-    menuItalic: '斜体',
-    menuUnderline: '下線',
-    menuAlign: '配置',
-    menuAlignLeft: '左揃え',
-    menuAlignCenter: '中央揃え',
-    menuAlignRight: '右揃え',
-    menuAlignJustify: '両端揃え',
-    menuFont: 'フォント…',
-    menuParagraph: '段落…',
-    menuTools: 'ツール',
-    menuTable: '表',
-    menuTableInsert: '挿入',
-    menuTableInsertTable: '表…',
-    menuTableColsLeft: '左に列',
-    menuTableColsRight: '右に列',
-    menuTableRowsAbove: '上に行',
-    menuTableRowsBelow: '下に行',
-    menuTableCells: 'セル…',
-    menuTableDelete: '削除',
-    menuTableDeleteTable: '表',
-    menuTableDeleteColumns: '列',
-    menuTableDeleteRows: '行',
-    menuTableSelect: '選択',
-    menuTableSelectCell: 'セル',
-    menuTableSelectColumn: '列',
-    menuTableSelectRow: '行',
-    menuTableSelectTable: '表',
-    menuTableMergeCells: 'セルの結合',
-    menuTableSplitCells: 'セルの分割…',
-    menuTableSplitTable: '表の分割',
-    menuTableAutoFit: '自動調整',
-    menuTableAutoFitContents: '文字列の幅に自動調整',
-    menuTableAutoFitWindow: 'ウィンドウ幅に自動調整',
-    menuTableFixedWidth: '列の幅を固定する',
-    menuTableDistributeRows: '行の高さを揃える',
-    menuTableDistributeColumns: '列の幅を揃える',
-    menuTableRepeatHeader: 'タイトル行の繰り返し',
-    menuTableGridlines: 'グリッド線の表示',
-    menuTableProperties: '表のプロパティ…',
-    menuWordCount: '文字カウント…',
-    menuAutoCorrect: 'オートコレクトのオプション…',
-    menuPreferences: '環境設定…',
-    menuAiProofread: 'AI 校正',
-    menuWindow: 'ウィンドウ',
-    menuHelp: 'ヘルプ',
-    menuShortcuts: 'キーボードショートカット',
-  },
-  ko: {
-    dlgOpenDoc: '문서 열기',
-    filterWord: 'Word 문서',
-    odtImportMsg: '이 .{ext} 문서를 변환할까요?',
-    odtImportDetail:
-      'GenOffice은 ODF가 아니라 .docx를 편집합니다. 본문, 제목, 목록, 표, 이미지는 변환되지만 각주, 메모, 텍스트 상자는 완전히 유지되지 않습니다. 원본 파일은 변경되지 않으며, 변환된 .docx는 이후 저장이 기록되는 독립적인 사본입니다.',
-    hwpImportDetail:
-      'GenOffice은 HWP가 아니라 .docx를 편집합니다. 본문, 표, 그림, 머리말, 꼬리말은 변환되지만 수식, 각주, 삽입 개체는 변환되지 않으며 자동 번호는 일반 텍스트로 바뀝니다. 원본 파일은 변경되지 않으며, 변환된 .docx는 이후 저장이 기록되는 독립적인 사본입니다.',
-    odtImportConvertBtn: '변환 후 열기',
-    importSkipConfirm: '다음부터 묻지 않고 변환',
-    docImportMsg: '이 .{ext} 문서를 변환할까요?',
-    docImportDetail:
-      'GenOffice은 Word 97-2003(.doc) 문서가 아니라 .docx를 편집합니다. 본문, 제목, 목록, 표, 이미지는 변환되지만 각주, 메모, 텍스트 상자는 완전히 유지되지 않습니다. 원본 파일은 변경되지 않으며, 변환된 .docx는 이후 저장이 기록되는 독립적인 사본입니다.',
-    docImportConvertBtn: '변환 후 열기',
-    dlgSaveAs: '다른 이름으로 저장',
-    closeUnsavedMsg: '이 문서에 저장하지 않은 변경 사항이 있습니다.',
-    closeUnsavedDetail: '닫기 전에 저장하시겠습니까?',
-    closeNoReplyMsg: '문서가 응답하지 않으며 저장하지 않은 변경 사항이 있을 수 있습니다.',
-    closeNoReplyDetail: '그래도 닫을까요? 저장하지 않은 변경 사항은 사라집니다.',
-    btnCloseAnyway: '닫기',
-    autosaveFoundTitle: '자동 복구 버전 발견',
-    autosaveDiskNewer:
-      '참고: 이 복구 사본이 저장된 후 디스크의 파일이 수정되었습니다. 복원하면 그 최신 변경 내용이 대체됩니다.',
-    autosaveFoundBody:
-      '마지막 세션에 저장되지 않은 변경 내용이 있습니다. 자동 저장 버전을 복원할까요?',
-    autosaveRestore: '복원',
-    autosaveDiscard: '취소',
-    btnDontSave: '저장 안 함',
-    btnCancel: '취소',
-    extModifiedMsg: '이 파일이 다른 프로그램에서 수정되었습니다.',
-    extModifiedDetail: '그래도 저장하여 디스크의 변경 사항을 덮어쓸까요?',
-    btnOverwrite: '덮어쓰기',
-    dlgInsertImage: '그림 삽입',
-    filterImages: '그림',
-    dlgMergeDataSource: '받는 사람 목록 선택',
-    filterMergeDataSource: 'Excel 또는 CSV',
-    dlgAddAttachment: '첨부 파일 추가',
-    filterSupported: '지원되는 파일',
-    filterAll: '모든 파일',
-    dlgExportPdf: 'PDF로 내보내기',
-    dlgExportHtml: 'HTML로 내보내기',
-    dlgExportMarkdown: 'Markdown로 내보내기',
-    dlgPickExportDir: '내보낼 폴더 선택',
-    errUnsupportedExt: '.{ext} 형식은 지원되지 않습니다',
-    errNotFile: '파일이 아닙니다',
-    errTooLarge: '{mb}MB 제한을 초과했습니다',
-    errImageTooLarge: '이미지가 5MB 제한을 초과했습니다',
-    errUnreadable: '읽을 수 없습니다',
-    errFileTooLarge: '파일이 크기 제한을 초과했습니다',
-    errParseFailed: '파일을 분석하지 못했습니다',
-    errImageNoText:
-      '이미지 첨부 파일은 텍스트를 제공하지 않으며, 이미지 형태로 사용자 메시지와 함께 전송되므로 이미지를 직접 확인하면 됩니다',
-    errNotImage: '지원되지 않는 이미지 형식입니다',
-    errGskNotLoggedIn:
-      'Genspark에 로그인되어 있지 않습니다. 아래 "Genspark 로그인"을 눌러 로그인한 뒤 다시 시도하세요',
-    errNoApiKey: '{provider}의 API 키가 설정되지 않았습니다',
-    errAiRegion:
-      '이 모델의 제공업체는 현재 지역에서 서비스를 제공하지 않습니다. 다른 모델을 선택하거나 네트워크를 변경하세요',
-    errAiBusy: 'AI 서비스가 혼잡합니다. 잠시 후 다시 시도해 주세요',
-    errNoModel: '모델 이름이 설정되지 않았습니다',
-    menuFile: '파일',
-    menuNewDoc: '새 문서',
-    menuNewWindow: '새 창',
-    menuOpen: '열기…',
-    menuOpenRecent: '최근 문서 열기',
-    menuNoRecent: '최근 문서 없음',
-    menuClose: '닫기',
-    menuSave: '저장',
-    menuSaveAs: '다른 이름으로 저장…',
-    menuPageSetup: '페이지 설정…',
-    menuExportPdf: 'PDF로 내보내기…',
-    menuExportHtml: 'HTML로 내보내기…',
-    menuExportMarkdown: 'Markdown로 내보내기…',
-    menuExportImages: '이미지로 내보내기…',
-    menuPrint: '인쇄…',
-    menuEdit: '편집',
-    menuUndo: '실행 취소',
-    menuRedo: '다시 실행',
-    menuCut: '잘라내기',
-    menuCopy: '복사',
-    menuPaste: '붙여넣기',
-    menuPasteMatch: '서식 맞춰 붙여넣기',
-    menuFindReplace: '찾기 및 바꾸기…',
-    menuGoTo: '이동…',
-    menuSelectAll: '모두 선택',
-    menuView: '보기',
-    menuZoom: '확대/축소',
-    menuZoomIn: '확대',
-    menuZoomOut: '축소',
-    menuZoom100: '실제 크기(100%)',
-    menuPageWidth: '페이지 너비',
-    menuWholePage: '전체 페이지',
-    menuMultiPage: '여러 페이지',
-    menuAiSidebar: 'AI 사이드바',
-    menuDarkMode: '다크 모드',
-    menuFullscreen: '전체 화면 시작',
-    menuInsert: '삽입',
-    menuInsertTable: '표…',
-    menuInsertImage: '그림…',
-    menuInsertPageBreak: '페이지 나누기',
-    menuInsertLink: '하이퍼링크…',
-    menuInsertEquation: '수식…',
-    menuComment: '메모',
-    menuFormat: '서식',
-    menuBold: '굵게',
-    menuItalic: '기울임꼴',
-    menuUnderline: '밑줄',
-    menuAlign: '맞춤',
-    menuAlignLeft: '왼쪽 맞춤',
-    menuAlignCenter: '가운데 맞춤',
-    menuAlignRight: '오른쪽 맞춤',
-    menuAlignJustify: '양쪽 맞춤',
-    menuFont: '글꼴…',
-    menuParagraph: '단락…',
-    menuTools: '도구',
-    menuTable: '표',
-    menuTableInsert: '삽입',
-    menuTableInsertTable: '표…',
-    menuTableColsLeft: '왼쪽에 열',
-    menuTableColsRight: '오른쪽에 열',
-    menuTableRowsAbove: '위에 행',
-    menuTableRowsBelow: '아래에 행',
-    menuTableCells: '셀…',
-    menuTableDelete: '삭제',
-    menuTableDeleteTable: '표',
-    menuTableDeleteColumns: '열',
-    menuTableDeleteRows: '행',
-    menuTableSelect: '선택',
-    menuTableSelectCell: '셀',
-    menuTableSelectColumn: '열',
-    menuTableSelectRow: '행',
-    menuTableSelectTable: '표',
-    menuTableMergeCells: '셀 병합',
-    menuTableSplitCells: '셀 분할…',
-    menuTableSplitTable: '표 분할',
-    menuTableAutoFit: '자동 맞춤 및 분배',
-    menuTableAutoFitContents: '내용에 자동 맞춤',
-    menuTableAutoFitWindow: '창에 자동 맞춤',
-    menuTableFixedWidth: '열 너비 고정',
-    menuTableDistributeRows: '행 균등 분배',
-    menuTableDistributeColumns: '열 균등 분배',
-    menuTableRepeatHeader: '머리글 행 반복',
-    menuTableGridlines: '눈금선 보기',
-    menuTableProperties: '표 속성…',
-    menuWordCount: '단어 개수…',
-    menuAutoCorrect: '자동 고침 옵션…',
-    menuPreferences: '기본 설정…',
-    menuAiProofread: 'AI 교정',
-    menuWindow: '창',
-    menuHelp: '도움말',
-    menuShortcuts: '키보드 바로 가기',
-  },
-  fr: {
-    dlgOpenDoc: 'Ouvrir un document',
-    filterWord: 'Documents Word',
-    odtImportMsg: 'Convertir ce document .{ext} ?',
-    odtImportDetail:
-      'GenOffice modifie des .docx, pas de l’ODF. Le texte, les titres, les listes, les tableaux et les images sont convertis ; les notes de bas de page, les commentaires et les zones de texte ne sont pas entièrement conservés. Le fichier d’origine n’est jamais modifié ; le .docx converti est une copie distincte où s’effectuent les enregistrements suivants.',
-    hwpImportDetail:
-      'GenOffice modifie des .docx, pas des fichiers HWP. Le texte, les tableaux, les images, les en-têtes et les pieds de page sont convertis ; les équations, les notes de bas de page et les objets incorporés ne le sont pas, et la numérotation automatique devient du texte simple. Le fichier d’origine n’est jamais modifié ; le .docx converti est une copie distincte où s’effectuent les enregistrements suivants.',
-    odtImportConvertBtn: 'Convertir et ouvrir',
-    importSkipConfirm: 'La prochaine fois, convertir sans demander',
-    docImportMsg: 'Convertir ce document .{ext} ?',
-    docImportDetail:
-      'GenOffice modifie des .docx, pas de documents Word 97-2003 (.doc). Le texte, les titres, les listes, les tableaux et les images sont convertis ; les notes de bas de page, les commentaires et les zones de texte ne sont pas entièrement conservés. Le fichier d’origine n’est jamais modifié ; le .docx converti est une copie distincte où s’effectuent les enregistrements suivants.',
-    docImportConvertBtn: 'Convertir et ouvrir',
-    dlgSaveAs: 'Enregistrer sous',
-    closeUnsavedMsg: 'Ce document contient des modifications non enregistrées.',
-    closeUnsavedDetail: 'Voulez-vous les enregistrer avant de fermer ?',
-    closeNoReplyMsg:
-      'Le document ne répond pas et peut contenir des modifications non enregistrées.',
-    closeNoReplyDetail: 'Fermer quand même ? Les modifications non enregistrées seront perdues.',
-    btnCloseAnyway: 'Fermer quand même',
-    autosaveFoundTitle: 'Version récupérée trouvée',
-    autosaveDiskNewer:
-      'Remarque : le fichier sur le disque a été modifié après l’enregistrement de cette copie de récupération. La restauration remplacera ces modifications plus récentes.',
-    autosaveFoundBody:
-      'Des modifications non enregistrées existent. Restaurer la version auto-enregistrée ?',
-    autosaveRestore: 'Restaurer',
-    autosaveDiscard: 'Ignorer',
-    btnDontSave: 'Ne pas enregistrer',
-    btnCancel: 'Annuler',
-    extModifiedMsg: 'Le fichier a été modifié par un autre programme.',
-    extModifiedDetail: 'Enregistrer quand même et écraser les modifications sur le disque ?',
-    btnOverwrite: 'Écraser',
-    dlgInsertImage: 'Insérer une image',
-    filterImages: 'Images',
-    dlgMergeDataSource: 'Sélectionner une liste de destinataires',
-    filterMergeDataSource: 'Excel ou CSV',
-    dlgAddAttachment: 'Ajouter des pièces jointes',
-    filterSupported: 'Fichiers pris en charge',
-    filterAll: 'Tous les fichiers',
-    dlgExportPdf: 'Exporter au format PDF',
-    dlgExportHtml: 'Exporter au format HTML',
-    dlgExportMarkdown: 'Exporter au format Markdown',
-    dlgPickExportDir: "Choisir le dossier d'exportation",
-    errUnsupportedExt: 'les fichiers .{ext} ne sont pas pris en charge',
-    errNotFile: "n'est pas un fichier",
-    errTooLarge: 'dépasse la limite de {mb} Mo',
-    errImageTooLarge: "l'image dépasse la limite de 5 Mo",
-    errUnreadable: 'lecture impossible',
-    errFileTooLarge: 'Le fichier dépasse la taille maximale',
-    errParseFailed: "Échec de l'analyse du fichier",
-    errImageNoText:
-      "Les pièces jointes image ne fournissent pas de texte ; l'image est envoyée avec le message de l'utilisateur, consultez-la directement",
-    errNotImage: "type d'image non pris en charge",
-    errGskNotLoggedIn:
-      'Non connecté à Genspark : cliquez sur « Se connecter à Genspark » ci-dessous, connectez-vous puis réessayez',
-    errNoApiKey: 'Aucune clé API configurée pour {provider}',
-    errAiRegion:
-      'Le fournisseur de ce modèle ne dessert pas votre région actuelle — choisissez un autre modèle ou changez de réseau',
-    errAiBusy: "Le service d'IA est actuellement surchargé — réessayez dans un instant",
-    errNoModel: 'Aucun nom de modèle configuré',
-    menuFile: 'Fichier',
-    menuNewDoc: 'Nouveau document',
-    menuNewWindow: 'Nouvelle fenêtre',
-    menuOpen: 'Ouvrir…',
-    menuOpenRecent: 'Ouvrir un document récent',
-    menuNoRecent: 'Aucun document récent',
-    menuClose: 'Fermer',
-    menuSave: 'Enregistrer',
-    menuSaveAs: 'Enregistrer sous…',
-    menuPageSetup: 'Mise en page…',
-    menuExportPdf: 'Exporter au format PDF…',
-    menuExportHtml: 'Exporter au format HTML…',
-    menuExportMarkdown: 'Exporter au format Markdown…',
-    menuExportImages: 'Exporter en images…',
-    menuPrint: 'Imprimer…',
-    menuEdit: 'Édition',
-    menuUndo: 'Annuler',
-    menuRedo: 'Rétablir',
-    menuCut: 'Couper',
-    menuCopy: 'Copier',
-    menuPaste: 'Coller',
-    menuPasteMatch: 'Coller et adapter le style',
-    menuFindReplace: 'Rechercher et remplacer…',
-    menuGoTo: 'Atteindre…',
-    menuSelectAll: 'Tout sélectionner',
-    menuView: 'Affichage',
-    menuZoom: 'Zoom',
-    menuZoomIn: 'Zoom avant',
-    menuZoomOut: 'Zoom arrière',
-    menuZoom100: 'Taille réelle (100 %)',
-    menuPageWidth: 'Largeur de page',
-    menuWholePage: 'Page entière',
-    menuMultiPage: 'Plusieurs pages',
-    menuAiSidebar: 'Volet IA',
-    menuDarkMode: 'Mode sombre',
-    menuFullscreen: 'Activer le mode plein écran',
-    menuInsert: 'Insertion',
-    menuInsertTable: 'Tableau…',
-    menuInsertImage: 'Image…',
-    menuInsertPageBreak: 'Saut de page',
-    menuInsertLink: 'Lien hypertexte…',
-    menuInsertEquation: 'Équation…',
-    menuComment: 'Commentaire',
-    menuFormat: 'Format',
-    menuBold: 'Gras',
-    menuItalic: 'Italique',
-    menuUnderline: 'Souligné',
-    menuAlign: 'Alignement',
-    menuAlignLeft: 'Aligner à gauche',
-    menuAlignCenter: 'Centrer',
-    menuAlignRight: 'Aligner à droite',
-    menuAlignJustify: 'Justifier',
-    menuFont: 'Police…',
-    menuParagraph: 'Paragraphe…',
-    menuTools: 'Outils',
-    menuTable: 'Tableau',
-    menuTableInsert: 'Insérer',
-    menuTableInsertTable: 'Tableau…',
-    menuTableColsLeft: 'Colonnes à gauche',
-    menuTableColsRight: 'Colonnes à droite',
-    menuTableRowsAbove: 'Lignes au-dessus',
-    menuTableRowsBelow: 'Lignes en dessous',
-    menuTableCells: 'Cellules…',
-    menuTableDelete: 'Supprimer',
-    menuTableDeleteTable: 'Tableau',
-    menuTableDeleteColumns: 'Colonnes',
-    menuTableDeleteRows: 'Lignes',
-    menuTableSelect: 'Sélectionner',
-    menuTableSelectCell: 'Cellule',
-    menuTableSelectColumn: 'Colonne',
-    menuTableSelectRow: 'Ligne',
-    menuTableSelectTable: 'Tableau',
-    menuTableMergeCells: 'Fusionner les cellules',
-    menuTableSplitCells: 'Fractionner les cellules…',
-    menuTableSplitTable: 'Fractionner le tableau',
-    menuTableAutoFit: 'Ajustement automatique',
-    menuTableAutoFitContents: 'Ajuster au contenu',
-    menuTableAutoFitWindow: 'Ajuster à la fenêtre',
-    menuTableFixedWidth: 'Largeur de colonne fixe',
-    menuTableDistributeRows: 'Uniformiser la hauteur des lignes',
-    menuTableDistributeColumns: 'Uniformiser la largeur des colonnes',
-    menuTableRepeatHeader: 'Répéter les lignes d’en-tête',
-    menuTableGridlines: 'Afficher le quadrillage',
-    menuTableProperties: 'Propriétés du tableau…',
-    menuWordCount: 'Statistiques…',
-    menuAutoCorrect: 'Options de correction automatique…',
-    menuPreferences: 'Préférences…',
-    menuAiProofread: 'Relecture IA',
-    menuWindow: 'Fenêtre',
-    menuHelp: 'Aide',
-    menuShortcuts: 'Raccourcis clavier',
-  },
-  de: {
-    dlgOpenDoc: 'Dokument öffnen',
-    filterWord: 'Word-Dokumente',
-    odtImportMsg: 'Dieses .{ext}-Dokument konvertieren?',
-    odtImportDetail:
-      'GenOffice bearbeitet .docx, nicht ODF. Text, Überschriften, Listen, Tabellen und Bilder werden übernommen; Fußnoten, Kommentare und Textfelder werden nicht vollständig bewahrt. Die Originaldatei bleibt unverändert; die konvertierte .docx-Kopie ist eigenständig, und spätere Speicherungen landen in ihr.',
-    hwpImportDetail:
-      'GenOffice bearbeitet .docx, nicht HWP. Text, Tabellen, Bilder sowie Kopf- und Fußzeilen werden übernommen; Formeln, Fußnoten und eingebettete Objekte werden nicht konvertiert, und automatische Nummerierung wird zu normalem Text. Die Originaldatei bleibt unverändert; die konvertierte .docx-Kopie ist eigenständig, und spätere Speicherungen landen in ihr.',
-    odtImportConvertBtn: 'Konvertieren und öffnen',
-    importSkipConfirm: 'Nächstes Mal ohne Nachfrage konvertieren',
-    docImportMsg: 'Dieses .{ext}-Dokument konvertieren?',
-    docImportDetail:
-      'GenOffice bearbeitet .docx, nicht Word 97-2003-Dokumente (.doc). Text, Überschriften, Listen, Tabellen und Bilder werden übernommen; Fußnoten, Kommentare und Textfelder werden nicht vollständig bewahrt. Die Originaldatei bleibt unverändert; die konvertierte .docx-Kopie ist eigenständig, und spätere Speicherungen landen in ihr.',
-    docImportConvertBtn: 'Konvertieren und öffnen',
-    dlgSaveAs: 'Speichern unter',
-    closeUnsavedMsg: 'Dieses Dokument enthält ungespeicherte Änderungen.',
-    closeUnsavedDetail: 'Vor dem Schließen speichern?',
-    closeNoReplyMsg:
-      'Das Dokument reagiert nicht und enthält möglicherweise ungespeicherte Änderungen.',
-    closeNoReplyDetail: 'Trotzdem schließen? Ungespeicherte Änderungen gehen verloren.',
-    btnCloseAnyway: 'Trotzdem schließen',
-    autosaveFoundTitle: 'Wiederhergestellte Version gefunden',
-    autosaveDiskNewer:
-      'Hinweis: Die Datei auf dem Datenträger wurde nach dem Speichern dieser Wiederherstellungskopie geändert. Beim Wiederherstellen werden diese neueren Änderungen ersetzt.',
-    autosaveFoundBody:
-      'Es gibt ungespeicherte Änderungen. Automatisch gespeicherte Version wiederherstellen?',
-    autosaveRestore: 'Wiederherstellen',
-    autosaveDiscard: 'Verwerfen',
-    btnDontSave: 'Nicht speichern',
-    btnCancel: 'Abbrechen',
-    extModifiedMsg: 'Die Datei wurde von einem anderen Programm geändert.',
-    extModifiedDetail: 'Trotzdem speichern und die Änderungen auf dem Datenträger überschreiben?',
-    btnOverwrite: 'Überschreiben',
-    dlgInsertImage: 'Bild einfügen',
-    filterImages: 'Bilder',
-    dlgMergeDataSource: 'Empfängerliste auswählen',
-    filterMergeDataSource: 'Excel oder CSV',
-    dlgAddAttachment: 'Anlagen hinzufügen',
-    filterSupported: 'Unterstützte Dateien',
-    filterAll: 'Alle Dateien',
-    dlgExportPdf: 'Als PDF exportieren',
-    dlgExportHtml: 'Als HTML exportieren',
-    dlgExportMarkdown: 'Als Markdown exportieren',
-    dlgPickExportDir: 'Exportordner auswählen',
-    errUnsupportedExt: '.{ext}-Dateien werden nicht unterstützt',
-    errNotFile: 'keine Datei',
-    errTooLarge: 'überschreitet das Limit von {mb} MB',
-    errImageTooLarge: 'Bild überschreitet das Limit von 5 MB',
-    errUnreadable: 'kann nicht gelesen werden',
-    errFileTooLarge: 'Datei überschreitet die maximale Größe',
-    errParseFailed: 'Datei konnte nicht analysiert werden',
-    errImageNoText:
-      'Bildanlagen liefern keinen Text; das Bild wird mit der Benutzernachricht gesendet und kann direkt betrachtet werden',
-    errNotImage: 'kein unterstütztes Bildformat',
-    errGskNotLoggedIn:
-      'Nicht bei Genspark angemeldet: Klicken Sie unten auf „Bei Genspark anmelden“, melden Sie sich an und versuchen Sie es erneut',
-    errNoApiKey: 'Kein API-Schlüssel für {provider} konfiguriert',
-    errAiRegion:
-      'Der Anbieter dieses Modells bedient Ihre aktuelle Region nicht — wählen Sie ein anderes Modell oder wechseln Sie das Netzwerk',
-    errAiBusy: 'Der KI-Dienst ist derzeit überlastet — bitte gleich erneut versuchen',
-    errNoModel: 'Kein Modellname konfiguriert',
-    menuFile: 'Datei',
-    menuNewDoc: 'Neues Dokument',
-    menuNewWindow: 'Neues Fenster',
-    menuOpen: 'Öffnen…',
-    menuOpenRecent: 'Zuletzt verwendete Dokumente',
-    menuNoRecent: 'Keine zuletzt verwendeten Dokumente',
-    menuClose: 'Schließen',
-    menuSave: 'Speichern',
-    menuSaveAs: 'Speichern unter…',
-    menuPageSetup: 'Seite einrichten…',
-    menuExportPdf: 'Als PDF exportieren…',
-    menuExportHtml: 'Als HTML exportieren…',
-    menuExportMarkdown: 'Als Markdown exportieren…',
-    menuExportImages: 'Als Bilder exportieren…',
-    menuPrint: 'Drucken…',
-    menuEdit: 'Bearbeiten',
-    menuUndo: 'Rückgängig',
-    menuRedo: 'Wiederholen',
-    menuCut: 'Ausschneiden',
-    menuCopy: 'Kopieren',
-    menuPaste: 'Einfügen',
-    menuPasteMatch: 'Einfügen und Stil anpassen',
-    menuFindReplace: 'Suchen und Ersetzen…',
-    menuGoTo: 'Gehe zu…',
-    menuSelectAll: 'Alles auswählen',
-    menuView: 'Ansicht',
-    menuZoom: 'Zoom',
-    menuZoomIn: 'Vergrößern',
-    menuZoomOut: 'Verkleinern',
-    menuZoom100: 'Originalgröße (100 %)',
-    menuPageWidth: 'Seitenbreite',
-    menuWholePage: 'Ganze Seite',
-    menuMultiPage: 'Mehrere Seiten',
-    menuAiSidebar: 'KI-Seitenleiste',
-    menuDarkMode: 'Dunkelmodus',
-    menuFullscreen: 'Vollbild ein',
-    menuInsert: 'Einfügen',
-    menuInsertTable: 'Tabelle…',
-    menuInsertImage: 'Bild…',
-    menuInsertPageBreak: 'Seitenumbruch',
-    menuInsertLink: 'Hyperlink…',
-    menuInsertEquation: 'Formel…',
-    menuComment: 'Kommentar',
-    menuFormat: 'Format',
-    menuBold: 'Fett',
-    menuItalic: 'Kursiv',
-    menuUnderline: 'Unterstrichen',
-    menuAlign: 'Ausrichten',
-    menuAlignLeft: 'Linksbündig',
-    menuAlignCenter: 'Zentriert',
-    menuAlignRight: 'Rechtsbündig',
-    menuAlignJustify: 'Blocksatz',
-    menuFont: 'Schriftart…',
-    menuParagraph: 'Absatz…',
-    menuTools: 'Extras',
-    menuTable: 'Tabelle',
-    menuTableInsert: 'Einfügen',
-    menuTableInsertTable: 'Tabelle…',
-    menuTableColsLeft: 'Spalten links',
-    menuTableColsRight: 'Spalten rechts',
-    menuTableRowsAbove: 'Zeilen oberhalb',
-    menuTableRowsBelow: 'Zeilen unterhalb',
-    menuTableCells: 'Zellen…',
-    menuTableDelete: 'Löschen',
-    menuTableDeleteTable: 'Tabelle',
-    menuTableDeleteColumns: 'Spalten',
-    menuTableDeleteRows: 'Zeilen',
-    menuTableSelect: 'Auswählen',
-    menuTableSelectCell: 'Zelle',
-    menuTableSelectColumn: 'Spalte',
-    menuTableSelectRow: 'Zeile',
-    menuTableSelectTable: 'Tabelle',
-    menuTableMergeCells: 'Zellen verbinden',
-    menuTableSplitCells: 'Zellen teilen…',
-    menuTableSplitTable: 'Tabelle teilen',
-    menuTableAutoFit: 'AutoAnpassen und Verteilen',
-    menuTableAutoFitContents: 'An Inhalt anpassen',
-    menuTableAutoFitWindow: 'An Fenster anpassen',
-    menuTableFixedWidth: 'Feste Spaltenbreite',
-    menuTableDistributeRows: 'Zeilen gleichmäßig verteilen',
-    menuTableDistributeColumns: 'Spalten gleichmäßig verteilen',
-    menuTableRepeatHeader: 'Überschriftenzeilen wiederholen',
-    menuTableGridlines: 'Gitternetzlinien anzeigen',
-    menuTableProperties: 'Tabelleneigenschaften…',
-    menuWordCount: 'Wörter zählen…',
-    menuAutoCorrect: 'AutoKorrektur-Optionen…',
-    menuPreferences: 'Einstellungen…',
-    menuAiProofread: 'KI-Korrektur',
-    menuWindow: 'Fenster',
-    menuHelp: 'Hilfe',
-    menuShortcuts: 'Tastenkombinationen',
-  },
-  es: {
-    dlgOpenDoc: 'Abrir documento',
-    filterWord: 'Documentos de Word',
-    odtImportMsg: '¿Convertir este documento .{ext}?',
-    odtImportDetail:
-      'GenOffice edita .docx, no ODF. El texto, los títulos, las listas, las tablas y las imágenes se convierten; las notas al pie, los comentarios y los cuadros de texto no se conservan por completo. El archivo original nunca se modifica; el .docx convertido es una copia independiente en la que se guardan los cambios posteriores.',
-    hwpImportDetail:
-      'GenOffice edita .docx, no HWP. El texto, las tablas, las imágenes, los encabezados y los pies de página se convierten; las ecuaciones, las notas al pie y los objetos incrustados no, y la numeración automática pasa a ser texto normal. El archivo original nunca se modifica; el .docx convertido es una copia independiente en la que se guardan los cambios posteriores.',
-    odtImportConvertBtn: 'Convertir y abrir',
-    importSkipConfirm: 'La próxima vez, convertir sin preguntar',
-    docImportMsg: '¿Convertir este documento .{ext}?',
-    docImportDetail:
-      'GenOffice edita .docx, no documentos de Word 97-2003 (.doc). El texto, los títulos, las listas, las tablas y las imágenes se convierten; las notas al pie, los comentarios y los cuadros de texto no se conservan por completo. El archivo original nunca se modifica; el .docx convertido es una copia independiente en la que se guardan los cambios posteriores.',
-    docImportConvertBtn: 'Convertir y abrir',
-    dlgSaveAs: 'Guardar como',
-    closeUnsavedMsg: 'Este documento tiene cambios sin guardar.',
-    closeUnsavedDetail: '¿Desea guardarlos antes de cerrar?',
-    closeNoReplyMsg: 'El documento no responde y puede tener cambios sin guardar.',
-    closeNoReplyDetail: '¿Cerrar de todos modos? Los cambios sin guardar se perderán.',
-    btnCloseAnyway: 'Cerrar de todos modos',
-    autosaveFoundTitle: 'Se encontró una versión recuperada',
-    autosaveDiskNewer:
-      'Nota: el archivo en disco se modificó después de guardar esta copia de recuperación. Restaurar reemplazará esos cambios más recientes.',
-    autosaveFoundBody:
-      'Hay cambios sin guardar de la última sesión. ¿Restaurar la versión autoguardada?',
-    autosaveRestore: 'Restaurar',
-    autosaveDiscard: 'Descartar',
-    btnDontSave: 'No guardar',
-    btnCancel: 'Cancelar',
-    extModifiedMsg: 'El archivo ha sido modificado por otro programa.',
-    extModifiedDetail: '¿Guardar de todos modos y sobrescribir los cambios en el disco?',
-    btnOverwrite: 'Sobrescribir',
-    dlgInsertImage: 'Insertar imagen',
-    filterImages: 'Imágenes',
-    dlgMergeDataSource: 'Seleccionar lista de destinatarios',
-    filterMergeDataSource: 'Excel o CSV',
-    dlgAddAttachment: 'Agregar datos adjuntos',
-    filterSupported: 'Archivos compatibles',
-    filterAll: 'Todos los archivos',
-    dlgExportPdf: 'Exportar como PDF',
-    dlgExportHtml: 'Exportar como HTML',
-    dlgExportMarkdown: 'Exportar como Markdown',
-    dlgPickExportDir: 'Elegir carpeta de exportación',
-    errUnsupportedExt: 'los archivos .{ext} no son compatibles',
-    errNotFile: 'no es un archivo',
-    errTooLarge: 'supera el límite de {mb} MB',
-    errImageTooLarge: 'la imagen supera el límite de 5 MB',
-    errUnreadable: 'no se puede leer',
-    errFileTooLarge: 'El archivo supera el tamaño máximo',
-    errParseFailed: 'No se pudo analizar el archivo',
-    errImageNoText:
-      'Las imágenes adjuntas no proporcionan texto; la imagen se envía junto con el mensaje del usuario, puedes verla directamente',
-    errNotImage: 'no es un tipo de imagen compatible',
-    errGskNotLoggedIn:
-      'No has iniciado sesión en Genspark: pulsa «Iniciar sesión en Genspark» abajo, inicia sesión y vuelve a intentarlo',
-    errNoApiKey: 'No hay clave de API configurada para {provider}',
-    errAiRegion:
-      'El proveedor de este modelo no da servicio en tu región actual — elige otro modelo o cambia de red',
-    errAiBusy:
-      'El servicio de IA está saturado en este momento; inténtalo de nuevo en unos instantes',
-    errNoModel: 'No se ha configurado el nombre del modelo',
-    menuFile: 'Archivo',
-    menuNewDoc: 'Nuevo documento',
-    menuNewWindow: 'Nueva ventana',
-    menuOpen: 'Abrir…',
-    menuOpenRecent: 'Abrir recientes',
-    menuNoRecent: 'No hay documentos recientes',
-    menuClose: 'Cerrar',
-    menuSave: 'Guardar',
-    menuSaveAs: 'Guardar como…',
-    menuPageSetup: 'Configurar página…',
-    menuExportPdf: 'Exportar como PDF…',
-    menuExportHtml: 'Exportar como HTML…',
-    menuExportMarkdown: 'Exportar como Markdown…',
-    menuExportImages: 'Exportar como imágenes…',
-    menuPrint: 'Imprimir…',
-    menuEdit: 'Edición',
-    menuUndo: 'Deshacer',
-    menuRedo: 'Rehacer',
-    menuCut: 'Cortar',
-    menuCopy: 'Copiar',
-    menuPaste: 'Pegar',
-    menuPasteMatch: 'Pegar con el mismo estilo',
-    menuFindReplace: 'Buscar y reemplazar…',
-    menuGoTo: 'Ir a…',
-    menuSelectAll: 'Seleccionar todo',
-    menuView: 'Ver',
-    menuZoom: 'Zoom',
-    menuZoomIn: 'Acercar',
-    menuZoomOut: 'Alejar',
-    menuZoom100: 'Tamaño real (100 %)',
-    menuPageWidth: 'Ancho de página',
-    menuWholePage: 'Página completa',
-    menuMultiPage: 'Varias páginas',
-    menuAiSidebar: 'Barra lateral de IA',
-    menuDarkMode: 'Modo oscuro',
-    menuFullscreen: 'Usar pantalla completa',
-    menuInsert: 'Insertar',
-    menuInsertTable: 'Tabla…',
-    menuInsertImage: 'Imagen…',
-    menuInsertPageBreak: 'Salto de página',
-    menuInsertLink: 'Hipervínculo…',
-    menuInsertEquation: 'Ecuación…',
-    menuComment: 'Comentario',
-    menuFormat: 'Formato',
-    menuBold: 'Negrita',
-    menuItalic: 'Cursiva',
-    menuUnderline: 'Subrayado',
-    menuAlign: 'Alinear',
-    menuAlignLeft: 'Alinear a la izquierda',
-    menuAlignCenter: 'Centrar',
-    menuAlignRight: 'Alinear a la derecha',
-    menuAlignJustify: 'Justificar',
-    menuFont: 'Fuente…',
-    menuParagraph: 'Párrafo…',
-    menuTools: 'Herramientas',
-    menuTable: 'Tabla',
-    menuTableInsert: 'Insertar',
-    menuTableInsertTable: 'Tabla…',
-    menuTableColsLeft: 'Columnas a la izquierda',
-    menuTableColsRight: 'Columnas a la derecha',
-    menuTableRowsAbove: 'Filas arriba',
-    menuTableRowsBelow: 'Filas abajo',
-    menuTableCells: 'Celdas…',
-    menuTableDelete: 'Eliminar',
-    menuTableDeleteTable: 'Tabla',
-    menuTableDeleteColumns: 'Columnas',
-    menuTableDeleteRows: 'Filas',
-    menuTableSelect: 'Seleccionar',
-    menuTableSelectCell: 'Celda',
-    menuTableSelectColumn: 'Columna',
-    menuTableSelectRow: 'Fila',
-    menuTableSelectTable: 'Tabla',
-    menuTableMergeCells: 'Combinar celdas',
-    menuTableSplitCells: 'Dividir celdas…',
-    menuTableSplitTable: 'Dividir tabla',
-    menuTableAutoFit: 'Autoajustar y distribuir',
-    menuTableAutoFitContents: 'Autoajustar al contenido',
-    menuTableAutoFitWindow: 'Autoajustar a la ventana',
-    menuTableFixedWidth: 'Ancho de columna fijo',
-    menuTableDistributeRows: 'Distribuir filas uniformemente',
-    menuTableDistributeColumns: 'Distribuir columnas uniformemente',
-    menuTableRepeatHeader: 'Repetir filas de encabezado',
-    menuTableGridlines: 'Ver líneas de cuadrícula',
-    menuTableProperties: 'Propiedades de tabla…',
-    menuWordCount: 'Contar palabras…',
-    menuAutoCorrect: 'Opciones de autocorrección…',
-    menuPreferences: 'Preferencias…',
-    menuAiProofread: 'Corrección con IA',
-    menuWindow: 'Ventana',
-    menuHelp: 'Ayuda',
-    menuShortcuts: 'Atajos de teclado',
-  },
-  th: {
-    dlgOpenDoc: 'เปิดเอกสาร',
-    filterWord: 'เอกสาร Word',
-    odtImportMsg: 'แปลงเอกสาร .{ext} นี้ไหม?',
-    odtImportDetail:
-      'GenOffice แก้ไข .docx ไม่ใช่ ODF ข้อความ หัวข้อ รายการ ตาราง และรูปภาพจะถูกแปลง ส่วนเชิงอรรถ ความคิดเห็น และกล่องข้อความจะไม่ถูกเก็บไว้ทั้งหมด ไฟล์ต้นทางจะไม่ถูกแก้ไข และไฟล์ .docx ที่แปลงแล้วเป็นสำเนาแยกต่างหากที่การบันทึกครั้งต่อไปจะเขียนลง',
-    hwpImportDetail:
-      'GenOffice แก้ไข .docx ไม่ใช่ HWP ข้อความ ตาราง รูปภาพ หัวกระดาษ และท้ายกระดาษจะถูกแปลง ส่วนสมการ เชิงอรรถ และวัตถุที่ฝังไว้จะไม่ถูกแปลง และลำดับเลขอัตโนมัติจะกลายเป็นข้อความธรรมดา ไฟล์ต้นทางจะไม่ถูกแก้ไข และไฟล์ .docx ที่แปลงแล้วเป็นสำเนาแยกต่างหากที่การบันทึกครั้งต่อไปจะเขียนลง',
-    odtImportConvertBtn: 'แปลงแล้วเปิด',
-    importSkipConfirm: 'ครั้งถัดไปแปลงทันทีโดยไม่ต้องถาม',
-    docImportMsg: 'แปลงเอกสาร .{ext} นี้ไหม?',
-    docImportDetail:
-      'GenOffice แก้ไข .docx ไม่ใช่เอกสาร Word 97-2003 (.doc) ข้อความ หัวข้อ รายการ ตาราง และรูปภาพจะถูกแปลง ส่วนเชิงอรรถ ความคิดเห็น และกล่องข้อความจะไม่ถูกเก็บไว้ทั้งหมด ไฟล์ต้นทางจะไม่ถูกแก้ไข และไฟล์ .docx ที่แปลงแล้วเป็นสำเนาแยกต่างหากที่การบันทึกครั้งต่อไปจะเขียนลง',
-    docImportConvertBtn: 'แปลงแล้วเปิด',
-    dlgSaveAs: 'บันทึกเป็น',
-    closeUnsavedMsg: 'เอกสารนี้มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก',
-    closeUnsavedDetail: 'ต้องการบันทึกก่อนปิดหรือไม่?',
-    closeNoReplyMsg: 'เอกสารไม่ตอบสนองและอาจมีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก',
-    closeNoReplyDetail: 'ปิดต่อไปหรือไม่ การเปลี่ยนแปลงที่ยังไม่ได้บันทึกจะหายไป',
-    btnCloseAnyway: 'ปิดต่อไป',
-    autosaveFoundTitle: 'พบเวอร์ชันกู้คืนอัตโนมัติ',
-    autosaveDiskNewer:
-      'หมายเหตุ: ไฟล์บนดิสก์ถูกแก้ไขหลังจากบันทึกสำเนากู้คืนนี้ การกู้คืนจะแทนที่การเปลี่ยนแปลงที่ใหม่กว่าเหล่านั้น',
-    autosaveFoundBody: 'มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึกจากครั้งก่อน ต้องการกู้คืนหรือไม่?',
-    autosaveRestore: 'กู้คืน',
-    autosaveDiscard: 'ละทิ้ง',
-    btnDontSave: 'ไม่บันทึก',
-    btnCancel: 'ยกเลิก',
-    extModifiedMsg: 'ไฟล์ถูกแก้ไขโดยโปรแกรมอื่น',
-    extModifiedDetail: 'บันทึกต่อไปและเขียนทับการเปลี่ยนแปลงบนดิสก์หรือไม่?',
-    btnOverwrite: 'เขียนทับ',
-    dlgInsertImage: 'แทรกรูปภาพ',
-    filterImages: 'รูปภาพ',
-    dlgMergeDataSource: 'เลือกรายชื่อผู้รับ',
-    filterMergeDataSource: 'Excel หรือ CSV',
-    dlgAddAttachment: 'เพิ่มสิ่งที่แนบ',
-    filterSupported: 'ไฟล์ที่รองรับ',
-    filterAll: 'ไฟล์ทั้งหมด',
-    dlgExportPdf: 'ส่งออกเป็น PDF',
-    dlgExportHtml: 'ส่งออกเป็น HTML',
-    dlgExportMarkdown: 'ส่งออกเป็น Markdown',
-    dlgPickExportDir: 'เลือกโฟลเดอร์ส่งออก',
-    errUnsupportedExt: 'ไม่รองรับไฟล์ .{ext}',
-    errNotFile: 'ไม่ใช่ไฟล์',
-    errTooLarge: 'เกินขีดจำกัด {mb}MB',
-    errImageTooLarge: 'รูปภาพเกินขีดจำกัด 5MB',
-    errUnreadable: 'ไม่สามารถอ่านได้',
-    errFileTooLarge: 'ไฟล์เกินขนาดสูงสุด',
-    errParseFailed: 'แยกวิเคราะห์ไฟล์ไม่สำเร็จ',
-    errImageNoText:
-      'สิ่งที่แนบเป็นรูปภาพไม่มีข้อความ รูปจะถูกส่งไปพร้อมข้อความของผู้ใช้ ดูรูปได้โดยตรง',
-    errNotImage: 'ไม่ใช่ชนิดรูปภาพที่รองรับ',
-    errGskNotLoggedIn:
-      'ยังไม่ได้ลงชื่อเข้าใช้ Genspark: แตะ “ลงชื่อเข้าใช้ Genspark” ด้านล่าง แล้วลองอีกครั้ง',
-    errNoApiKey: 'ยังไม่ได้ตั้งค่า API Key ของ {provider}',
-    errAiRegion:
-      'ผู้ให้บริการของโมเดลนี้ไม่ให้บริการในภูมิภาคปัจจุบันของคุณ — โปรดเลือกโมเดลอื่นหรือเปลี่ยนเครือข่าย',
-    errAiBusy: 'บริการ AI มีผู้ใช้งานจำนวนมากในขณะนี้ โปรดลองอีกครั้งในอีกสักครู่',
-    errNoModel: 'ยังไม่ได้ตั้งค่าชื่อโมเดล',
-    menuFile: 'ไฟล์',
-    menuNewDoc: 'เอกสารใหม่',
-    menuNewWindow: 'หน้าต่างใหม่',
-    menuOpen: 'เปิด…',
-    menuOpenRecent: 'เปิดเอกสารล่าสุด',
-    menuNoRecent: 'ไม่มีเอกสารล่าสุด',
-    menuClose: 'ปิด',
-    menuSave: 'บันทึก',
-    menuSaveAs: 'บันทึกเป็น…',
-    menuPageSetup: 'ตั้งค่าหน้ากระดาษ…',
-    menuExportPdf: 'ส่งออกเป็น PDF…',
-    menuExportHtml: 'ส่งออกเป็น HTML…',
-    menuExportMarkdown: 'ส่งออกเป็น Markdown…',
-    menuExportImages: 'ส่งออกเป็นรูปภาพ…',
-    menuPrint: 'พิมพ์…',
-    menuEdit: 'แก้ไข',
-    menuUndo: 'เลิกทำ',
-    menuRedo: 'ทำซ้ำ',
-    menuCut: 'ตัด',
-    menuCopy: 'คัดลอก',
-    menuPaste: 'วาง',
-    menuPasteMatch: 'วางแบบจับคู่ลักษณะ',
-    menuFindReplace: 'ค้นหาและแทนที่…',
-    menuGoTo: 'ไปที่…',
-    menuSelectAll: 'เลือกทั้งหมด',
-    menuView: 'มุมมอง',
-    menuZoom: 'ซูม',
-    menuZoomIn: 'ขยาย',
-    menuZoomOut: 'ย่อ',
-    menuZoom100: 'ขนาดจริง (100%)',
-    menuPageWidth: 'ความกว้างของหน้า',
-    menuWholePage: 'ทั้งหน้า',
-    menuMultiPage: 'หลายหน้า',
-    menuAiSidebar: 'แถบข้าง AI',
-    menuDarkMode: 'โหมดมืด',
-    menuFullscreen: 'เข้าสู่โหมดเต็มหน้าจอ',
-    menuInsert: 'แทรก',
-    menuInsertTable: 'ตาราง…',
-    menuInsertImage: 'รูปภาพ…',
-    menuInsertPageBreak: 'ตัวแบ่งหน้า',
-    menuInsertLink: 'ไฮเปอร์ลิงก์…',
-    menuInsertEquation: 'สมการ…',
-    menuComment: 'ข้อคิดเห็น',
-    menuFormat: 'รูปแบบ',
-    menuBold: 'ตัวหนา',
-    menuItalic: 'ตัวเอียง',
-    menuUnderline: 'ขีดเส้นใต้',
-    menuAlign: 'จัดแนว',
-    menuAlignLeft: 'จัดชิดซ้าย',
-    menuAlignCenter: 'จัดกึ่งกลาง',
-    menuAlignRight: 'จัดชิดขวา',
-    menuAlignJustify: 'จัดชิดขอบ',
-    menuFont: 'ฟอนต์…',
-    menuParagraph: 'ย่อหน้า…',
-    menuTools: 'เครื่องมือ',
-    menuTable: 'ตาราง',
-    menuTableInsert: 'แทรก',
-    menuTableInsertTable: 'ตาราง…',
-    menuTableColsLeft: 'คอลัมน์ทางซ้าย',
-    menuTableColsRight: 'คอลัมน์ทางขวา',
-    menuTableRowsAbove: 'แถวด้านบน',
-    menuTableRowsBelow: 'แถวด้านล่าง',
-    menuTableCells: 'เซลล์…',
-    menuTableDelete: 'ลบ',
-    menuTableDeleteTable: 'ตาราง',
-    menuTableDeleteColumns: 'คอลัมน์',
-    menuTableDeleteRows: 'แถว',
-    menuTableSelect: 'เลือก',
-    menuTableSelectCell: 'เซลล์',
-    menuTableSelectColumn: 'คอลัมน์',
-    menuTableSelectRow: 'แถว',
-    menuTableSelectTable: 'ตาราง',
-    menuTableMergeCells: 'ผสานเซลล์',
-    menuTableSplitCells: 'แยกเซลล์…',
-    menuTableSplitTable: 'แยกตาราง',
-    menuTableAutoFit: 'ปรับพอดีอัตโนมัติ',
-    menuTableAutoFitContents: 'ปรับพอดีกับเนื้อหา',
-    menuTableAutoFitWindow: 'ปรับพอดีกับหน้าต่าง',
-    menuTableFixedWidth: 'ความกว้างคอลัมน์คงที่',
-    menuTableDistributeRows: 'กระจายแถวเท่ากัน',
-    menuTableDistributeColumns: 'กระจายคอลัมน์เท่ากัน',
-    menuTableRepeatHeader: 'ทำซ้ำแถวส่วนหัว',
-    menuTableGridlines: 'แสดงเส้นตาราง',
-    menuTableProperties: 'คุณสมบัติตาราง…',
-    menuWordCount: 'นับจำนวนคำ…',
-    menuAutoCorrect: 'ตัวเลือกการแก้ไขอัตโนมัติ…',
-    menuPreferences: 'การตั้งค่า…',
-    menuAiProofread: 'พิสูจน์อักษรด้วย AI',
-    menuWindow: 'หน้าต่าง',
-    menuHelp: 'วิธีใช้',
-    menuShortcuts: 'แป้นพิมพ์ลัด',
-  },
-  id: {
-    dlgOpenDoc: 'Buka Dokumen',
-    filterWord: 'Dokumen Word',
-    odtImportMsg: 'Konversi dokumen .{ext} ini?',
-    odtImportDetail:
-      'GenOffice mengedit .docx, bukan ODF. Teks isi, judul, daftar, tabel, dan gambar ikut dikonversi; catatan kaki, komentar, dan kotak teks tidak sepenuhnya dipertahankan. File asli tidak pernah diubah; salinan .docx hasil konversi berdiri sendiri dan penyimpanan berikutnya ditulis ke sana.',
-    hwpImportDetail:
-      'GenOffice mengedit .docx, bukan HWP. Teks isi, tabel, gambar, header, dan footer ikut dikonversi; persamaan, catatan kaki, dan objek tersemat tidak dikonversi, dan penomoran otomatis menjadi teks biasa. File asli tidak pernah diubah; salinan .docx hasil konversi berdiri sendiri dan penyimpanan berikutnya ditulis ke sana.',
-    odtImportConvertBtn: 'Konversi dan buka',
-    importSkipConfirm: 'Lain kali langsung konversi tanpa bertanya',
-    docImportMsg: 'Konversi dokumen .{ext} ini?',
-    docImportDetail:
-      'GenOffice mengedit .docx, bukan dokumen Word 97-2003 (.doc). Teks isi, judul, daftar, tabel, dan gambar ikut dikonversi; catatan kaki, komentar, dan kotak teks tidak sepenuhnya dipertahankan. File asli tidak pernah diubah; salinan .docx hasil konversi berdiri sendiri dan penyimpanan berikutnya ditulis ke sana.',
-    docImportConvertBtn: 'Konversi dan buka',
-    dlgSaveAs: 'Simpan Sebagai',
-    closeUnsavedMsg: 'Dokumen ini memiliki perubahan yang belum disimpan.',
-    closeUnsavedDetail: 'Simpan sebelum menutup?',
-    closeNoReplyMsg: 'Dokumen tidak merespons dan mungkin memiliki perubahan yang belum disimpan.',
-    closeNoReplyDetail: 'Tetap tutup? Perubahan yang belum disimpan akan hilang.',
-    btnCloseAnyway: 'Tetap Tutup',
-    autosaveFoundTitle: 'Versi pemulihan ditemukan',
-    autosaveDiskNewer:
-      'Catatan: file di disk diubah setelah salinan pemulihan ini disimpan. Memulihkan akan menggantikan perubahan yang lebih baru tersebut.',
-    autosaveFoundBody:
-      'Ada perubahan yang belum disimpan dari sesi terakhir. Pulihkan versi tersimpan otomatis?',
-    autosaveRestore: 'Pulihkan',
-    autosaveDiscard: 'Buang',
-    btnDontSave: 'Jangan Simpan',
-    btnCancel: 'Batal',
-    extModifiedMsg: 'File telah diubah oleh program lain.',
-    extModifiedDetail: 'Tetap simpan dan timpa perubahan di disk?',
-    btnOverwrite: 'Timpa',
-    dlgInsertImage: 'Sisipkan Gambar',
-    filterImages: 'Gambar',
-    dlgMergeDataSource: 'Pilih daftar penerima',
-    filterMergeDataSource: 'Excel atau CSV',
-    dlgAddAttachment: 'Tambahkan Lampiran',
-    filterSupported: 'File yang Didukung',
-    filterAll: 'Semua File',
-    dlgExportPdf: 'Ekspor sebagai PDF',
-    dlgExportHtml: 'Ekspor sebagai HTML',
-    dlgExportMarkdown: 'Ekspor sebagai Markdown',
-    dlgPickExportDir: 'Pilih Folder Ekspor',
-    errUnsupportedExt: 'file .{ext} tidak didukung',
-    errNotFile: 'bukan file',
-    errTooLarge: 'melebihi batas {mb}MB',
-    errImageTooLarge: 'gambar melebihi batas 5MB',
-    errUnreadable: 'tidak dapat dibaca',
-    errFileTooLarge: 'File melebihi batas ukuran',
-    errParseFailed: 'Gagal mengurai file',
-    errImageNoText:
-      'Lampiran gambar tidak menyediakan teks; gambar dikirim bersama pesan pengguna dan dapat dilihat langsung',
-    errNotImage: 'bukan jenis gambar yang didukung',
-    errGskNotLoggedIn: 'Belum masuk ke Genspark: klik “Masuk ke Genspark” di bawah, lalu coba lagi',
-    errNoApiKey: 'API Key untuk {provider} belum dikonfigurasi',
-    errAiRegion:
-      'Penyedia model ini tidak melayani wilayah Anda saat ini — pilih model lain atau ganti jaringan',
-    errAiBusy: 'Layanan AI sedang sibuk — silakan coba lagi sebentar lagi',
-    errNoModel: 'Nama model belum dikonfigurasi',
-    menuFile: 'File',
-    menuNewDoc: 'Dokumen Baru',
-    menuNewWindow: 'Jendela Baru',
-    menuOpen: 'Buka…',
-    menuOpenRecent: 'Buka Terbaru',
-    menuNoRecent: 'Tidak Ada Dokumen Terbaru',
-    menuClose: 'Tutup',
-    menuSave: 'Simpan',
-    menuSaveAs: 'Simpan Sebagai…',
-    menuPageSetup: 'Penyetelan Halaman…',
-    menuExportPdf: 'Ekspor sebagai PDF…',
-    menuExportHtml: 'Ekspor sebagai HTML…',
-    menuExportMarkdown: 'Ekspor sebagai Markdown…',
-    menuExportImages: 'Ekspor sebagai gambar…',
-    menuPrint: 'Cetak…',
-    menuEdit: 'Edit',
-    menuUndo: 'Urungkan',
-    menuRedo: 'Ulangi',
-    menuCut: 'Potong',
-    menuCopy: 'Salin',
-    menuPaste: 'Tempel',
-    menuPasteMatch: 'Tempel dan Samakan Gaya',
-    menuFindReplace: 'Temukan dan Ganti…',
-    menuGoTo: 'Pergi ke…',
-    menuSelectAll: 'Pilih Semua',
-    menuView: 'Tampilan',
-    menuZoom: 'Zoom',
-    menuZoomIn: 'Perbesar',
-    menuZoomOut: 'Perkecil',
-    menuZoom100: 'Ukuran Sebenarnya (100%)',
-    menuPageWidth: 'Lebar Halaman',
-    menuWholePage: 'Seluruh Halaman',
-    menuMultiPage: 'Beberapa halaman',
-    menuAiSidebar: 'Bilah Samping AI',
-    menuDarkMode: 'Mode Gelap',
-    menuFullscreen: 'Masuk Layar Penuh',
-    menuInsert: 'Sisipkan',
-    menuInsertTable: 'Tabel…',
-    menuInsertImage: 'Gambar…',
-    menuInsertPageBreak: 'Pemisah Halaman',
-    menuInsertLink: 'Hyperlink…',
-    menuInsertEquation: 'Persamaan…',
-    menuComment: 'Komentar',
-    menuFormat: 'Format',
-    menuBold: 'Tebal',
-    menuItalic: 'Miring',
-    menuUnderline: 'Garis Bawah',
-    menuAlign: 'Perataan',
-    menuAlignLeft: 'Rata Kiri',
-    menuAlignCenter: 'Rata Tengah',
-    menuAlignRight: 'Rata Kanan',
-    menuAlignJustify: 'Rata Kiri Kanan',
-    menuFont: 'Font…',
-    menuParagraph: 'Paragraf…',
-    menuTools: 'Alat',
-    menuTable: 'Tabel',
-    menuTableInsert: 'Sisipkan',
-    menuTableInsertTable: 'Tabel…',
-    menuTableColsLeft: 'Kolom di Kiri',
-    menuTableColsRight: 'Kolom di Kanan',
-    menuTableRowsAbove: 'Baris di Atas',
-    menuTableRowsBelow: 'Baris di Bawah',
-    menuTableCells: 'Sel…',
-    menuTableDelete: 'Hapus',
-    menuTableDeleteTable: 'Tabel',
-    menuTableDeleteColumns: 'Kolom',
-    menuTableDeleteRows: 'Baris',
-    menuTableSelect: 'Pilih',
-    menuTableSelectCell: 'Sel',
-    menuTableSelectColumn: 'Kolom',
-    menuTableSelectRow: 'Baris',
-    menuTableSelectTable: 'Tabel',
-    menuTableMergeCells: 'Gabungkan Sel',
-    menuTableSplitCells: 'Pisahkan Sel…',
-    menuTableSplitTable: 'Pisahkan Tabel',
-    menuTableAutoFit: 'Paskan Otomatis',
-    menuTableAutoFitContents: 'Paskan ke Konten',
-    menuTableAutoFitWindow: 'Paskan ke Jendela',
-    menuTableFixedWidth: 'Lebar Kolom Tetap',
-    menuTableDistributeRows: 'Distribusikan Baris Merata',
-    menuTableDistributeColumns: 'Distribusikan Kolom Merata',
-    menuTableRepeatHeader: 'Ulangi Baris Header',
-    menuTableGridlines: 'Lihat Garis Kisi',
-    menuTableProperties: 'Properti Tabel…',
-    menuWordCount: 'Hitungan Kata…',
-    menuAutoCorrect: 'Opsi Koreksi Otomatis…',
-    menuPreferences: 'Preferensi…',
-    menuAiProofread: 'Koreksi AI',
-    menuWindow: 'Jendela',
-    menuHelp: 'Bantuan',
-    menuShortcuts: 'Pintasan Papan Ketik',
-  },
-  ru: {
-    dlgOpenDoc: 'Открыть документ',
-    filterWord: 'Документы Word',
-    odtImportMsg: 'Преобразовать этот документ .{ext}?',
-    odtImportDetail:
-      'GenOffice редактирует .docx, а не ODF. Текст, заголовки, списки, таблицы и изображения переносятся; сноски, примечания и надписи сохраняются не полностью. Исходный файл никогда не изменяется; преобразованный .docx — отдельная копия, в которую записывается дальнейшее сохранение.',
-    hwpImportDetail:
-      'GenOffice редактирует .docx, а не HWP. Текст, таблицы, изображения и колонтитулы переносятся; формулы, сноски и внедрённые объекты не преобразуются, а автоматическая нумерация становится обычным текстом. Исходный файл никогда не изменяется; преобразованный .docx — отдельная копия, в которую записывается дальнейшее сохранение.',
-    odtImportConvertBtn: 'Преобразовать и открыть',
-    importSkipConfirm: 'В следующий раз конвертировать без запроса',
-    docImportMsg: 'Преобразовать этот документ .{ext}?',
-    docImportDetail:
-      'GenOffice редактирует .docx, а не документы Word 97-2003 (.doc). Текст, заголовки, списки, таблицы и изображения переносятся; сноски, примечания и надписи сохраняются не полностью. Исходный файл никогда не изменяется; преобразованный .docx — отдельная копия, в которую записывается дальнейшее сохранение.',
-    docImportConvertBtn: 'Преобразовать и открыть',
-    dlgSaveAs: 'Сохранить как',
-    closeUnsavedMsg: 'В этом документе есть несохранённые изменения.',
-    closeUnsavedDetail: 'Сохранить их перед закрытием?',
-    closeNoReplyMsg: 'Документ не отвечает; возможно, есть несохранённые изменения.',
-    closeNoReplyDetail: 'Всё равно закрыть? Несохранённые изменения будут потеряны.',
-    btnCloseAnyway: 'Закрыть всё равно',
-    autosaveFoundTitle: 'Найдена восстановленная версия',
-    autosaveDiskNewer:
-      'Внимание: файл на диске был изменён после сохранения этой копии восстановления. Восстановление заменит эти более новые изменения.',
-    autosaveFoundBody:
-      'Есть несохранённые изменения из прошлого сеанса. Восстановить автосохранённую версию?',
-    autosaveRestore: 'Восстановить',
-    autosaveDiscard: 'Отклонить',
-    btnDontSave: 'Не сохранять',
-    btnCancel: 'Отмена',
-    extModifiedMsg: 'Файл был изменён другой программой.',
-    extModifiedDetail: 'Всё равно сохранить и перезаписать изменения на диске?',
-    btnOverwrite: 'Перезаписать',
-    dlgInsertImage: 'Вставить рисунок',
-    filterImages: 'Изображения',
-    dlgMergeDataSource: 'Выбрать список получателей',
-    filterMergeDataSource: 'Excel или CSV',
-    dlgAddAttachment: 'Добавить вложения',
-    filterSupported: 'Поддерживаемые файлы',
-    filterAll: 'Все файлы',
-    dlgExportPdf: 'Экспорт в PDF',
-    dlgExportHtml: 'Экспорт в HTML',
-    dlgExportMarkdown: 'Экспорт в Markdown',
-    dlgPickExportDir: 'Выбор папки для экспорта',
-    errUnsupportedExt: 'файлы .{ext} не поддерживаются',
-    errNotFile: 'не является файлом',
-    errTooLarge: 'превышает лимит {mb} МБ',
-    errImageTooLarge: 'изображение превышает лимит 5 МБ',
-    errUnreadable: 'не удается прочитать',
-    errFileTooLarge: 'Файл превышает максимальный размер',
-    errParseFailed: 'Не удалось разобрать файл',
-    errImageNoText:
-      'Вложенные изображения не содержат текста; изображение отправляется вместе с сообщением пользователя, смотрите его напрямую',
-    errNotImage: 'неподдерживаемый тип изображения',
-    errGskNotLoggedIn:
-      'Вы не вошли в Genspark: нажмите «Войти в Genspark» ниже, войдите и повторите попытку',
-    errNoApiKey: 'API-ключ для {provider} не настроен',
-    errAiRegion:
-      'Поставщик этой модели не обслуживает ваш текущий регион — выберите другую модель или смените сеть',
-    errAiBusy: 'Сервис ИИ сейчас перегружен — повторите попытку чуть позже',
-    errNoModel: 'Не указано имя модели',
-    menuFile: 'Файл',
-    menuNewDoc: 'Создать документ',
-    menuNewWindow: 'Новое окно',
-    menuOpen: 'Открыть…',
-    menuOpenRecent: 'Открыть последние',
-    menuNoRecent: 'Нет последних документов',
-    menuClose: 'Закрыть',
-    menuSave: 'Сохранить',
-    menuSaveAs: 'Сохранить как…',
-    menuPageSetup: 'Параметры страницы…',
-    menuExportPdf: 'Экспорт в PDF…',
-    menuExportHtml: 'Экспорт в HTML…',
-    menuExportMarkdown: 'Экспорт в Markdown…',
-    menuExportImages: 'Экспорт в изображения…',
-    menuPrint: 'Печать…',
-    menuEdit: 'Правка',
-    menuUndo: 'Отменить',
-    menuRedo: 'Повторить',
-    menuCut: 'Вырезать',
-    menuCopy: 'Копировать',
-    menuPaste: 'Вставить',
-    menuPasteMatch: 'Вставить и согласовать стиль',
-    menuFindReplace: 'Найти и заменить…',
-    menuGoTo: 'Перейти…',
-    menuSelectAll: 'Выделить все',
-    menuView: 'Вид',
-    menuZoom: 'Масштаб',
-    menuZoomIn: 'Увеличить',
-    menuZoomOut: 'Уменьшить',
-    menuZoom100: 'Фактический размер (100%)',
-    menuPageWidth: 'По ширине страницы',
-    menuWholePage: 'Страница целиком',
-    menuMultiPage: 'Несколько страниц',
-    menuAiSidebar: 'Боковая панель ИИ',
-    menuDarkMode: 'Темный режим',
-    menuFullscreen: 'Перейти в полноэкранный режим',
-    menuInsert: 'Вставка',
-    menuInsertTable: 'Таблица…',
-    menuInsertImage: 'Рисунок…',
-    menuInsertPageBreak: 'Разрыв страницы',
-    menuInsertLink: 'Гиперссылка…',
-    menuInsertEquation: 'Уравнение…',
-    menuComment: 'Примечание',
-    menuFormat: 'Формат',
-    menuBold: 'Полужирный',
-    menuItalic: 'Курсив',
-    menuUnderline: 'Подчеркнутый',
-    menuAlign: 'Выравнивание',
-    menuAlignLeft: 'По левому краю',
-    menuAlignCenter: 'По центру',
-    menuAlignRight: 'По правому краю',
-    menuAlignJustify: 'По ширине',
-    menuFont: 'Шрифт…',
-    menuParagraph: 'Абзац…',
-    menuTools: 'Сервис',
-    menuTable: 'Таблица',
-    menuTableInsert: 'Вставить',
-    menuTableInsertTable: 'Таблица…',
-    menuTableColsLeft: 'Столбцы слева',
-    menuTableColsRight: 'Столбцы справа',
-    menuTableRowsAbove: 'Строки выше',
-    menuTableRowsBelow: 'Строки ниже',
-    menuTableCells: 'Ячейки…',
-    menuTableDelete: 'Удалить',
-    menuTableDeleteTable: 'Таблицу',
-    menuTableDeleteColumns: 'Столбцы',
-    menuTableDeleteRows: 'Строки',
-    menuTableSelect: 'Выделить',
-    menuTableSelectCell: 'Ячейку',
-    menuTableSelectColumn: 'Столбец',
-    menuTableSelectRow: 'Строку',
-    menuTableSelectTable: 'Таблицу',
-    menuTableMergeCells: 'Объединить ячейки',
-    menuTableSplitCells: 'Разделить ячейки…',
-    menuTableSplitTable: 'Разделить таблицу',
-    menuTableAutoFit: 'Автоподбор',
-    menuTableAutoFitContents: 'По содержимому',
-    menuTableAutoFitWindow: 'По ширине окна',
-    menuTableFixedWidth: 'Фиксированная ширина столбца',
-    menuTableDistributeRows: 'Выровнять высоту строк',
-    menuTableDistributeColumns: 'Выровнять ширину столбцов',
-    menuTableRepeatHeader: 'Повторять строки заголовков',
-    menuTableGridlines: 'Отображать сетку',
-    menuTableProperties: 'Свойства таблицы…',
-    menuWordCount: 'Статистика…',
-    menuAutoCorrect: 'Параметры автозамены…',
-    menuPreferences: 'Параметры…',
-    menuAiProofread: 'ИИ-корректура',
-    menuWindow: 'Окно',
-    menuHelp: 'Справка',
-    menuShortcuts: 'Сочетания клавиш',
-  },
-  ar: {
-    dlgOpenDoc: 'فتح مستند',
-    filterWord: 'مستندات Word',
-    odtImportMsg: 'تحويل مستند .{ext} هذا؟',
-    odtImportDetail:
-      'يحرّر GenOffice ملفات ‎.docx ولا يحرّر ODF. يُحوَّل النص والعناوين والقوائم والجداول والصور؛ أما الحواشي السفلية والتعليقات ومربعات النص فلا تُحفظ بالكامل. لا يتغيّر الملف الأصلي أبدًا؛ والملف ‎.docx المحوَّل نسخة مستقلة تُكتب فيها عمليات الحفظ اللاحقة.',
-    hwpImportDetail:
-      'يحرّر GenOffice ملفات ‎.docx ولا يحرّر HWP. يُحوَّل النص والجداول والصور والرؤوس والتذييلات؛ أما المعادلات والحواشي السفلية والكائنات المضمّنة فلا تُحوَّل، ويصبح الترقيم التلقائي نصًا عاديًا. لا يتغيّر الملف الأصلي أبدًا؛ والملف ‎.docx المحوَّل نسخة مستقلة تُكتب فيها عمليات الحفظ اللاحقة.',
-    odtImportConvertBtn: 'تحويل وفتح',
-    importSkipConfirm: 'في المرة القادمة، حوّل دون سؤال',
-    docImportMsg: 'تحويل مستند .{ext} هذا؟',
-    docImportDetail:
-      'يحرّر GenOffice ملفات ‎.docx ولا يحرّر مستندات Word 97-2003 (‎.doc). يُحوَّل النص والعناوين والقوائم والجداول والصور؛ أما الحواشي السفلية والتعليقات ومربعات النص فلا تُحفظ بالكامل. لا يتغيّر الملف الأصلي أبدًا؛ والملف ‎.docx المحوَّل نسخة مستقلة تُكتب فيها عمليات الحفظ اللاحقة.',
-    docImportConvertBtn: 'تحويل وفتح',
-    dlgSaveAs: 'حفظ باسم',
-    closeUnsavedMsg: 'يحتوي هذا المستند على تغييرات غير محفوظة.',
-    closeUnsavedDetail: 'هل تريد حفظها قبل الإغلاق؟',
-    closeNoReplyMsg: 'المستند لا يستجيب وقد يحتوي على تغييرات غير محفوظة.',
-    closeNoReplyDetail: 'هل تريد الإغلاق رغم ذلك؟ ستفقد التغييرات غير المحفوظة.',
-    btnCloseAnyway: 'إغلاق على أي حال',
-    autosaveFoundTitle: 'تم العثور على نسخة مستردة',
-    autosaveDiskNewer:
-      'ملاحظة: تم تعديل الملف على القرص بعد حفظ نسخة الاسترداد هذه. ستؤدي الاستعادة إلى استبدال تلك التغييرات الأحدث.',
-    autosaveFoundBody:
-      'توجد تغييرات غير محفوظة من الجلسة الأخيرة. هل تريد استعادة النسخة المحفوظة تلقائيًا؟',
-    autosaveRestore: 'استعادة',
-    autosaveDiscard: 'تجاهل',
-    btnDontSave: 'عدم الحفظ',
-    btnCancel: 'إلغاء',
-    extModifiedMsg: 'تم تعديل الملف بواسطة برنامج آخر.',
-    extModifiedDetail: 'هل تريد الحفظ على أي حال والكتابة فوق التغييرات على القرص؟',
-    btnOverwrite: 'استبدال',
-    dlgInsertImage: 'إدراج صورة',
-    filterImages: 'الصور',
-    dlgMergeDataSource: 'اختيار قائمة المستلمين',
-    filterMergeDataSource: 'Excel أو CSV',
-    dlgAddAttachment: 'إضافة مرفقات',
-    filterSupported: 'الملفات المدعومة',
-    filterAll: 'كل الملفات',
-    dlgExportPdf: 'تصدير بتنسيق PDF',
-    dlgExportHtml: 'تصدير بتنسيق HTML',
-    dlgExportMarkdown: 'تصدير بتنسيق Markdown',
-    dlgPickExportDir: 'اختيار مجلد التصدير',
-    errUnsupportedExt: 'ملفات .{ext} غير مدعومة',
-    errNotFile: 'ليس ملفًا',
-    errTooLarge: 'يتجاوز الحد {mb}MB',
-    errImageTooLarge: 'الصورة تتجاوز حد 5MB',
-    errUnreadable: 'تعذرت القراءة',
-    errFileTooLarge: 'الملف يتجاوز الحد الأقصى للحجم',
-    errParseFailed: 'فشل تحليل الملف',
-    errImageNoText:
-      'مرفقات الصور لا توفر نصًا؛ تُرسل الصورة مع رسالة المستخدم ويمكن الاطلاع عليها مباشرة',
-    errNotImage: 'ليس نوع صورة مدعومًا',
-    errGskNotLoggedIn:
-      'لم تسجّل الدخول إلى Genspark: انقر على «تسجيل الدخول إلى Genspark» أدناه ثم أعد المحاولة',
-    errNoApiKey: 'لم يتم تكوين مفتاح API لـ {provider}',
-    errAiRegion:
-      'مزوّد هذا النموذج لا يقدم الخدمة في منطقتك الحالية — اختر نموذجًا آخر أو غيّر الشبكة',
-    errAiBusy: 'خدمة الذكاء الاصطناعي مشغولة حاليًا — يرجى المحاولة مرة أخرى بعد قليل',
-    errNoModel: 'لم يتم تكوين اسم النموذج',
-    menuFile: 'ملف',
-    menuNewDoc: 'مستند جديد',
-    menuNewWindow: 'نافذة جديدة',
-    menuOpen: 'فتح…',
-    menuOpenRecent: 'فتح الأخيرة',
-    menuNoRecent: 'لا توجد مستندات أخيرة',
-    menuClose: 'إغلاق',
-    menuSave: 'حفظ',
-    menuSaveAs: 'حفظ باسم…',
-    menuPageSetup: 'إعداد الصفحة…',
-    menuExportPdf: 'تصدير بتنسيق PDF…',
-    menuExportHtml: 'تصدير بتنسيق HTML…',
-    menuExportMarkdown: 'تصدير بتنسيق Markdown…',
-    menuExportImages: 'تصدير كصور…',
-    menuPrint: 'طباعة…',
-    menuEdit: 'تحرير',
-    menuUndo: 'تراجع',
-    menuRedo: 'إعادة',
-    menuCut: 'قص',
-    menuCopy: 'نسخ',
-    menuPaste: 'لصق',
-    menuPasteMatch: 'لصق مع مطابقة النمط',
-    menuFindReplace: 'بحث واستبدال…',
-    menuGoTo: 'الانتقال إلى…',
-    menuSelectAll: 'تحديد الكل',
-    menuView: 'عرض',
-    menuZoom: 'تكبير/تصغير',
-    menuZoomIn: 'تكبير',
-    menuZoomOut: 'تصغير',
-    menuZoom100: 'الحجم الفعلي (100%)',
-    menuPageWidth: 'عرض الصفحة',
-    menuWholePage: 'صفحة كاملة',
-    menuMultiPage: 'صفحات متعددة',
-    menuAiSidebar: 'الشريط الجانبي للذكاء الاصطناعي',
-    menuDarkMode: 'الوضع الداكن',
-    menuFullscreen: 'الدخول إلى ملء الشاشة',
-    menuInsert: 'إدراج',
-    menuInsertTable: 'جدول…',
-    menuInsertImage: 'صورة…',
-    menuInsertPageBreak: 'فاصل صفحات',
-    menuInsertLink: 'ارتباط تشعبي…',
-    menuInsertEquation: 'معادلة…',
-    menuComment: 'تعليق',
-    menuFormat: 'تنسيق',
-    menuBold: 'غامق',
-    menuItalic: 'مائل',
-    menuUnderline: 'تسطير',
-    menuAlign: 'محاذاة',
-    menuAlignLeft: 'محاذاة إلى اليسار',
-    menuAlignCenter: 'توسيط',
-    menuAlignRight: 'محاذاة إلى اليمين',
-    menuAlignJustify: 'ضبط',
-    menuFont: 'الخط…',
-    menuParagraph: 'فقرة…',
-    menuTools: 'أدوات',
-    menuTable: 'جدول',
-    menuTableInsert: 'إدراج',
-    menuTableInsertTable: 'جدول…',
-    menuTableColsLeft: 'أعمدة إلى اليسار',
-    menuTableColsRight: 'أعمدة إلى اليمين',
-    menuTableRowsAbove: 'صفوف أعلى',
-    menuTableRowsBelow: 'صفوف أسفل',
-    menuTableCells: 'خلايا…',
-    menuTableDelete: 'حذف',
-    menuTableDeleteTable: 'الجدول',
-    menuTableDeleteColumns: 'الأعمدة',
-    menuTableDeleteRows: 'الصفوف',
-    menuTableSelect: 'تحديد',
-    menuTableSelectCell: 'الخلية',
-    menuTableSelectColumn: 'العمود',
-    menuTableSelectRow: 'الصف',
-    menuTableSelectTable: 'الجدول',
-    menuTableMergeCells: 'دمج الخلايا',
-    menuTableSplitCells: 'تقسيم الخلايا…',
-    menuTableSplitTable: 'تقسيم الجدول',
-    menuTableAutoFit: 'احتواء تلقائي',
-    menuTableAutoFitContents: 'احتواء تلقائي للمحتويات',
-    menuTableAutoFitWindow: 'احتواء تلقائي للنافذة',
-    menuTableFixedWidth: 'عرض عمود ثابت',
-    menuTableDistributeRows: 'توزيع الصفوف بالتساوي',
-    menuTableDistributeColumns: 'توزيع الأعمدة بالتساوي',
-    menuTableRepeatHeader: 'تكرار صفوف الرأس',
-    menuTableGridlines: 'عرض خطوط الشبكة',
-    menuTableProperties: 'خصائص الجدول…',
-    menuWordCount: 'عدد الكلمات…',
-    menuAutoCorrect: 'خيارات التصحيح التلقائي…',
-    menuPreferences: 'التفضيلات…',
-    menuAiProofread: 'تدقيق بالذكاء الاصطناعي',
-    menuWindow: 'نافذة',
-    menuHelp: 'تعليمات',
-    menuShortcuts: 'اختصارات لوحة المفاتيح',
-  },
-  pt: {
-    dlgOpenDoc: 'Abrir Documento',
-    filterWord: 'Documentos do Word',
-    odtImportMsg: 'Converter este documento .{ext}?',
-    odtImportDetail:
-      'O GenOffice edita .docx, não ODF. Texto, títulos, listas, tabelas e imagens são convertidos; notas de rodapé, comentários e caixas de texto não são preservados por completo. O arquivo original nunca é alterado; o .docx convertido é uma cópia independente em que os salvamentos seguintes são gravados.',
-    hwpImportDetail:
-      'O GenOffice edita .docx, não HWP. Texto, tabelas, imagens, cabeçalhos e rodapés são convertidos; equações, notas de rodapé e objetos incorporados não são, e a numeração automática vira texto comum. O arquivo original nunca é alterado; o .docx convertido é uma cópia independente em que os salvamentos seguintes são gravados.',
-    odtImportConvertBtn: 'Converter e abrir',
-    importSkipConfirm: 'Da próxima vez, converter sem perguntar',
-    docImportMsg: 'Converter este documento .{ext}?',
-    docImportDetail:
-      'O GenOffice edita .docx, não documentos do Word 97-2003 (.doc). Texto, títulos, listas, tabelas e imagens são convertidos; notas de rodapé, comentários e caixas de texto não são preservados por completo. O arquivo original nunca é alterado; o .docx convertido é uma cópia independente em que os salvamentos seguintes são gravados.',
-    docImportConvertBtn: 'Converter e abrir',
-    dlgSaveAs: 'Salvar Como',
-    closeUnsavedMsg: 'Este documento tem alterações não salvas.',
-    closeUnsavedDetail: 'Deseja salvá-las antes de fechar?',
-    closeNoReplyMsg: 'O documento não está respondendo e pode ter alterações não salvas.',
-    closeNoReplyDetail: 'Fechar mesmo assim? As alterações não salvas serão perdidas.',
-    btnCloseAnyway: 'Fechar mesmo assim',
-    autosaveFoundTitle: 'Versão recuperada encontrada',
-    autosaveDiskNewer:
-      'Nota: o arquivo no disco foi modificado depois que esta cópia de recuperação foi salva. Restaurar substituirá essas alterações mais recentes.',
-    autosaveFoundBody:
-      'Há alterações não salvas da sua última sessão. Restaurar a versão salva automaticamente?',
-    autosaveRestore: 'Restaurar',
-    autosaveDiscard: 'Descartar',
-    btnDontSave: 'Não Salvar',
-    btnCancel: 'Cancelar',
-    extModifiedMsg: 'O arquivo foi modificado por outro programa.',
-    extModifiedDetail: 'Salvar mesmo assim e sobrescrever as alterações no disco?',
-    btnOverwrite: 'Sobrescrever',
-    dlgInsertImage: 'Inserir Imagem',
-    filterImages: 'Imagens',
-    dlgMergeDataSource: 'Selecionar lista de destinatários',
-    filterMergeDataSource: 'Excel ou CSV',
-    dlgAddAttachment: 'Adicionar Anexos',
-    filterSupported: 'Arquivos Compatíveis',
-    filterAll: 'Todos os Arquivos',
-    dlgExportPdf: 'Exportar como PDF',
-    dlgExportHtml: 'Exportar como HTML',
-    dlgExportMarkdown: 'Exportar como Markdown',
-    dlgPickExportDir: 'Escolher Pasta de Exportação',
-    errUnsupportedExt: 'arquivos .{ext} não são suportados',
-    errNotFile: 'não é um arquivo',
-    errTooLarge: 'excede o limite de {mb}MB',
-    errImageTooLarge: 'a imagem excede o limite de 5MB',
-    errUnreadable: 'não é possível ler',
-    errFileTooLarge: 'O arquivo excede o limite de tamanho',
-    errParseFailed: 'Falha ao analisar o arquivo',
-    errImageNoText:
-      'Anexos de imagem não fornecem texto; a imagem é enviada junto com a mensagem do usuário, basta vê-la diretamente',
-    errNotImage: 'não é um tipo de imagem suportado',
-    errGskNotLoggedIn:
-      'Não conectado ao Genspark: clique em “Entrar no Genspark” abaixo, entre e tente novamente',
-    errNoApiKey: 'Nenhuma chave de API configurada para {provider}',
-    errAiRegion:
-      'O fornecedor deste modelo não atende à sua região atual — escolha outro modelo ou mude de rede',
-    errAiBusy: 'O serviço de IA está sobrecarregado no momento — tente novamente em instantes',
-    errNoModel: 'Nenhum nome de modelo configurado',
-    menuFile: 'Arquivo',
-    menuNewDoc: 'Novo Documento',
-    menuNewWindow: 'Nova Janela',
-    menuOpen: 'Abrir…',
-    menuOpenRecent: 'Abrir Recente',
-    menuNoRecent: 'Nenhum Documento Recente',
-    menuClose: 'Fechar',
-    menuSave: 'Salvar',
-    menuSaveAs: 'Salvar Como…',
-    menuPageSetup: 'Configurar Página…',
-    menuExportPdf: 'Exportar como PDF…',
-    menuExportHtml: 'Exportar como HTML…',
-    menuExportMarkdown: 'Exportar como Markdown…',
-    menuExportImages: 'Exportar como imagens…',
-    menuPrint: 'Imprimir…',
-    menuEdit: 'Editar',
-    menuUndo: 'Desfazer',
-    menuRedo: 'Refazer',
-    menuCut: 'Recortar',
-    menuCopy: 'Copiar',
-    menuPaste: 'Colar',
-    menuPasteMatch: 'Colar com a Mesma Formatação',
-    menuFindReplace: 'Localizar e Substituir…',
-    menuGoTo: 'Ir para…',
-    menuSelectAll: 'Selecionar Tudo',
-    menuView: 'Exibir',
-    menuZoom: 'Zoom',
-    menuZoomIn: 'Ampliar',
-    menuZoomOut: 'Reduzir',
-    menuZoom100: 'Tamanho Real (100%)',
-    menuPageWidth: 'Largura da Página',
-    menuWholePage: 'Página Inteira',
-    menuMultiPage: 'Várias páginas',
-    menuAiSidebar: 'Barra Lateral de IA',
-    menuDarkMode: 'Modo Escuro',
-    menuFullscreen: 'Entrar em Tela Cheia',
-    menuInsert: 'Inserir',
-    menuInsertTable: 'Tabela…',
-    menuInsertImage: 'Imagem…',
-    menuInsertPageBreak: 'Quebra de Página',
-    menuInsertLink: 'Hiperlink…',
-    menuInsertEquation: 'Equação…',
-    menuComment: 'Comentário',
-    menuFormat: 'Formatar',
-    menuBold: 'Negrito',
-    menuItalic: 'Itálico',
-    menuUnderline: 'Sublinhado',
-    menuAlign: 'Alinhar',
-    menuAlignLeft: 'Alinhar à Esquerda',
-    menuAlignCenter: 'Centralizar',
-    menuAlignRight: 'Alinhar à Direita',
-    menuAlignJustify: 'Justificar',
-    menuFont: 'Fonte…',
-    menuParagraph: 'Parágrafo…',
-    menuTools: 'Ferramentas',
-    menuTable: 'Tabela',
-    menuTableInsert: 'Inserir',
-    menuTableInsertTable: 'Tabela…',
-    menuTableColsLeft: 'Colunas à esquerda',
-    menuTableColsRight: 'Colunas à direita',
-    menuTableRowsAbove: 'Linhas acima',
-    menuTableRowsBelow: 'Linhas abaixo',
-    menuTableCells: 'Células…',
-    menuTableDelete: 'Excluir',
-    menuTableDeleteTable: 'Tabela',
-    menuTableDeleteColumns: 'Colunas',
-    menuTableDeleteRows: 'Linhas',
-    menuTableSelect: 'Selecionar',
-    menuTableSelectCell: 'Célula',
-    menuTableSelectColumn: 'Coluna',
-    menuTableSelectRow: 'Linha',
-    menuTableSelectTable: 'Tabela',
-    menuTableMergeCells: 'Mesclar células',
-    menuTableSplitCells: 'Dividir células…',
-    menuTableSplitTable: 'Dividir tabela',
-    menuTableAutoFit: 'AutoAjuste',
-    menuTableAutoFitContents: 'AutoAjustar ao conteúdo',
-    menuTableAutoFitWindow: 'AutoAjustar à janela',
-    menuTableFixedWidth: 'Largura de coluna fixa',
-    menuTableDistributeRows: 'Distribuir linhas uniformemente',
-    menuTableDistributeColumns: 'Distribuir colunas uniformemente',
-    menuTableRepeatHeader: 'Repetir linhas de cabeçalho',
-    menuTableGridlines: 'Ver linhas de grade',
-    menuTableProperties: 'Propriedades da tabela…',
-    menuWordCount: 'Contagem de Palavras…',
-    menuAutoCorrect: 'Opções de Correção Automática…',
-    menuPreferences: 'Preferências…',
-    menuAiProofread: 'Revisão com IA',
-    menuWindow: 'Janela',
-    menuHelp: 'Ajuda',
-    menuShortcuts: 'Atalhos de Teclado',
-  },
-  it: {
-    dlgOpenDoc: 'Apri documento',
-    filterWord: 'Documenti Word',
-    odtImportMsg: 'Convertire questo documento .{ext}?',
-    odtImportDetail:
-      'GenOffice modifica .docx, non ODF. Testo, titoli, elenchi, tabelle e immagini vengono convertiti; note a piè di pagina, commenti e caselle di testo non sono conservati completamente. Il file originale non viene mai modificato; il .docx convertito è una copia indipendente su cui vengono salvate le modifiche successive.',
-    hwpImportDetail:
-      'GenOffice modifica .docx, non HWP. Testo, tabelle, immagini, intestazioni e piè di pagina vengono convertiti; equazioni, note a piè di pagina e oggetti incorporati no, e la numerazione automatica diventa testo semplice. Il file originale non viene mai modificato; il .docx convertito è una copia indipendente su cui vengono salvate le modifiche successive.',
-    odtImportConvertBtn: 'Converti e apri',
-    importSkipConfirm: 'La prossima volta converti senza chiedere',
-    docImportMsg: 'Convertire questo documento .{ext}?',
-    docImportDetail:
-      'GenOffice modifica .docx, non documenti Word 97-2003 (.doc). Testo, titoli, elenchi, tabelle e immagini vengono convertiti; note a piè di pagina, commenti e caselle di testo non sono conservati completamente. Il file originale non viene mai modificato; il .docx convertito è una copia indipendente su cui vengono salvate le modifiche successive.',
-    docImportConvertBtn: 'Converti e apri',
-    dlgSaveAs: 'Salva con nome',
-    closeUnsavedMsg: 'Questo documento contiene modifiche non salvate.',
-    closeUnsavedDetail: 'Salvarle prima di chiudere?',
-    closeNoReplyMsg: 'Il documento non risponde e potrebbe avere modifiche non salvate.',
-    closeNoReplyDetail: 'Chiudere comunque? Le modifiche non salvate andranno perse.',
-    btnCloseAnyway: 'Chiudi comunque',
-    autosaveFoundTitle: 'Trovata versione recuperata',
-    autosaveDiskNewer:
-      'Nota: il file su disco è stato modificato dopo il salvataggio di questa copia di ripristino. Il ripristino sostituirà tali modifiche più recenti.',
-    autosaveFoundBody:
-      "Ci sono modifiche non salvate dall'ultima sessione. Ripristinare la versione salvata automaticamente?",
-    autosaveRestore: 'Ripristina',
-    autosaveDiscard: 'Ignora',
-    btnDontSave: 'Non salvare',
-    btnCancel: 'Annulla',
-    extModifiedMsg: 'Il file è stato modificato da un altro programma.',
-    extModifiedDetail: 'Salvare comunque e sovrascrivere le modifiche sul disco?',
-    btnOverwrite: 'Sovrascrivi',
-    dlgInsertImage: 'Inserisci immagine',
-    filterImages: 'Immagini',
-    dlgMergeDataSource: 'Seleziona elenco destinatari',
-    filterMergeDataSource: 'Excel o CSV',
-    dlgAddAttachment: 'Aggiungi allegati',
-    filterSupported: 'File supportati',
-    filterAll: 'Tutti i file',
-    dlgExportPdf: 'Esporta come PDF',
-    dlgExportHtml: 'Esporta come HTML',
-    dlgExportMarkdown: 'Esporta come Markdown',
-    dlgPickExportDir: 'Scegli la cartella di esportazione',
-    errUnsupportedExt: 'i file .{ext} non sono supportati',
-    errNotFile: 'non è un file',
-    errTooLarge: 'supera il limite di {mb} MB',
-    errImageTooLarge: "l'immagine supera il limite di 5 MB",
-    errUnreadable: 'impossibile leggere',
-    errFileTooLarge: 'Il file supera il limite di dimensione',
-    errParseFailed: 'Impossibile analizzare il file',
-    errImageNoText:
-      "Gli allegati immagine non forniscono testo; l'immagine viene inviata insieme al messaggio dell'utente, basta guardarla direttamente",
-    errNotImage: 'tipo di immagine non supportato',
-    errGskNotLoggedIn:
-      'Accesso a Genspark non effettuato: fai clic su “Accedi a Genspark” qui sotto, accedi e riprova',
-    errNoApiKey: 'Nessuna chiave API configurata per {provider}',
-    errAiRegion:
-      'Il fornitore di questo modello non serve la tua regione attuale — scegli un altro modello o cambia rete',
-    errAiBusy: 'Il servizio IA è momentaneamente sovraccarico — riprova tra poco',
-    errNoModel: 'Nessun nome di modello configurato',
-    menuFile: 'File',
-    menuNewDoc: 'Nuovo documento',
-    menuNewWindow: 'Nuova finestra',
-    menuOpen: 'Apri…',
-    menuOpenRecent: 'Apri recenti',
-    menuNoRecent: 'Nessun documento recente',
-    menuClose: 'Chiudi',
-    menuSave: 'Salva',
-    menuSaveAs: 'Salva con nome…',
-    menuPageSetup: 'Imposta pagina…',
-    menuExportPdf: 'Esporta come PDF…',
-    menuExportHtml: 'Esporta come HTML…',
-    menuExportMarkdown: 'Esporta come Markdown…',
-    menuExportImages: 'Esporta come immagini…',
-    menuPrint: 'Stampa…',
-    menuEdit: 'Modifica',
-    menuUndo: 'Annulla',
-    menuRedo: 'Ripeti',
-    menuCut: 'Taglia',
-    menuCopy: 'Copia',
-    menuPaste: 'Incolla',
-    menuPasteMatch: 'Incolla e adatta lo stile',
-    menuFindReplace: 'Trova e sostituisci…',
-    menuGoTo: 'Vai a…',
-    menuSelectAll: 'Seleziona tutto',
-    menuView: 'Visualizza',
-    menuZoom: 'Zoom',
-    menuZoomIn: 'Ingrandisci',
-    menuZoomOut: 'Riduci',
-    menuZoom100: 'Dimensioni effettive (100%)',
-    menuPageWidth: 'Larghezza pagina',
-    menuWholePage: 'Pagina intera',
-    menuMultiPage: 'Più pagine',
-    menuAiSidebar: 'Barra laterale IA',
-    menuDarkMode: 'Modalità scura',
-    menuFullscreen: 'Attiva schermo intero',
-    menuInsert: 'Inserisci',
-    menuInsertTable: 'Tabella…',
-    menuInsertImage: 'Immagine…',
-    menuInsertPageBreak: 'Interruzione di pagina',
-    menuInsertLink: 'Collegamento ipertestuale…',
-    menuInsertEquation: 'Equazione…',
-    menuComment: 'Commento',
-    menuFormat: 'Formato',
-    menuBold: 'Grassetto',
-    menuItalic: 'Corsivo',
-    menuUnderline: 'Sottolineato',
-    menuAlign: 'Allinea',
-    menuAlignLeft: 'Allinea a sinistra',
-    menuAlignCenter: 'Centra',
-    menuAlignRight: 'Allinea a destra',
-    menuAlignJustify: 'Giustifica',
-    menuFont: 'Carattere…',
-    menuParagraph: 'Paragrafo…',
-    menuTools: 'Strumenti',
-    menuTable: 'Tabella',
-    menuTableInsert: 'Inserisci',
-    menuTableInsertTable: 'Tabella…',
-    menuTableColsLeft: 'Colonne a sinistra',
-    menuTableColsRight: 'Colonne a destra',
-    menuTableRowsAbove: 'Righe sopra',
-    menuTableRowsBelow: 'Righe sotto',
-    menuTableCells: 'Celle…',
-    menuTableDelete: 'Elimina',
-    menuTableDeleteTable: 'Tabella',
-    menuTableDeleteColumns: 'Colonne',
-    menuTableDeleteRows: 'Righe',
-    menuTableSelect: 'Seleziona',
-    menuTableSelectCell: 'Cella',
-    menuTableSelectColumn: 'Colonna',
-    menuTableSelectRow: 'Riga',
-    menuTableSelectTable: 'Tabella',
-    menuTableMergeCells: 'Unisci celle',
-    menuTableSplitCells: 'Dividi celle…',
-    menuTableSplitTable: 'Dividi tabella',
-    menuTableAutoFit: 'Adatta e distribuisci',
-    menuTableAutoFitContents: 'Adatta al contenuto',
-    menuTableAutoFitWindow: 'Adatta alla finestra',
-    menuTableFixedWidth: 'Larghezza colonna fissa',
-    menuTableDistributeRows: 'Distribuisci righe uniformemente',
-    menuTableDistributeColumns: 'Distribuisci colonne uniformemente',
-    menuTableRepeatHeader: 'Ripeti righe di intestazione',
-    menuTableGridlines: 'Mostra griglia',
-    menuTableProperties: 'Proprietà tabella…',
-    menuWordCount: 'Conteggio parole…',
-    menuAutoCorrect: 'Opzioni correzione automatica…',
-    menuPreferences: 'Preferenze…',
-    menuAiProofread: 'Correzione IA',
-    menuWindow: 'Finestra',
-    menuHelp: 'Aiuto',
-    menuShortcuts: 'Scelte rapide da tastiera',
-  },
-  pl: {
-    dlgOpenDoc: 'Otwórz dokument',
-    filterWord: 'Dokumenty programu Word',
-    odtImportMsg: 'Skonwertować ten dokument .{ext}?',
-    odtImportDetail:
-      'GenOffice edytuje .docx, a nie ODF. Tekst, nagłówki, listy, tabele i obrazy są konwertowane; przypisy, komentarze i pola tekstowe nie są zachowywane w całości. Plik oryginalny nigdy nie jest zmieniany; skonwertowany .docx to niezależna kopia, do której trafiają kolejne zapisy.',
-    hwpImportDetail:
-      'GenOffice edytuje .docx, a nie HWP. Tekst, tabele, obrazy, nagłówki i stopki są konwertowane; równania, przypisy i obiekty osadzone nie są, a automatyczna numeracja staje się zwykłym tekstem. Plik oryginalny nigdy nie jest zmieniany; skonwertowany .docx to niezależna kopia, do której trafiają kolejne zapisy.',
-    odtImportConvertBtn: 'Konwertuj i otwórz',
-    importSkipConfirm: 'Następnym razem konwertuj bez pytania',
-    docImportMsg: 'Skonwertować ten dokument .{ext}?',
-    docImportDetail:
-      'GenOffice edytuje .docx, a nie dokumenty Word 97-2003 (.doc). Tekst, nagłówki, listy, tabele i obrazy są konwertowane; przypisy, komentarze i pola tekstowe nie są zachowywane w całości. Plik oryginalny nigdy nie jest zmieniany; skonwertowany .docx to niezależna kopia, do której trafiają kolejne zapisy.',
-    docImportConvertBtn: 'Konwertuj i otwórz',
-    dlgSaveAs: 'Zapisz jako',
-    closeUnsavedMsg: 'Ten dokument zawiera niezapisane zmiany.',
-    closeUnsavedDetail: 'Czy zapisać je przed zamknięciem?',
-    closeNoReplyMsg: 'Dokument nie odpowiada i może zawierać niezapisane zmiany.',
-    closeNoReplyDetail: 'Zamknąć mimo to? Niezapisane zmiany zostaną utracone.',
-    btnCloseAnyway: 'Zamknij mimo to',
-    autosaveFoundTitle: 'Znaleziono odzyskaną wersję',
-    autosaveDiskNewer:
-      'Uwaga: plik na dysku został zmodyfikowany po zapisaniu tej kopii odzyskiwania. Przywrócenie zastąpi te nowsze zmiany.',
-    autosaveFoundBody:
-      'Istnieją niezapisane zmiany z ostatniej sesji. Przywrócić wersję zapisaną automatycznie?',
-    autosaveRestore: 'Przywróć',
-    autosaveDiscard: 'Odrzuć',
-    btnDontSave: 'Nie zapisuj',
-    btnCancel: 'Anuluj',
-    extModifiedMsg: 'Plik został zmodyfikowany przez inny program.',
-    extModifiedDetail: 'Zapisać mimo to i nadpisać zmiany na dysku?',
-    btnOverwrite: 'Nadpisz',
-    dlgInsertImage: 'Wstaw obraz',
-    filterImages: 'Obrazy',
-    dlgMergeDataSource: 'Wybierz listę odbiorców',
-    filterMergeDataSource: 'Excel lub CSV',
-    dlgAddAttachment: 'Dodaj załączniki',
-    filterSupported: 'Obsługiwane pliki',
-    filterAll: 'Wszystkie pliki',
-    dlgExportPdf: 'Eksportuj jako PDF',
-    dlgExportHtml: 'Eksportuj jako HTML',
-    dlgExportMarkdown: 'Eksportuj jako Markdown',
-    dlgPickExportDir: 'Wybierz folder eksportu',
-    errUnsupportedExt: 'pliki .{ext} nie są obsługiwane',
-    errNotFile: 'to nie jest plik',
-    errTooLarge: 'przekracza limit {mb} MB',
-    errImageTooLarge: 'obraz przekracza limit 5 MB',
-    errUnreadable: 'nie można odczytać',
-    errFileTooLarge: 'Plik przekracza limit rozmiaru',
-    errParseFailed: 'Nie udało się przeanalizować pliku',
-    errImageNoText:
-      'Załączniki graficzne nie zawierają tekstu; obraz jest wysyłany razem z wiadomością użytkownika, wystarczy na niego spojrzeć',
-    errNotImage: 'nieobsługiwany typ obrazu',
-    errGskNotLoggedIn:
-      'Nie zalogowano do Genspark: kliknij „Zaloguj się do Genspark” poniżej, zaloguj się i spróbuj ponownie',
-    errNoApiKey: 'Nie skonfigurowano klucza API dla {provider}',
-    errAiRegion:
-      'Dostawca tego modelu nie obsługuje Twojego obecnego regionu — wybierz inny model lub zmień sieć',
-    errAiBusy: 'Usługa AI jest obecnie przeciążona — spróbuj ponownie za chwilę',
-    errNoModel: 'Nie skonfigurowano nazwy modelu',
-    menuFile: 'Plik',
-    menuNewDoc: 'Nowy dokument',
-    menuNewWindow: 'Nowe okno',
-    menuOpen: 'Otwórz…',
-    menuOpenRecent: 'Otwórz ostatnie',
-    menuNoRecent: 'Brak ostatnich dokumentów',
-    menuClose: 'Zamknij',
-    menuSave: 'Zapisz',
-    menuSaveAs: 'Zapisz jako…',
-    menuPageSetup: 'Ustawienia strony…',
-    menuExportPdf: 'Eksportuj jako PDF…',
-    menuExportHtml: 'Eksportuj jako HTML…',
-    menuExportMarkdown: 'Eksportuj jako Markdown…',
-    menuExportImages: 'Eksportuj jako obrazy…',
-    menuPrint: 'Drukuj…',
-    menuEdit: 'Edycja',
-    menuUndo: 'Cofnij',
-    menuRedo: 'Ponów',
-    menuCut: 'Wytnij',
-    menuCopy: 'Kopiuj',
-    menuPaste: 'Wklej',
-    menuPasteMatch: 'Wklej i dopasuj styl',
-    menuFindReplace: 'Znajdź i zamień…',
-    menuGoTo: 'Przejdź do…',
-    menuSelectAll: 'Zaznacz wszystko',
-    menuView: 'Widok',
-    menuZoom: 'Powiększenie',
-    menuZoomIn: 'Powiększ',
-    menuZoomOut: 'Pomniejsz',
-    menuZoom100: 'Rzeczywisty rozmiar (100%)',
-    menuPageWidth: 'Szerokość strony',
-    menuWholePage: 'Cała strona',
-    menuMultiPage: 'Wiele stron',
-    menuAiSidebar: 'Pasek boczny AI',
-    menuDarkMode: 'Tryb ciemny',
-    menuFullscreen: 'Przejdź do pełnego ekranu',
-    menuInsert: 'Wstaw',
-    menuInsertTable: 'Tabela…',
-    menuInsertImage: 'Obraz…',
-    menuInsertPageBreak: 'Podział strony',
-    menuInsertLink: 'Hiperłącze…',
-    menuInsertEquation: 'Równanie…',
-    menuComment: 'Komentarz',
-    menuFormat: 'Formatowanie',
-    menuBold: 'Pogrubienie',
-    menuItalic: 'Kursywa',
-    menuUnderline: 'Podkreślenie',
-    menuAlign: 'Wyrównaj',
-    menuAlignLeft: 'Wyrównaj do lewej',
-    menuAlignCenter: 'Wyśrodkuj',
-    menuAlignRight: 'Wyrównaj do prawej',
-    menuAlignJustify: 'Wyjustuj',
-    menuFont: 'Czcionka…',
-    menuParagraph: 'Akapit…',
-    menuTools: 'Narzędzia',
-    menuTable: 'Tabela',
-    menuTableInsert: 'Wstaw',
-    menuTableInsertTable: 'Tabela…',
-    menuTableColsLeft: 'Kolumny z lewej',
-    menuTableColsRight: 'Kolumny z prawej',
-    menuTableRowsAbove: 'Wiersze powyżej',
-    menuTableRowsBelow: 'Wiersze poniżej',
-    menuTableCells: 'Komórki…',
-    menuTableDelete: 'Usuń',
-    menuTableDeleteTable: 'Tabela',
-    menuTableDeleteColumns: 'Kolumny',
-    menuTableDeleteRows: 'Wiersze',
-    menuTableSelect: 'Zaznacz',
-    menuTableSelectCell: 'Komórka',
-    menuTableSelectColumn: 'Kolumna',
-    menuTableSelectRow: 'Wiersz',
-    menuTableSelectTable: 'Tabela',
-    menuTableMergeCells: 'Scal komórki',
-    menuTableSplitCells: 'Podziel komórki…',
-    menuTableSplitTable: 'Podziel tabelę',
-    menuTableAutoFit: 'Autodopasowanie',
-    menuTableAutoFitContents: 'Dopasuj do zawartości',
-    menuTableAutoFitWindow: 'Dopasuj do okna',
-    menuTableFixedWidth: 'Stała szerokość kolumny',
-    menuTableDistributeRows: 'Rozłóż wiersze równomiernie',
-    menuTableDistributeColumns: 'Rozłóż kolumny równomiernie',
-    menuTableRepeatHeader: 'Powtórz wiersze nagłówka',
-    menuTableGridlines: 'Wyświetl linie siatki',
-    menuTableProperties: 'Właściwości tabeli…',
-    menuWordCount: 'Statystyka wyrazów…',
-    menuAutoCorrect: 'Opcje Autokorekty…',
-    menuPreferences: 'Preferencje…',
-    menuAiProofread: 'Korekta AI',
-    menuWindow: 'Okno',
-    menuHelp: 'Pomoc',
-    menuShortcuts: 'Skróty klawiaturowe',
-  },
-  cs: {
-    dlgOpenDoc: 'Otevřít dokument',
-    filterWord: 'Dokumenty Wordu',
-    odtImportMsg: 'Převést tento dokument .{ext}?',
-    odtImportDetail:
-      'GenOffice upravuje .docx, nikoli ODF. Text, nadpisy, seznamy, tabulky a obrázky se převedou; poznámky pod čarou, komentáře a textová pole se nepřevezmou úplně. Původní soubor se nikdy nemění; převedený .docx je samostatná kopie, do níž se dalším ukládáním zapisuje.',
-    hwpImportDetail:
-      'GenOffice upravuje .docx, nikoli HWP. Text, tabulky, obrázky, záhlaví a zápatí se převedou; rovnice, poznámky pod čarou a vložené objekty se nepřevedou a automatické číslování se změní na prostý text. Původní soubor se nikdy nemění; převedený .docx je samostatná kopie, do níž se dalším ukládáním zapisuje.',
-    odtImportConvertBtn: 'Převést a otevřít',
-    importSkipConfirm: 'Příště převést bez ptaní',
-    docImportMsg: 'Převést tento dokument .{ext}?',
-    docImportDetail:
-      'GenOffice upravuje .docx, nikoli dokumenty Word 97-2003 (.doc). Text, nadpisy, seznamy, tabulky a obrázky se převedou; poznámky pod čarou, komentáře a textová pole se nepřevezmou úplně. Původní soubor se nikdy nemění; převedený .docx je samostatná kopie, do níž se dalším ukládáním zapisuje.',
-    docImportConvertBtn: 'Převést a otevřít',
-    dlgSaveAs: 'Uložit jako',
-    closeUnsavedMsg: 'Tento dokument obsahuje neuložené změny.',
-    closeUnsavedDetail: 'Chcete je před zavřením uložit?',
-    closeNoReplyMsg: 'Dokument neodpovídá a může obsahovat neuložené změny.',
-    closeNoReplyDetail: 'Přesto zavřít? Neuložené změny budou ztraceny.',
-    btnCloseAnyway: 'Přesto zavřít',
-    autosaveFoundTitle: 'Nalezena obnovená verze',
-    autosaveDiskNewer:
-      'Poznámka: soubor na disku byl změněn po uložení této kopie pro obnovení. Obnovení tyto novější změny nahradí.',
-    autosaveFoundBody:
-      'Z poslední relace existují neuložené změny. Obnovit automaticky uloženou verzi?',
-    autosaveRestore: 'Obnovit',
-    autosaveDiscard: 'Zahodit',
-    btnDontSave: 'Neukládat',
-    btnCancel: 'Zrušit',
-    extModifiedMsg: 'Soubor byl změněn jiným programem.',
-    extModifiedDetail: 'Přesto uložit a přepsat změny na disku?',
-    btnOverwrite: 'Přepsat',
-    dlgInsertImage: 'Vložit obrázek',
-    filterImages: 'Obrázky',
-    dlgMergeDataSource: 'Vybrat seznam příjemců',
-    filterMergeDataSource: 'Excel nebo CSV',
-    dlgAddAttachment: 'Přidat přílohy',
-    filterSupported: 'Podporované soubory',
-    filterAll: 'Všechny soubory',
-    dlgExportPdf: 'Exportovat jako PDF',
-    dlgExportHtml: 'Exportovat jako HTML',
-    dlgExportMarkdown: 'Exportovat jako Markdown',
-    dlgPickExportDir: 'Zvolte složku pro export',
-    errUnsupportedExt: 'soubory .{ext} nejsou podporovány',
-    errNotFile: 'není soubor',
-    errTooLarge: 'překračuje limit {mb} MB',
-    errImageTooLarge: 'obrázek překračuje limit 5 MB',
-    errUnreadable: 'nelze přečíst',
-    errFileTooLarge: 'Soubor překračuje limit velikosti',
-    errParseFailed: 'Soubor se nepodařilo zpracovat',
-    errImageNoText:
-      'Obrázkové přílohy neobsahují text; obrázek se odesílá spolu se zprávou uživatele',
-    errNotImage: 'nepodporovaný typ obrázku',
-    errGskNotLoggedIn:
-      'Nejste přihlášeni do Genspark: klikněte níže na „Přihlásit se do Genspark“, přihlaste se a zkuste to znovu',
-    errNoApiKey: 'Pro {provider} není nakonfigurován žádný klíč API',
-    errAiRegion:
-      'Poskytovatel tohoto modelu neposkytuje služby ve vaší aktuální oblasti — vyberte jiný model nebo změňte síť',
-    errAiBusy: 'Služba AI je právě zaneprázdněna — zkuste to prosím za chvíli znovu',
-    errNoModel: 'Není nakonfigurován název modelu',
-    menuFile: 'Soubor',
-    menuNewDoc: 'Nový dokument',
-    menuNewWindow: 'Nové okno',
-    menuOpen: 'Otevřít…',
-    menuOpenRecent: 'Otevřít poslední',
-    menuNoRecent: 'Žádné poslední dokumenty',
-    menuClose: 'Zavřít',
-    menuSave: 'Uložit',
-    menuSaveAs: 'Uložit jako…',
-    menuPageSetup: 'Vzhled stránky…',
-    menuExportPdf: 'Exportovat jako PDF…',
-    menuExportHtml: 'Exportovat jako HTML…',
-    menuExportMarkdown: 'Exportovat jako Markdown…',
-    menuExportImages: 'Exportovat jako obrázky…',
-    menuPrint: 'Tisk…',
-    menuEdit: 'Úpravy',
-    menuUndo: 'Zpět',
-    menuRedo: 'Znovu',
-    menuCut: 'Vyjmout',
-    menuCopy: 'Kopírovat',
-    menuPaste: 'Vložit',
-    menuPasteMatch: 'Vložit a přizpůsobit styl',
-    menuFindReplace: 'Najít a nahradit…',
-    menuGoTo: 'Přejít na…',
-    menuSelectAll: 'Vybrat vše',
-    menuView: 'Zobrazení',
-    menuZoom: 'Lupa',
-    menuZoomIn: 'Zvětšit',
-    menuZoomOut: 'Zmenšit',
-    menuZoom100: 'Skutečná velikost (100 %)',
-    menuPageWidth: 'Šířka stránky',
-    menuWholePage: 'Celá stránka',
-    menuMultiPage: 'Více stránek',
-    menuAiSidebar: 'Boční panel AI',
-    menuDarkMode: 'Tmavý režim',
-    menuFullscreen: 'Přejít na celou obrazovku',
-    menuInsert: 'Vložení',
-    menuInsertTable: 'Tabulka…',
-    menuInsertImage: 'Obrázek…',
-    menuInsertPageBreak: 'Konec stránky',
-    menuInsertLink: 'Hypertextový odkaz…',
-    menuInsertEquation: 'Rovnice…',
-    menuComment: 'Komentář',
-    menuFormat: 'Formát',
-    menuBold: 'Tučné',
-    menuItalic: 'Kurzíva',
-    menuUnderline: 'Podtržení',
-    menuAlign: 'Zarovnat',
-    menuAlignLeft: 'Zarovnat vlevo',
-    menuAlignCenter: 'Zarovnat na střed',
-    menuAlignRight: 'Zarovnat vpravo',
-    menuAlignJustify: 'Zarovnat do bloku',
-    menuFont: 'Písmo…',
-    menuParagraph: 'Odstavec…',
-    menuTools: 'Nástroje',
-    menuTable: 'Tabulka',
-    menuTableInsert: 'Vložit',
-    menuTableInsertTable: 'Tabulka…',
-    menuTableColsLeft: 'Sloupce vlevo',
-    menuTableColsRight: 'Sloupce vpravo',
-    menuTableRowsAbove: 'Řádky nad',
-    menuTableRowsBelow: 'Řádky pod',
-    menuTableCells: 'Buňky…',
-    menuTableDelete: 'Odstranit',
-    menuTableDeleteTable: 'Tabulka',
-    menuTableDeleteColumns: 'Sloupce',
-    menuTableDeleteRows: 'Řádky',
-    menuTableSelect: 'Vybrat',
-    menuTableSelectCell: 'Buňka',
-    menuTableSelectColumn: 'Sloupec',
-    menuTableSelectRow: 'Řádek',
-    menuTableSelectTable: 'Tabulka',
-    menuTableMergeCells: 'Sloučit buňky',
-    menuTableSplitCells: 'Rozdělit buňky…',
-    menuTableSplitTable: 'Rozdělit tabulku',
-    menuTableAutoFit: 'Přizpůsobit',
-    menuTableAutoFitContents: 'Přizpůsobit obsahu',
-    menuTableAutoFitWindow: 'Přizpůsobit oknu',
-    menuTableFixedWidth: 'Pevná šířka sloupce',
-    menuTableDistributeRows: 'Rozdělit řádky rovnoměrně',
-    menuTableDistributeColumns: 'Rozdělit sloupce rovnoměrně',
-    menuTableRepeatHeader: 'Opakovat řádky záhlaví',
-    menuTableGridlines: 'Zobrazit mřížku',
-    menuTableProperties: 'Vlastnosti tabulky…',
-    menuWordCount: 'Počet slov…',
-    menuAutoCorrect: 'Možnosti automatických oprav…',
-    menuPreferences: 'Předvolby…',
-    menuAiProofread: 'Korektura AI',
-    menuWindow: 'Okno',
-    menuHelp: 'Nápověda',
-    menuShortcuts: 'Klávesové zkratky',
-  },
-  nl: {
-    dlgOpenDoc: 'Document openen',
-    filterWord: 'Word-documenten',
-    odtImportMsg: 'Dit .{ext}-document converteren?',
-    odtImportDetail:
-      'GenOffice bewerkt .docx, niet ODF. Tekst, koppen, lijsten, tabellen en afbeeldingen worden omgezet; voetnoten, opmerkingen en tekstvakken niet volledig. Het oorspronkelijke bestand wordt nooit gewijzigd; de omgezette .docx is een zelfstandige kopie waarin volgende opslaan-acties terechtkomen.',
-    hwpImportDetail:
-      'GenOffice bewerkt .docx, niet HWP. Tekst, tabellen, afbeeldingen, kop- en voetteksten worden omgezet; vergelijkingen, voetnoten en ingesloten objecten niet, en automatische nummering wordt gewone tekst. Het oorspronkelijke bestand wordt nooit gewijzigd; de omgezette .docx is een zelfstandige kopie waarin volgende opslaan-acties terechtkomen.',
-    odtImportConvertBtn: 'Converteren en openen',
-    importSkipConfirm: 'Volgende keer converteren zonder te vragen',
-    docImportMsg: 'Dit .{ext}-document converteren?',
-    docImportDetail:
-      'GenOffice bewerkt .docx, geen Word 97-2003-documenten (.doc). Tekst, koppen, lijsten, tabellen en afbeeldingen worden omgezet; voetnoten, opmerkingen en tekstvakken niet volledig. Het oorspronkelijke bestand wordt nooit gewijzigd; de omgezette .docx is een zelfstandige kopie waarin volgende opslaan-acties terechtkomen.',
-    docImportConvertBtn: 'Converteren en openen',
-    dlgSaveAs: 'Opslaan als',
-    closeUnsavedMsg: 'Dit document bevat niet-opgeslagen wijzigingen.',
-    closeUnsavedDetail: 'Wilt u ze opslaan voordat u sluit?',
-    closeNoReplyMsg: 'Het document reageert niet en heeft mogelijk niet-opgeslagen wijzigingen.',
-    closeNoReplyDetail: 'Toch sluiten? Niet-opgeslagen wijzigingen gaan verloren.',
-    btnCloseAnyway: 'Toch sluiten',
-    autosaveFoundTitle: 'Herstelde versie gevonden',
-    autosaveDiskNewer:
-      'Let op: het bestand op schijf is gewijzigd nadat deze herstelkopie is opgeslagen. Herstellen vervangt die nieuwere wijzigingen.',
-    autosaveFoundBody:
-      'Er zijn niet-opgeslagen wijzigingen van uw laatste sessie. De automatisch opgeslagen versie herstellen?',
-    autosaveRestore: 'Herstellen',
-    autosaveDiscard: 'Negeren',
-    btnDontSave: 'Niet opslaan',
-    btnCancel: 'Annuleren',
-    extModifiedMsg: 'Het bestand is door een ander programma gewijzigd.',
-    extModifiedDetail: 'Toch opslaan en de wijzigingen op schijf overschrijven?',
-    btnOverwrite: 'Overschrijven',
-    dlgInsertImage: 'Afbeelding invoegen',
-    filterImages: 'Afbeeldingen',
-    dlgMergeDataSource: 'Ontvangerslijst selecteren',
-    filterMergeDataSource: 'Excel of CSV',
-    dlgAddAttachment: 'Bijlagen toevoegen',
-    filterSupported: 'Ondersteunde bestanden',
-    filterAll: 'Alle bestanden',
-    dlgExportPdf: 'Exporteren als PDF',
-    dlgExportHtml: 'Exporteren als HTML',
-    dlgExportMarkdown: 'Exporteren als Markdown',
-    dlgPickExportDir: 'Exportmap kiezen',
-    errUnsupportedExt: '.{ext}-bestanden worden niet ondersteund',
-    errNotFile: 'geen bestand',
-    errTooLarge: 'overschrijdt de limiet van {mb} MB',
-    errImageTooLarge: 'afbeelding overschrijdt de limiet van 5 MB',
-    errUnreadable: 'kan niet worden gelezen',
-    errFileTooLarge: 'Bestand overschrijdt de maximale grootte',
-    errParseFailed: 'Kan bestand niet parseren',
-    errImageNoText:
-      'Afbeeldingsbijlagen bevatten geen tekst; de afbeelding wordt samen met het gebruikersbericht verzonden en kan direct worden bekeken',
-    errNotImage: 'geen ondersteund afbeeldingstype',
-    errGskNotLoggedIn:
-      'Niet aangemeld bij Genspark: klik hieronder op “Aanmelden bij Genspark”, meld u aan en probeer het opnieuw',
-    errNoApiKey: 'Geen API-sleutel geconfigureerd voor {provider}',
-    errAiRegion:
-      'De aanbieder van dit model bedient uw huidige regio niet — kies een ander model of wissel van netwerk',
-    errAiBusy: 'De AI-service is momenteel overbelast — probeer het zo opnieuw',
-    errNoModel: 'Geen modelnaam geconfigureerd',
-    menuFile: 'Bestand',
-    menuNewDoc: 'Nieuw document',
-    menuNewWindow: 'Nieuw venster',
-    menuOpen: 'Openen…',
-    menuOpenRecent: 'Recent geopend',
-    menuNoRecent: 'Geen recente documenten',
-    menuClose: 'Sluiten',
-    menuSave: 'Opslaan',
-    menuSaveAs: 'Opslaan als…',
-    menuPageSetup: 'Pagina-instelling…',
-    menuExportPdf: 'Exporteren als PDF…',
-    menuExportHtml: 'Exporteren als HTML…',
-    menuExportMarkdown: 'Exporteren als Markdown…',
-    menuExportImages: 'Exporteren als afbeeldingen…',
-    menuPrint: 'Afdrukken…',
-    menuEdit: 'Bewerken',
-    menuUndo: 'Ongedaan maken',
-    menuRedo: 'Opnieuw',
-    menuCut: 'Knippen',
-    menuCopy: 'Kopiëren',
-    menuPaste: 'Plakken',
-    menuPasteMatch: 'Plakken met dezelfde stijl',
-    menuFindReplace: 'Zoeken en vervangen…',
-    menuGoTo: 'Ga naar…',
-    menuSelectAll: 'Alles selecteren',
-    menuView: 'Beeld',
-    menuZoom: 'Zoomen',
-    menuZoomIn: 'Inzoomen',
-    menuZoomOut: 'Uitzoomen',
-    menuZoom100: 'Ware grootte (100%)',
-    menuPageWidth: 'Paginabreedte',
-    menuWholePage: 'Hele pagina',
-    menuMultiPage: "Meerdere pagina's",
-    menuAiSidebar: 'AI-zijbalk',
-    menuDarkMode: 'Donkere modus',
-    menuFullscreen: 'Schermvullende weergave',
-    menuInsert: 'Invoegen',
-    menuInsertTable: 'Tabel…',
-    menuInsertImage: 'Afbeelding…',
-    menuInsertPageBreak: 'Pagina-einde',
-    menuInsertLink: 'Hyperlink…',
-    menuInsertEquation: 'Vergelijking…',
-    menuComment: 'Opmerking',
-    menuFormat: 'Opmaak',
-    menuBold: 'Vet',
-    menuItalic: 'Cursief',
-    menuUnderline: 'Onderstrepen',
-    menuAlign: 'Uitlijnen',
-    menuAlignLeft: 'Links uitlijnen',
-    menuAlignCenter: 'Centreren',
-    menuAlignRight: 'Rechts uitlijnen',
-    menuAlignJustify: 'Uitvullen',
-    menuFont: 'Lettertype…',
-    menuParagraph: 'Alinea…',
-    menuTools: 'Extra',
-    menuTable: 'Tabel',
-    menuTableInsert: 'Invoegen',
-    menuTableInsertTable: 'Tabel…',
-    menuTableColsLeft: 'Kolommen links',
-    menuTableColsRight: 'Kolommen rechts',
-    menuTableRowsAbove: 'Rijen boven',
-    menuTableRowsBelow: 'Rijen onder',
-    menuTableCells: 'Cellen…',
-    menuTableDelete: 'Verwijderen',
-    menuTableDeleteTable: 'Tabel',
-    menuTableDeleteColumns: 'Kolommen',
-    menuTableDeleteRows: 'Rijen',
-    menuTableSelect: 'Selecteren',
-    menuTableSelectCell: 'Cel',
-    menuTableSelectColumn: 'Kolom',
-    menuTableSelectRow: 'Rij',
-    menuTableSelectTable: 'Tabel',
-    menuTableMergeCells: 'Cellen samenvoegen',
-    menuTableSplitCells: 'Cellen splitsen…',
-    menuTableSplitTable: 'Tabel splitsen',
-    menuTableAutoFit: 'AutoAanpassen',
-    menuTableAutoFitContents: 'Aanpassen aan inhoud',
-    menuTableAutoFitWindow: 'Aanpassen aan venster',
-    menuTableFixedWidth: 'Vaste kolombreedte',
-    menuTableDistributeRows: 'Rijen gelijkmatig verdelen',
-    menuTableDistributeColumns: 'Kolommen gelijkmatig verdelen',
-    menuTableRepeatHeader: 'Koprijen herhalen',
-    menuTableGridlines: 'Rasterlijnen weergeven',
-    menuTableProperties: 'Tabeleigenschappen…',
-    menuWordCount: 'Woorden tellen…',
-    menuAutoCorrect: 'AutoCorrectie-opties…',
-    menuPreferences: 'Voorkeuren…',
-    menuAiProofread: 'AI-proeflezen',
-    menuWindow: 'Venster',
-    menuHelp: 'Help',
-    menuShortcuts: 'Sneltoetsen',
-  },
-  ms: {
-    dlgOpenDoc: 'Buka Dokumen',
-    filterWord: 'Dokumen Word',
-    odtImportMsg: 'Tukar dokumen .{ext} ini?',
-    odtImportDetail:
-      'GenOffice menyunting .docx, bukan ODF. Teks kandungan, tajuk, senarai, jadual dan imej ditukar; nota kaki, komen dan kotak teks tidak dikekalkan sepenuhnya. Fail asal tidak pernah diubah; salinan .docx yang ditukar ialah salinan berasingan tempat simpanan seterusnya ditulis.',
-    hwpImportDetail:
-      'GenOffice menyunting .docx, bukan HWP. Teks kandungan, jadual, imej, pengepala dan pengaki ditukar; persamaan, nota kaki dan objek terbenam tidak ditukar, dan penomboran automatik menjadi teks biasa. Fail asal tidak pernah diubah; salinan .docx yang ditukar ialah salinan berasingan tempat simpanan seterusnya ditulis.',
-    odtImportConvertBtn: 'Tukar dan buka',
-    importSkipConfirm: 'Lain kali terus tukar tanpa bertanya',
-    docImportMsg: 'Tukar dokumen .{ext} ini?',
-    docImportDetail:
-      'GenOffice menyunting .docx, bukan dokumen Word 97-2003 (.doc). Teks kandungan, tajuk, senarai, jadual dan imej ditukar; nota kaki, komen dan kotak teks tidak dikekalkan sepenuhnya. Fail asal tidak pernah diubah; salinan .docx yang ditukar ialah salinan berasingan tempat simpanan seterusnya ditulis.',
-    docImportConvertBtn: 'Tukar dan buka',
-    dlgSaveAs: 'Simpan Sebagai',
-    closeUnsavedMsg: 'Dokumen ini mempunyai perubahan yang belum disimpan.',
-    closeUnsavedDetail: 'Adakah anda mahu menyimpannya sebelum menutup?',
-    closeNoReplyMsg: 'Dokumen tidak bertindak balas dan mungkin ada perubahan yang belum disimpan.',
-    closeNoReplyDetail: 'Tutup juga? Perubahan yang belum disimpan akan hilang.',
-    btnCloseAnyway: 'Tutup Juga',
-    autosaveFoundTitle: 'Versi pulihan ditemui',
-    autosaveDiskNewer:
-      'Nota: fail pada cakera telah diubah suai selepas salinan pemulihan ini disimpan. Memulihkan akan menggantikan perubahan yang lebih baharu itu.',
-    autosaveFoundBody:
-      'Terdapat perubahan yang belum disimpan daripada sesi terakhir anda. Pulihkan versi yang disimpan secara automatik?',
-    autosaveRestore: 'Pulihkan',
-    autosaveDiscard: 'Buang',
-    btnDontSave: 'Jangan Simpan',
-    btnCancel: 'Batal',
-    extModifiedMsg: 'Fail telah diubah oleh program lain.',
-    extModifiedDetail: 'Simpan juga dan tulis ganti perubahan pada cakera?',
-    btnOverwrite: 'Tulis Ganti',
-    dlgInsertImage: 'Sisipkan Imej',
-    filterImages: 'Imej',
-    dlgMergeDataSource: 'Pilih senarai penerima',
-    filterMergeDataSource: 'Excel atau CSV',
-    dlgAddAttachment: 'Tambah Lampiran',
-    filterSupported: 'Fail yang Disokong',
-    filterAll: 'Semua Fail',
-    dlgExportPdf: 'Eksport sebagai PDF',
-    dlgExportHtml: 'Eksport sebagai HTML',
-    dlgExportMarkdown: 'Eksport sebagai Markdown',
-    dlgPickExportDir: 'Pilih Folder Eksport',
-    errUnsupportedExt: 'fail .{ext} tidak disokong',
-    errNotFile: 'bukan fail',
-    errTooLarge: 'melebihi had {mb}MB',
-    errImageTooLarge: 'imej melebihi had 5MB',
-    errUnreadable: 'tidak dapat dibaca',
-    errFileTooLarge: 'Fail melebihi had saiz',
-    errParseFailed: 'Gagal menghurai fail',
-    errImageNoText:
-      'Lampiran imej tidak menyediakan teks; imej dihantar bersama mesej pengguna dan boleh dilihat terus',
-    errNotImage: 'bukan jenis imej yang disokong',
-    errGskNotLoggedIn:
-      'Belum log masuk ke Genspark: klik “Log masuk ke Genspark” di bawah, kemudian cuba lagi',
-    errNoApiKey: 'Kunci API untuk {provider} belum dikonfigurasikan',
-    errAiRegion:
-      'Penyedia model ini tidak memberi perkhidmatan di rantau semasa anda — pilih model lain atau tukar rangkaian',
-    errAiBusy: 'Perkhidmatan AI sedang sibuk — sila cuba lagi sebentar lagi',
-    errNoModel: 'Nama model belum dikonfigurasikan',
-    menuFile: 'Fail',
-    menuNewDoc: 'Dokumen Baharu',
-    menuNewWindow: 'Tetingkap Baharu',
-    menuOpen: 'Buka…',
-    menuOpenRecent: 'Buka Terkini',
-    menuNoRecent: 'Tiada Dokumen Terkini',
-    menuClose: 'Tutup',
-    menuSave: 'Simpan',
-    menuSaveAs: 'Simpan Sebagai…',
-    menuPageSetup: 'Persediaan Halaman…',
-    menuExportPdf: 'Eksport sebagai PDF…',
-    menuExportHtml: 'Eksport sebagai HTML…',
-    menuExportMarkdown: 'Eksport sebagai Markdown…',
-    menuExportImages: 'Eksport sebagai imej…',
-    menuPrint: 'Cetak…',
-    menuEdit: 'Edit',
-    menuUndo: 'Buat Asal',
-    menuRedo: 'Buat Semula',
-    menuCut: 'Potong',
-    menuCopy: 'Salin',
-    menuPaste: 'Tampal',
-    menuPasteMatch: 'Tampal dan Padankan Gaya',
-    menuFindReplace: 'Cari dan Ganti…',
-    menuGoTo: 'Pergi ke…',
-    menuSelectAll: 'Pilih Semua',
-    menuView: 'Lihat',
-    menuZoom: 'Zum',
-    menuZoomIn: 'Zum Masuk',
-    menuZoomOut: 'Zum Keluar',
-    menuZoom100: 'Saiz Sebenar (100%)',
-    menuPageWidth: 'Lebar Halaman',
-    menuWholePage: 'Seluruh Halaman',
-    menuMultiPage: 'Beberapa halaman',
-    menuAiSidebar: 'Bar Sisi AI',
-    menuDarkMode: 'Mod Gelap',
-    menuFullscreen: 'Masuk Skrin Penuh',
-    menuInsert: 'Sisip',
-    menuInsertTable: 'Jadual…',
-    menuInsertImage: 'Imej…',
-    menuInsertPageBreak: 'Pemisah Halaman',
-    menuInsertLink: 'Hiperpautan…',
-    menuInsertEquation: 'Persamaan…',
-    menuComment: 'Komen',
-    menuFormat: 'Format',
-    menuBold: 'Tebal',
-    menuItalic: 'Condong',
-    menuUnderline: 'Garis Bawah',
-    menuAlign: 'Jajarkan',
-    menuAlignLeft: 'Jajar Kiri',
-    menuAlignCenter: 'Tengah',
-    menuAlignRight: 'Jajar Kanan',
-    menuAlignJustify: 'Justifikasi',
-    menuFont: 'Fon…',
-    menuParagraph: 'Perenggan…',
-    menuTools: 'Alat',
-    menuTable: 'Jadual',
-    menuTableInsert: 'Sisipkan',
-    menuTableInsertTable: 'Jadual…',
-    menuTableColsLeft: 'Lajur di Kiri',
-    menuTableColsRight: 'Lajur di Kanan',
-    menuTableRowsAbove: 'Baris di Atas',
-    menuTableRowsBelow: 'Baris di Bawah',
-    menuTableCells: 'Sel…',
-    menuTableDelete: 'Padam',
-    menuTableDeleteTable: 'Jadual',
-    menuTableDeleteColumns: 'Lajur',
-    menuTableDeleteRows: 'Baris',
-    menuTableSelect: 'Pilih',
-    menuTableSelectCell: 'Sel',
-    menuTableSelectColumn: 'Lajur',
-    menuTableSelectRow: 'Baris',
-    menuTableSelectTable: 'Jadual',
-    menuTableMergeCells: 'Cantum Sel',
-    menuTableSplitCells: 'Pisahkan Sel…',
-    menuTableSplitTable: 'Pisahkan Jadual',
-    menuTableAutoFit: 'Autopadan',
-    menuTableAutoFitContents: 'Padan kepada Kandungan',
-    menuTableAutoFitWindow: 'Padan kepada Tetingkap',
-    menuTableFixedWidth: 'Lebar Lajur Tetap',
-    menuTableDistributeRows: 'Agihkan Baris Sama Rata',
-    menuTableDistributeColumns: 'Agihkan Lajur Sama Rata',
-    menuTableRepeatHeader: 'Ulang Baris Pengepala',
-    menuTableGridlines: 'Lihat Garis Grid',
-    menuTableProperties: 'Sifat Jadual…',
-    menuWordCount: 'Kiraan Perkataan…',
-    menuAutoCorrect: 'Pilihan AutoBetul…',
-    menuPreferences: 'Keutamaan…',
-    menuAiProofread: 'Pembacaan Pruf AI',
-    menuWindow: 'Tetingkap',
-    menuHelp: 'Bantuan',
-    menuShortcuts: 'Pintasan Papan Kekunci',
-  },
-  he: {
-    dlgOpenDoc: 'פתיחת מסמך',
-    filterWord: 'מסמכי Word',
-    odtImportMsg: 'להמיר את מסמך ה‑.{ext} הזה?',
-    odtImportDetail:
-      'GenOffice עורך קבצי ‎.docx ולא ODF. טקסט, כותרות, רשימות, טבלאות ותמונות מומרים; הערות שוליים, תגובות ותיבות טקסט לא נשמרים במלואם. קובץ המקור לעולם אינו משתנה; קובץ ה‑.docx שהומר הוא עותק נפרד שאליו נכתבות השמירות הבאות.',
-    hwpImportDetail:
-      'GenOffice עורך קבצי ‎.docx ולא HWP. טקסט, טבלאות, תמונות, כותרות עליונות ותחתונות מומרים; משוואות, הערות שוליים ואובייקטים מוטמעים אינם מומרים, ומספור אוטומטי הופך לטקסט רגיל. קובץ המקור לעולם אינו משתנה; קובץ ה‑.docx שהומר הוא עותק נפרד שאליו נכתבות השמירות הבאות.',
-    odtImportConvertBtn: 'המר ופתח',
-    importSkipConfirm: 'בפעם הבאה להמיר בלי לשאול',
-    docImportMsg: 'להמיר את מסמך ה‑.{ext} הזה?',
-    docImportDetail:
-      'GenOffice עורך קבצי ‎.docx ולא מסמכי Word 97-2003 (‎.doc). טקסט, כותרות, רשימות, טבלאות ותמונות מומרים; הערות שוליים, תגובות ותיבות טקסט לא נשמרים במלואם. קובץ המקור לעולם אינו משתנה; קובץ ה‑.docx שהומר הוא עותק נפרד שאליו נכתבות השמירות הבאות.',
-    docImportConvertBtn: 'המר ופתח',
-    dlgSaveAs: 'שמירה בשם',
-    closeUnsavedMsg: 'במסמך זה יש שינויים שלא נשמרו.',
-    closeUnsavedDetail: 'האם לשמור אותם לפני הסגירה?',
-    closeNoReplyMsg: 'המסמך אינו מגיב וייתכן שיש בו שינויים שלא נשמרו.',
-    closeNoReplyDetail: 'לסגור בכל זאת? שינויים שלא נשמרו יאבדו.',
-    btnCloseAnyway: 'סגור בכל זאת',
-    autosaveFoundTitle: 'נמצאה גרסה משוחזרת',
-    autosaveDiskNewer:
-      'שים לב: הקובץ בדיסק שונה לאחר שמירת עותק השחזור הזה. שחזור יחליף את השינויים החדשים יותר.',
-    autosaveFoundBody: 'קיימים שינויים שלא נשמרו מהפעלה הקודמת. לשחזר את הגרסה שנשמרה אוטומטית?',
-    autosaveRestore: 'שחזר',
-    autosaveDiscard: 'התעלם',
-    btnDontSave: 'אל תשמור',
-    btnCancel: 'ביטול',
-    extModifiedMsg: 'הקובץ שונה על ידי תוכנית אחרת.',
-    extModifiedDetail: 'לשמור בכל זאת ולדרוס את השינויים בדיסק?',
-    btnOverwrite: 'דרוס',
-    dlgInsertImage: 'הוספת תמונה',
-    filterImages: 'תמונות',
-    dlgMergeDataSource: 'בחירת רשימת נמענים',
-    filterMergeDataSource: 'Excel או CSV',
-    dlgAddAttachment: 'הוספת קבצים מצורפים',
-    filterSupported: 'קבצים נתמכים',
-    filterAll: 'כל הקבצים',
-    dlgExportPdf: 'ייצוא כ-PDF',
-    dlgExportHtml: 'ייצוא כ-HTML',
-    dlgExportMarkdown: 'ייצוא כ-Markdown',
-    dlgPickExportDir: 'בחירת תיקיית ייצוא',
-    errUnsupportedExt: 'קובצי .{ext} אינם נתמכים',
-    errNotFile: 'אינו קובץ',
-    errTooLarge: 'חורג מהמגבלה של {mb}MB',
-    errImageTooLarge: 'התמונה חורגת מהמגבלה של 5MB',
-    errUnreadable: 'לא ניתן לקרוא',
-    errFileTooLarge: 'הקובץ חורג ממגבלת הגודל',
-    errParseFailed: 'ניתוח הקובץ נכשל',
-    errImageNoText:
-      'קבצים מצורפים מסוג תמונה אינם מספקים טקסט; התמונה נשלחת יחד עם הודעת המשתמש וניתן לצפות בה ישירות',
-    errNotImage: 'סוג תמונה שאינו נתמך',
-    errGskNotLoggedIn: 'לא מחובר ל-Genspark: לחץ על "התחבר ל-Genspark" למטה, התחבר ונסה שוב',
-    errNoApiKey: 'לא הוגדר מפתח API עבור {provider}',
-    errAiRegion: 'ספק המודל הזה אינו פועל באזור הנוכחי שלך — בחרו מודל אחר או החליפו רשת',
-    errAiBusy: 'שירות ה-AI עמוס כרגע — נסו שוב בעוד רגע',
-    errNoModel: 'לא הוגדר שם מודל',
-    menuFile: 'קובץ',
-    menuNewDoc: 'מסמך חדש',
-    menuNewWindow: 'חלון חדש',
-    menuOpen: 'פתיחה…',
-    menuOpenRecent: 'פתיחת מסמכים אחרונים',
-    menuNoRecent: 'אין מסמכים אחרונים',
-    menuClose: 'סגירה',
-    menuSave: 'שמירה',
-    menuSaveAs: 'שמירה בשם…',
-    menuPageSetup: 'הגדרת עמוד…',
-    menuExportPdf: 'ייצוא כ-PDF…',
-    menuExportHtml: 'ייצוא כ-HTML…',
-    menuExportMarkdown: 'ייצוא כ-Markdown…',
-    menuExportImages: 'ייצוא כתמונות…',
-    menuPrint: 'הדפסה…',
-    menuEdit: 'עריכה',
-    menuUndo: 'בטל',
-    menuRedo: 'בצע שוב',
-    menuCut: 'גזור',
-    menuCopy: 'העתק',
-    menuPaste: 'הדבק',
-    menuPasteMatch: 'הדבק והתאם סגנון',
-    menuFindReplace: 'חיפוש והחלפה…',
-    menuGoTo: 'עבור אל…',
-    menuSelectAll: 'בחר הכול',
-    menuView: 'תצוגה',
-    menuZoom: 'זום',
-    menuZoomIn: 'התקרבות',
-    menuZoomOut: 'התרחקות',
-    menuZoom100: 'גודל אמיתי (100%)',
-    menuPageWidth: 'רוחב עמוד',
-    menuWholePage: 'עמוד שלם',
-    menuMultiPage: 'עמודים מרובים',
-    menuAiSidebar: 'סרגל צד AI',
-    menuDarkMode: 'מצב כהה',
-    menuFullscreen: 'מעבר למסך מלא',
-    menuInsert: 'הוספה',
-    menuInsertTable: 'טבלה…',
-    menuInsertImage: 'תמונה…',
-    menuInsertPageBreak: 'מעבר עמוד',
-    menuInsertLink: 'היפר-קישור…',
-    menuInsertEquation: 'משוואה…',
-    menuComment: 'הערה',
-    menuFormat: 'עיצוב',
-    menuBold: 'מודגש',
-    menuItalic: 'נטוי',
-    menuUnderline: 'קו תחתון',
-    menuAlign: 'יישור',
-    menuAlignLeft: 'יישור לשמאל',
-    menuAlignCenter: 'מרכוז',
-    menuAlignRight: 'יישור לימין',
-    menuAlignJustify: 'יישור לשני הצדדים',
-    menuFont: 'גופן…',
-    menuParagraph: 'פסקה…',
-    menuTools: 'כלים',
-    menuTable: 'טבלה',
-    menuTableInsert: 'הוסף',
-    menuTableInsertTable: 'טבלה…',
-    menuTableColsLeft: 'עמודות משמאל',
-    menuTableColsRight: 'עמודות מימין',
-    menuTableRowsAbove: 'שורות מעל',
-    menuTableRowsBelow: 'שורות מתחת',
-    menuTableCells: 'תאים…',
-    menuTableDelete: 'מחק',
-    menuTableDeleteTable: 'טבלה',
-    menuTableDeleteColumns: 'עמודות',
-    menuTableDeleteRows: 'שורות',
-    menuTableSelect: 'בחר',
-    menuTableSelectCell: 'תא',
-    menuTableSelectColumn: 'עמודה',
-    menuTableSelectRow: 'שורה',
-    menuTableSelectTable: 'טבלה',
-    menuTableMergeCells: 'מזג תאים',
-    menuTableSplitCells: 'פצל תאים…',
-    menuTableSplitTable: 'פצל טבלה',
-    menuTableAutoFit: 'התאמה אוטומטית',
-    menuTableAutoFitContents: 'התאם לתוכן',
-    menuTableAutoFitWindow: 'התאם לחלון',
-    menuTableFixedWidth: 'רוחב עמודה קבוע',
-    menuTableDistributeRows: 'פזר שורות באופן שווה',
-    menuTableDistributeColumns: 'פזר עמודות באופן שווה',
-    menuTableRepeatHeader: 'חזור על שורות כותרת',
-    menuTableGridlines: 'הצג קווי רשת',
-    menuTableProperties: 'מאפייני טבלה…',
-    menuWordCount: 'ספירת מילים…',
-    menuAutoCorrect: 'אפשרויות תיקון אוטומטי…',
-    menuPreferences: 'העדפות…',
-    menuAiProofread: 'הגהת AI',
-    menuWindow: 'חלון',
-    menuHelp: 'עזרה',
-    menuShortcuts: 'קיצורי מקלדת',
-  },
-  hi: {
-    dlgOpenDoc: 'दस्तावेज़ खोलें',
-    filterWord: 'Word दस्तावेज़',
-    odtImportMsg: 'इस .{ext} दस्तावेज़ को बदलें?',
-    odtImportDetail:
-      'GenOffice .docx संपादित करता है, ODF नहीं। मुख्य पाठ, शीर्षक, सूचियाँ, तालिकाएँ और चित्र बदल दिए जाते हैं; फुटनोट, टिप्पणियाँ और टेक्स्ट बॉक्स पूरी तरह नहीं रखे जाते। मूल फ़ाइल कभी नहीं बदलती; बदली हुई .docx एक स्वतंत्र प्रति है जिसमें आगे के सेव लिखे जाते हैं।',
-    hwpImportDetail:
-      'GenOffice .docx संपादित करता है, HWP नहीं। मुख्य पाठ, तालिकाएँ, चित्र, हेडर और फुटर बदल दिए जाते हैं; समीकरण, फुटनोट और एम्बेड किए गए ऑब्जेक्ट नहीं बदले जाते, और स्वचालित क्रमांकन सामान्य पाठ बन जाता है। मूल फ़ाइल कभी नहीं बदलती; बदली हुई .docx एक स्वतंत्र प्रति है जिसमें आगे के सेव लिखे जाते हैं।',
-    odtImportConvertBtn: 'बदलकर खोलें',
-    importSkipConfirm: 'अगली बार बिना पूछे बदलें',
-    docImportMsg: 'इस .{ext} दस्तावेज़ को बदलें?',
-    docImportDetail:
-      'GenOffice Word 97-2003 (.doc) दस्तावेज़ नहीं, .docx संपादित करता है। मुख्य पाठ, शीर्षक, सूचियाँ, तालिकाएँ और चित्र बदल दिए जाते हैं; फुटनोट, टिप्पणियाँ और टेक्स्ट बॉक्स पूरी तरह नहीं रखे जाते। मूल फ़ाइल कभी नहीं बदलती; बदली हुई .docx एक स्वतंत्र प्रति है जिसमें आगे के सेव लिखे जाते हैं।',
-    docImportConvertBtn: 'बदलकर खोलें',
-    dlgSaveAs: 'इस रूप में सहेजें',
-    closeUnsavedMsg: 'इस दस्तावेज़ में सहेजे नहीं गए परिवर्तन हैं।',
-    closeUnsavedDetail: 'क्या आप बंद करने से पहले उन्हें सहेजना चाहते हैं?',
-    closeNoReplyMsg: 'दस्तावेज़ प्रतिक्रिया नहीं दे रहा है और उसमें सहेजे न गए बदलाव हो सकते हैं।',
-    closeNoReplyDetail: 'फिर भी बंद करें? सहेजे न गए बदलाव खो जाएँगे।',
-    btnCloseAnyway: 'फिर भी बंद करें',
-    autosaveFoundTitle: 'पुनर्प्राप्त संस्करण मिला',
-    autosaveDiskNewer:
-      'ध्यान दें: यह पुनर्प्राप्ति प्रति सहेजे जाने के बाद डिस्क पर फ़ाइल में बदलाव किया गया है। पुनर्स्थापित करने पर वे नए बदलाव बदल दिए जाएँगे।',
-    autosaveFoundBody:
-      'आपके पिछले सत्र से सहेजे नहीं गए परिवर्तन हैं। स्वतः सहेजा गया संस्करण पुनर्स्थापित करें?',
-    autosaveRestore: 'पुनर्स्थापित करें',
-    autosaveDiscard: 'छोड़ें',
-    btnDontSave: 'न सहेजें',
-    btnCancel: 'रद्द करें',
-    extModifiedMsg: 'फ़ाइल को किसी अन्य प्रोग्राम ने बदल दिया है।',
-    extModifiedDetail: 'फिर भी सहेजें और डिस्क पर मौजूद बदलावों को अधिलेखित करें?',
-    btnOverwrite: 'अधिलेखित करें',
-    dlgInsertImage: 'छवि सम्मिलित करें',
-    filterImages: 'छवियाँ',
-    dlgMergeDataSource: 'प्राप्तकर्ता सूची चुनें',
-    filterMergeDataSource: 'Excel या CSV',
-    dlgAddAttachment: 'अनुलग्नक जोड़ें',
-    filterSupported: 'समर्थित फ़ाइलें',
-    filterAll: 'सभी फ़ाइलें',
-    dlgExportPdf: 'PDF के रूप में निर्यात करें',
-    dlgExportHtml: 'HTML के रूप में निर्यात करें',
-    dlgExportMarkdown: 'Markdown के रूप में निर्यात करें',
-    dlgPickExportDir: 'निर्यात फ़ोल्डर चुनें',
-    errUnsupportedExt: '.{ext} फ़ाइलें समर्थित नहीं हैं',
-    errNotFile: 'फ़ाइल नहीं है',
-    errTooLarge: '{mb}MB की सीमा से अधिक है',
-    errImageTooLarge: 'छवि 5MB की सीमा से अधिक है',
-    errUnreadable: 'पढ़ा नहीं जा सकता',
-    errFileTooLarge: 'फ़ाइल आकार सीमा से अधिक है',
-    errParseFailed: 'फ़ाइल पार्स करने में विफल',
-    errImageNoText:
-      'छवि अनुलग्नक टेक्स्ट प्रदान नहीं करते; छवि उपयोगकर्ता संदेश के साथ भेजी जाती है, उसे सीधे देखें',
-    errNotImage: 'समर्थित छवि प्रकार नहीं है',
-    errGskNotLoggedIn:
-      'Genspark में साइन इन नहीं है: नीचे “Genspark में साइन इन करें” पर क्लिक करें, साइन इन करें और फिर से कोशिश करें',
-    errNoApiKey: '{provider} के लिए कोई API कुंजी कॉन्फ़िगर नहीं है',
-    errAiRegion:
-      'इस मॉडल का प्रदाता आपके वर्तमान क्षेत्र में सेवा नहीं देता — कोई दूसरा मॉडल चुनें या नेटवर्क बदलें',
-    errAiBusy: 'AI सेवा अभी व्यस्त है — कृपया थोड़ी देर बाद फिर से प्रयास करें',
-    errNoModel: 'कोई मॉडल नाम कॉन्फ़िगर नहीं है',
-    menuFile: 'फ़ाइल',
-    menuNewDoc: 'नया दस्तावेज़',
-    menuNewWindow: 'नई विंडो',
-    menuOpen: 'खोलें…',
-    menuOpenRecent: 'हाल के दस्तावेज़ खोलें',
-    menuNoRecent: 'कोई हालिया दस्तावेज़ नहीं',
-    menuClose: 'बंद करें',
-    menuSave: 'सहेजें',
-    menuSaveAs: 'इस रूप में सहेजें…',
-    menuPageSetup: 'पृष्ठ सेटअप…',
-    menuExportPdf: 'PDF के रूप में निर्यात करें…',
-    menuExportHtml: 'HTML के रूप में निर्यात करें…',
-    menuExportMarkdown: 'Markdown के रूप में निर्यात करें…',
-    menuExportImages: 'छवियों के रूप में निर्यात…',
-    menuPrint: 'प्रिंट करें…',
-    menuEdit: 'संपादन',
-    menuUndo: 'पूर्ववत करें',
-    menuRedo: 'फिर से करें',
-    menuCut: 'काटें',
-    menuCopy: 'कॉपी करें',
-    menuPaste: 'चिपकाएँ',
-    menuPasteMatch: 'चिपकाएँ और शैली मिलाएँ',
-    menuFindReplace: 'ढूँढें और बदलें…',
-    menuGoTo: 'यहाँ जाएँ…',
-    menuSelectAll: 'सभी चुनें',
-    menuView: 'दृश्य',
-    menuZoom: 'ज़ूम',
-    menuZoomIn: 'ज़ूम इन',
-    menuZoomOut: 'ज़ूम आउट',
-    menuZoom100: 'वास्तविक आकार (100%)',
-    menuPageWidth: 'पृष्ठ चौड़ाई',
-    menuWholePage: 'पूरा पृष्ठ',
-    menuMultiPage: 'एकाधिक पृष्ठ',
-    menuAiSidebar: 'AI साइडबार',
-    menuDarkMode: 'डार्क मोड',
-    menuFullscreen: 'पूर्ण स्क्रीन में जाएँ',
-    menuInsert: 'सम्मिलित करें',
-    menuInsertTable: 'तालिका…',
-    menuInsertImage: 'छवि…',
-    menuInsertPageBreak: 'पृष्ठ विराम',
-    menuInsertLink: 'हाइपरलिंक…',
-    menuInsertEquation: 'समीकरण…',
-    menuComment: 'टिप्पणी',
-    menuFormat: 'स्वरूप',
-    menuBold: 'बोल्ड',
-    menuItalic: 'इटैलिक',
-    menuUnderline: 'रेखांकित',
-    menuAlign: 'संरेखित करें',
-    menuAlignLeft: 'बाएँ संरेखित करें',
-    menuAlignCenter: 'केंद्र में रखें',
-    menuAlignRight: 'दाएँ संरेखित करें',
-    menuAlignJustify: 'जस्टिफ़ाई करें',
-    menuFont: 'फ़ॉन्ट…',
-    menuParagraph: 'अनुच्छेद…',
-    menuTools: 'उपकरण',
-    menuTable: 'तालिका',
-    menuTableInsert: 'सम्मिलित करें',
-    menuTableInsertTable: 'तालिका…',
-    menuTableColsLeft: 'बाईं ओर स्तंभ',
-    menuTableColsRight: 'दाईं ओर स्तंभ',
-    menuTableRowsAbove: 'ऊपर पंक्तियाँ',
-    menuTableRowsBelow: 'नीचे पंक्तियाँ',
-    menuTableCells: 'कक्ष…',
-    menuTableDelete: 'हटाएँ',
-    menuTableDeleteTable: 'तालिका',
-    menuTableDeleteColumns: 'स्तंभ',
-    menuTableDeleteRows: 'पंक्तियाँ',
-    menuTableSelect: 'चुनें',
-    menuTableSelectCell: 'कक्ष',
-    menuTableSelectColumn: 'स्तंभ',
-    menuTableSelectRow: 'पंक्ति',
-    menuTableSelectTable: 'तालिका',
-    menuTableMergeCells: 'कक्ष मर्ज करें',
-    menuTableSplitCells: 'कक्ष विभाजित करें…',
-    menuTableSplitTable: 'तालिका विभाजित करें',
-    menuTableAutoFit: 'स्वतः फ़िट',
-    menuTableAutoFitContents: 'सामग्री के अनुसार फ़िट',
-    menuTableAutoFitWindow: 'विंडो के अनुसार फ़िट',
-    menuTableFixedWidth: 'निश्चित स्तंभ चौड़ाई',
-    menuTableDistributeRows: 'पंक्तियाँ समान रूप से बाँटें',
-    menuTableDistributeColumns: 'स्तंभ समान रूप से बाँटें',
-    menuTableRepeatHeader: 'शीर्ष पंक्तियाँ दोहराएँ',
-    menuTableGridlines: 'ग्रिडलाइन देखें',
-    menuTableProperties: 'तालिका गुण…',
-    menuWordCount: 'शब्द गणना…',
-    menuAutoCorrect: 'स्वतः सुधार विकल्प…',
-    menuPreferences: 'प्राथमिकताएँ…',
-    menuAiProofread: 'AI प्रूफ़रीडिंग',
-    menuWindow: 'विंडो',
-    menuHelp: 'सहायता',
-    menuShortcuts: 'कीबोर्ड शॉर्टकट',
-  },
-  'zh-TW': {
-    dlgOpenDoc: '開啟文件',
-    filterWord: 'Word 文件',
-    odtImportMsg: '轉換這個 .{ext} 文件？',
-    odtImportDetail:
-      'GenOffice 只編輯 .docx，不編輯 ODF。內文、標題、清單、表格與圖片會轉換過來；註腳、註解與文字方塊不會完整保留。原始檔案不會被修改，轉換後的 .docx 是獨立副本，之後的儲存都寫入它。', // public-hygiene: allow
-    hwpImportDetail:
-      'GenOffice 只編輯 .docx，不編輯 HWP。內文、表格、圖片、頁首與頁尾會轉換過來；方程式、註腳與內嵌物件不會轉換，自動編號會變成一般文字。原始檔案不會被修改，轉換後的 .docx 是獨立副本，之後的儲存都寫入它。', // public-hygiene: allow
-    odtImportConvertBtn: '轉換並開啟',
-    importSkipConfirm: '下次直接轉換，不再提示',
-    docImportMsg: '轉換這個 .{ext} 文件？',
-    docImportDetail:
-      'GenOffice 只編輯 .docx，不編輯 Word 97-2003 舊版 .doc。內文、標題、清單、表格與圖片會轉換過來；註腳、註解與文字方塊不會完整保留。原始檔案不會被修改，轉換後的 .docx 是獨立副本，之後的儲存都寫入它。', // public-hygiene: allow
-    docImportConvertBtn: '轉換並開啟',
-    dlgSaveAs: '另存新檔',
-    closeUnsavedMsg: '此文件有未儲存的變更。',
-    closeUnsavedDetail: '關閉前是否要儲存？',
-    closeNoReplyMsg: '文件沒有回應,可能有未儲存的變更。',
-    closeNoReplyDetail: '仍要關閉嗎?未儲存的變更將遺失。',
-    btnCloseAnyway: '仍要關閉',
-    autosaveFoundTitle: '發現自動復原版本',
-    autosaveDiskNewer: '注意：此復原副本儲存後，磁碟上的檔案又被修改過。復原將取代這些較新的變更。',
-    autosaveFoundBody: '上次工作階段有未儲存的變更。要復原自動儲存的版本嗎?',
-    autosaveRestore: '復原',
-    autosaveDiscard: '放棄',
-    btnDontSave: '不儲存',
-    btnCancel: '取消',
-    extModifiedMsg: '檔案已被其他程式修改。',
-    extModifiedDetail: '仍要儲存並覆寫磁碟上的變更嗎?',
-    btnOverwrite: '覆寫',
-    dlgInsertImage: '插入圖片',
-    filterImages: '圖片',
-    dlgMergeDataSource: '選擇收件人清單',
-    filterMergeDataSource: 'Excel 或 CSV',
-    dlgAddAttachment: '新增附件',
-    filterSupported: '支援的檔案',
-    filterAll: '所有檔案',
-    dlgExportPdf: '匯出為 PDF',
-    dlgExportHtml: '匯出為 HTML',
-    dlgExportMarkdown: '匯出為 Markdown',
-    dlgPickExportDir: '選擇匯出目錄',
-    errUnsupportedExt: '暫不支援 .{ext} 類型',
-    errNotFile: '不是檔案',
-    errTooLarge: '超過 {mb}MB 上限',
-    errImageTooLarge: '圖片超過 5MB 上限',
-    errUnreadable: '無法讀取',
-    errFileTooLarge: '檔案超過大小上限',
-    errParseFailed: '檔案解析失敗',
-    errImageNoText: '圖片附件不提供文字,已作為影像隨使用者訊息傳送,直接看圖即可',
-    errNotImage: '不是支援的圖片類型',
-    errGskNotLoggedIn: '未登入 Genspark:請點擊下方「登入 Genspark」完成登入後重試',
-    errNoApiKey: '未設定 {provider} 的 API Key',
-    errAiRegion: '該模型的廠商不向目前地區提供服務，請換一個模型或切換網路',
-    errAiBusy: 'AI 服務目前繁忙，請稍後重試',
-    errNoModel: '未設定模型名稱',
-    menuFile: '檔案',
-    menuNewDoc: '新增文件',
-    menuNewWindow: '新增視窗',
-    menuOpen: '開啟…',
-    menuOpenRecent: '開啟最近的文件',
-    menuNoRecent: '沒有最近的文件',
-    menuClose: '關閉',
-    menuSave: '儲存',
-    menuSaveAs: '另存新檔…',
-    menuPageSetup: '版面設定…',
-    menuExportPdf: '匯出為 PDF…',
-    menuExportHtml: '匯出為 HTML…',
-    menuExportMarkdown: '匯出為 Markdown…',
-    menuExportImages: '匯出為圖片…',
-    menuPrint: '列印…',
-    menuEdit: '編輯',
-    menuUndo: '復原',
-    menuRedo: '重做',
-    menuCut: '剪下',
-    menuCopy: '複製',
-    menuPaste: '貼上',
-    menuPasteMatch: '貼上並符合格式',
-    menuFindReplace: '尋找與取代…',
-    menuGoTo: '定位…',
-    menuSelectAll: '全選',
-    menuView: '檢視',
-    menuZoom: '縮放',
-    menuZoomIn: '放大',
-    menuZoomOut: '縮小',
-    menuZoom100: '實際大小 (100%)',
-    menuPageWidth: '頁面寬度',
-    menuWholePage: '整頁',
-    menuMultiPage: '多頁',
-    menuAiSidebar: 'AI 側邊欄',
-    menuDarkMode: '深色模式',
-    menuFullscreen: '進入全螢幕',
-    menuInsert: '插入',
-    menuInsertTable: '表格…',
-    menuInsertImage: '圖片…',
-    menuInsertPageBreak: '分頁符號',
-    menuInsertLink: '超連結…',
-    menuInsertEquation: '方程式…',
-    menuComment: '註解',
-    menuFormat: '格式',
-    menuBold: '粗體',
-    menuItalic: '斜體',
-    menuUnderline: '底線',
-    menuAlign: '對齊',
-    menuAlignLeft: '靠左對齊',
-    menuAlignCenter: '置中',
-    menuAlignRight: '靠右對齊',
-    menuAlignJustify: '左右對齊',
-    menuFont: '字型…',
-    menuParagraph: '段落…',
-    menuTools: '工具',
-    menuTable: '表格',
-    menuTableInsert: '插入',
-    menuTableInsertTable: '表格…',
-    menuTableColsLeft: '在左側插入欄',
-    menuTableColsRight: '在右側插入欄',
-    menuTableRowsAbove: '在上方插入列',
-    menuTableRowsBelow: '在下方插入列',
-    menuTableCells: '儲存格…',
-    menuTableDelete: '刪除',
-    menuTableDeleteTable: '表格',
-    menuTableDeleteColumns: '欄',
-    menuTableDeleteRows: '列',
-    menuTableSelect: '選取',
-    menuTableSelectCell: '儲存格',
-    menuTableSelectColumn: '欄',
-    menuTableSelectRow: '列',
-    menuTableSelectTable: '表格',
-    menuTableMergeCells: '合併儲存格',
-    menuTableSplitCells: '分割儲存格…',
-    menuTableSplitTable: '拆分表格',
-    menuTableAutoFit: '自動調整',
-    menuTableAutoFitContents: '根據內容自動調整',
-    menuTableAutoFitWindow: '根據視窗自動調整',
-    menuTableFixedWidth: '固定欄寬',
-    menuTableDistributeRows: '平均分佈各列',
-    menuTableDistributeColumns: '平均分佈各欄',
-    menuTableRepeatHeader: '重複標題列',
-    menuTableGridlines: '檢視格線',
-    menuTableProperties: '表格屬性…',
-    menuWordCount: '字數統計…',
-    menuAutoCorrect: '自動校正選項…',
-    menuPreferences: '偏好設定…',
-    menuAiProofread: 'AI 校對',
-    menuWindow: '視窗',
-    menuHelp: '說明',
-    menuShortcuts: '鍵盤快速鍵',
-  },
-})
 const tm = (key: Parameters<typeof tMain>[1], params?: Parameters<typeof tMain>[2]) =>
   tMain(getUiLang(), key, params)
 
@@ -3598,10 +268,34 @@ export function markDocsNewBlank(wcId: number): void {
 
 /** AI-authored content waiting for its create_document tab, keyed by webContents id */
 const pendingAiDocContents = new Map<number, AiDocContent>()
+const pendingCreatedWords = new Map<
+  string,
+  {
+    path: string
+    owner?: number
+    started: boolean
+    timer: ReturnType<typeof setTimeout>
+    finish(outcome: DocsSaveOutcome): void
+  }
+>()
 
 /** queue AI content for a fresh blank docs tab (called by the shell right after creating the view) */
 export function queueDocsAiContent(wcId: number, content: AiDocContent): void {
   pendingAiDocContents.set(wcId, content)
+  const job = content.creationId ? pendingCreatedWords.get(content.creationId) : undefined
+  if (job) {
+    job.owner = wcId
+    authorizeMcpDocWrite(wcId, job.path)
+    webContents.fromId(wcId)?.once('destroyed', () =>
+      job.finish({
+        ok: false,
+        committed: job.started ? null : false,
+        pending: true,
+        error: 'The created Word view closed before acknowledging its save',
+        errorCode: 'canceled',
+      }),
+    )
+  }
 }
 
 /** the single real BrowserWindow hosting the tab strip, used as dialog parent in tab mode */
@@ -3853,48 +547,7 @@ export function readStarredGroupMap(): Map<string, string> {
 // ---- original archive (pass-through base: original file archived by content hash) ----
 
 async function archiveOriginal(filePath: string, hash: string, size: number): Promise<void> {
-  // a copy larger than the whole cap would only evict every other original
-  if (size > ORIGINALS_MAX_BYTES) return
-  const dir = userDataPath('originals')
-  await mkdir(dir, { recursive: true })
-  const target = join(dir, `${hash}.docx`)
-  if (!existsSync(target)) await copyFile(filePath, target)
-  void pruneOriginals(dir)
-}
-
-const ORIGINALS_MAX_BYTES = 500 * 1024 * 1024
-let originalsPruneRunning = false
-
-/** cap the archive's total size; oldest by mtime go first (never blocks the open path) */
-async function pruneOriginals(dir: string): Promise<void> {
-  if (originalsPruneRunning) return
-  originalsPruneRunning = true
-  try {
-    const files: Array<{ path: string; size: number; mtimeMs: number }> = []
-    for (const name of await readdir(dir)) {
-      try {
-        const s = await stat(join(dir, name))
-        if (s.isFile()) files.push({ path: join(dir, name), size: s.size, mtimeMs: s.mtimeMs })
-      } catch {
-        /* removed concurrently */
-      }
-    }
-    let total = files.reduce((sum, f) => sum + f.size, 0)
-    files.sort((a, b) => a.mtimeMs - b.mtimeMs)
-    for (const f of files) {
-      if (total <= ORIGINALS_MAX_BYTES) break
-      try {
-        await unlink(f.path)
-        total -= f.size
-      } catch {
-        /* already gone */
-      }
-    }
-  } catch {
-    /* directory unreadable: retry on the next archive */
-  } finally {
-    originalsPruneRunning = false
-  }
+  await archiveDocxOriginal(userDataPath(), filePath, hash, size)
 }
 
 /** per-renderer paths writable via docs:save — populated by open/save-as flows */
@@ -3927,6 +580,18 @@ export function authorizeMcpDocWrite(wcId: number, filePath: string): void {
 
 function canDocWrite(wcId: number, filePath: string): boolean {
   return docWritablePaths.get(wcId)?.has(filePath) === true
+}
+
+function closedDocSave(path: string, committed: boolean) {
+  return {
+    ok: false,
+    path,
+    committed,
+    errorCode: 'stale_target' as const,
+    error: committed
+      ? 'The file snapshot was written, but its document closed before saving completed.'
+      : 'The document closed before the file was written.',
+  }
 }
 
 function allowPdfWrite(wcId: number, filePath: string): void {
@@ -4047,20 +712,15 @@ export function teardownDocsRenderer(contents: WebContents): void {
 
 // ── Crash recovery: dirty renderers push a copy every 30s
 // (docs:write-recovery); a normal save cleans it up; open offers Restore/Discard ──
-const recoveryDir = () => userDataPath('docs-autosave')
-const recoveryPathFor = (filePath: string) =>
-  join(recoveryDir(), `${createHash('sha1').update(filePath).digest('hex').slice(0, 16)}.docx`)
-
-/** Bumped by every clear: an in-flight docs:write-recovery that started before
- * the bump must not recreate the file it is about to land (stale-recovery race). */
-const recoveryClearEpochs = new Map<string, number>()
-
+let recoveryCopies: RecoveryCopies | undefined
+const getRecoveryCopies = () =>
+  (recoveryCopies ??= new RecoveryCopies(userDataPath('docs-autosave')))
+const recoveryPathFor = (filePath: string) => getRecoveryCopies().pathFor(filePath)
 function clearRecoveryCopy(filePath: string): void {
-  recoveryClearEpochs.set(filePath, (recoveryClearEpochs.get(filePath) ?? 0) + 1)
   try {
-    unlinkSync(recoveryPathFor(filePath))
+    getRecoveryCopies().clear(filePath)
   } catch {
-    /* nothing to clean */
+    /* best-effort recovery cleanup */
   }
 }
 
@@ -4109,9 +769,6 @@ async function maybeRecoverDocBytes(
   clearRecoveryCopy(filePath)
   return { bytes: original, recovered: false }
 }
-
-// Word's own .docx ceiling
-const MAX_OPEN_BYTES = 512 * 1024 * 1024
 
 async function showOpenError(wcId: number, detail: string): Promise<void> {
   const parent = hostWindowFor(webContents.fromId(wcId)) ?? mainWindow
@@ -4205,30 +862,17 @@ async function loadDocx(
 ): Promise<OpenDocxResult> {
   if (typeof filePath !== 'string' || !/\.docx$/i.test(filePath)) return null
   if (!existsSync(filePath)) return null
-  const size = (await stat(filePath)).size
-  const lazy = await openLazyDocx(filePath, wcId)
-  if ((lazy?.bytes.length ?? size) > MAX_OPEN_BYTES) {
-    const mb = MAX_OPEN_BYTES / 1024 / 1024
+  let opened: Awaited<ReturnType<typeof readDocxForOpen>>
+  try {
+    opened = await readDocxForOpen(filePath, wcId, password)
+  } catch (error) {
+    if (!(error instanceof DocxOpenTooLargeError)) throw error
+    const mb = MAX_DOCX_OPEN_BYTES / 1024 / 1024
     await showOpenError(wcId, `${basename(filePath)}: ${tm('errTooLarge', { mb })}`)
     return null
   }
-  const original = lazy?.bytes ?? (await readFile(filePath))
-  // Password-protected docx (ECMA-376 CFB container): without a password, hand
-  // back a marker — the renderer prompts and retries via docs:open-decrypt.
-  // No side effects (recents/write grant) until the password checks out.
-  let plainBytes: Buffer = original
-  const encrypted = isEncryptedDocx(original)
-  if (encrypted) {
-    const pwd = password ?? docPasswordFor(wcId, filePath)
-    if (!pwd) return { needsPassword: true, path: filePath, name: basename(filePath) }
-    plainBytes = await decryptDocx(original, pwd) // throws DocxDecryptError
-    rememberDocPassword(wcId, filePath, pwd)
-  } else {
-    rememberDocPassword(wcId, filePath, null)
-  }
-  // the archive keeps the on-disk original as-is (encrypted ones included: they
-  // reopen with the user's password), so a bad save never loses the source file
-  const hash = lazy?.hash ?? sha256Hex(original)
+  if ('needsPassword' in opened) return opened
+  const { bytes: plainBytes, hash, size, encrypted } = opened
   await archiveOriginal(filePath, hash, size)
   const recovery = await maybeRecoverDocBytes(filePath, plainBytes)
   let bytes = recovery.bytes
@@ -4262,13 +906,6 @@ async function loadDocx(
 }
 
 // ---- IPC ----
-
-const IMAGE_MIME: Record<string, 'image/png' | 'image/jpeg' | 'image/gif'> = {
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  gif: 'image/gif',
-}
 
 // ---- chat attachments: local files parsed for the agent ----
 
@@ -5013,7 +1650,7 @@ export function registerDocsIpc(): void {
   void app.whenReady().then(registerLazyMediaProtocol)
   // Node fetch (undici) direct connections get reset under VPN/tun setups; retry over Chromium's stack
   setRescueFetch((url, init) => net.fetch(url, init))
-  setAiUserAgent(`GenOffice/${app.getVersion()}`)
+  setAiUserAgent(`ForaOffice/${app.getVersion()}`)
 
   // shared with the other editor modules — last (identical) registration wins
   ipcMain.removeHandler('app:get-language')
@@ -5181,7 +1818,35 @@ export function registerDocsIpc(): void {
   ipcMain.handle('docs:consume-ai-doc-content', (event): AiDocContent | null => {
     const content = pendingAiDocContents.get(event.sender.id) ?? null
     pendingAiDocContents.delete(event.sender.id)
+    const job = content?.creationId ? pendingCreatedWords.get(content.creationId) : undefined
+    if (job?.owner === event.sender.id) job.started = true
     return content
+  })
+  ipcMain.on('docs:created-document', (event, result: unknown) => {
+    if (
+      !result ||
+      typeof result !== 'object' ||
+      !('creationId' in result) ||
+      typeof result.creationId !== 'string'
+    )
+      return
+    const job = pendingCreatedWords.get(result.creationId)
+    if (!job || job.owner !== event.sender.id) return
+    if (
+      !('outcome' in result) ||
+      !isDocsSaveOutcome(result.outcome) ||
+      (result.outcome.ok && result.outcome.path !== job.path)
+    ) {
+      job.finish({
+        ok: false,
+        committed: null,
+        pending: true,
+        error: 'Invalid first-save acknowledgement',
+        errorCode: 'host_failure',
+      })
+      return
+    }
+    job.finish(result.outcome)
   })
 
   // ---- headless export mode (--headless-export) ----
@@ -5240,17 +1905,21 @@ export function registerDocsIpc(): void {
         // Snapshot desired state: the disk password remains unchanged until the
         // atomic write succeeds, and a newer ribbon intent survives this save.
         const passwordState = snapshotDocPassword(event.sender.id, filePath)
-        const { bytes: plain, hashes } = await materializeLazyDocx(Buffer.from(data))
+        const { bytes: plain, hashes } = await materializeLazyDocx(
+          Buffer.from(data),
+          event.sender.id,
+        )
         const bytes = passwordState.password ? encryptDocx(plain, passwordState.password) : plain
+        if (tornDownWcIds.has(event.sender.id)) return closedDocSave(filePath, false)
         await atomicWriteFile(filePath, bytes)
         // Teardown may have cleared all in-memory secrets while the atomic
         // write was pending. Never resurrect state for an orphaned renderer.
         if (tornDownWcIds.has(event.sender.id)) {
-          return { ok: false, error: 'save target is not an opened document' }
+          return closedDocSave(filePath, true)
         }
         await rememberDiskState(event.sender.id, filePath, sha256Hex(bytes))
         if (tornDownWcIds.has(event.sender.id)) {
-          return { ok: false, error: 'save target is not an opened document' }
+          return closedDocSave(filePath, true)
         }
         pointLazyMediaAt(
           hashes,
@@ -5284,29 +1953,12 @@ export function registerDocsIpc(): void {
       if (tornDownWcIds.has(event.sender.id)) return { ok: false }
       if (typeof filePath !== 'string' || !canDocWrite(event.sender.id, filePath))
         return { ok: false }
-      // snapshot before any await: a save or discard that clears the recovery
-      // copy while this write is in flight bumps the epoch and invalidates it
-      const epoch = recoveryClearEpochs.get(filePath) ?? 0
-      await mkdir(recoveryDir(), { recursive: true })
-      // Recovery follows the current disk state, never the desired next-save
-      // password. Missing state for an encrypted disk file skips the tick so
-      // plaintext can never be written as its recovery copy.
-      const bytes = prepareRecoveryDocx(event.sender.id, filePath, Buffer.from(data))
-      if (!bytes) return { ok: false }
-      await atomicWriteFile(recoveryPathFor(filePath), bytes)
-      // The tab may have been closed ("Don't Save" clears the copy, teardown
-      // revokes access) or the document saved (docs:save clears the copy) while
-      // the write was in flight. A write that lost either race would offer
-      // discarded or already-saved content as recovery on the next open — undo it.
-      if (
-        tornDownWcIds.has(event.sender.id) ||
-        !canDocWrite(event.sender.id, filePath) ||
-        (recoveryClearEpochs.get(filePath) ?? 0) !== epoch
-      ) {
-        clearRecoveryCopy(filePath)
-        return { ok: false }
-      }
-      return { ok: true }
+      const ok = await getRecoveryCopies().write(
+        filePath,
+        () => prepareRecoveryDocx(event.sender.id, filePath, Buffer.from(data)),
+        () => !tornDownWcIds.has(event.sender.id) && canDocWrite(event.sender.id, filePath),
+      )
+      return { ok }
     } catch {
       return { ok: false }
     }
@@ -5454,10 +2106,14 @@ export function registerDocsIpc(): void {
           event.sender.id,
           typeof sourcePath === 'string' && sourcePath ? sourcePath : null,
         )
-        const { bytes: plain, hashes } = await materializeLazyDocx(Buffer.from(data))
+        const { bytes: plain, hashes } = await materializeLazyDocx(
+          Buffer.from(data),
+          event.sender.id,
+        )
         const bytes = passwordState.password ? encryptDocx(plain, passwordState.password) : plain
+        if (tornDownWcIds.has(event.sender.id)) return closedDocSave(result.filePath, false)
         await atomicWriteFile(result.filePath, bytes)
-        if (tornDownWcIds.has(event.sender.id)) return { ok: false }
+        if (tornDownWcIds.has(event.sender.id)) return closedDocSave(result.filePath, true)
         allowDocWrite(event.sender.id, result.filePath)
         rememberOpenDoc(event.sender.id, result.filePath)
         await rememberDiskState(event.sender.id, result.filePath, sha256Hex(bytes))
@@ -5467,7 +2123,7 @@ export function registerDocsIpc(): void {
           event.sender.id,
           passwordState.password ? plain : undefined,
         )
-        if (tornDownWcIds.has(event.sender.id)) return { ok: false }
+        if (tornDownWcIds.has(event.sender.id)) return closedDocSave(result.filePath, true)
         const passwordIntentPending = commitDocPasswordSave(
           event.sender.id,
           passwordState,
@@ -5496,15 +2152,12 @@ export function registerDocsIpc(): void {
       if (tornDownWcIds.has(event.sender.id)) return { ok: false }
       const filePath = uniquePathIn(defaultSaveDir(), defaultName)
       const passwordState = snapshotDocPassword(event.sender.id, null)
-      const { bytes: plain, hashes } = await materializeLazyDocx(Buffer.from(data))
+      const { bytes: plain, hashes } = await materializeLazyDocx(Buffer.from(data), event.sender.id)
       const bytes = passwordState.password ? encryptDocx(plain, passwordState.password) : plain
-      await atomicWriteFile(filePath, bytes)
-      // teardown may have happened while the write was in flight — the path is
-      // freshly created, so rolling it back is safe (mirrors docs:write-recovery)
-      if (tornDownWcIds.has(event.sender.id)) {
-        await unlink(filePath).catch(() => {})
-        return { ok: false }
-      }
+      if (tornDownWcIds.has(event.sender.id)) return closedDocSave(filePath, false)
+      await atomicWriteFile(filePath, bytes, { overwrite: false })
+      // Another application may already have changed this path after the atomic write.
+      if (tornDownWcIds.has(event.sender.id)) return closedDocSave(filePath, true)
       allowDocWrite(event.sender.id, filePath)
       rememberOpenDoc(event.sender.id, filePath)
       await rememberDiskState(event.sender.id, filePath, sha256Hex(bytes))
@@ -5514,10 +2167,7 @@ export function registerDocsIpc(): void {
         event.sender.id,
         passwordState.password ? plain : undefined,
       )
-      if (tornDownWcIds.has(event.sender.id)) {
-        await unlink(filePath).catch(() => {})
-        return { ok: false }
-      }
+      if (tornDownWcIds.has(event.sender.id)) return closedDocSave(filePath, true)
       const passwordIntentPending = commitDocPasswordSave(event.sender.id, passwordState, filePath)
       pushRecent(filePath)
       const savedPath = notifyFileSaved(event.sender, filePath)
@@ -5544,7 +2194,13 @@ export function registerDocsIpc(): void {
   // clobber an existing file unless the caller asked for overwrite.
   ipcMain.handle(
     'docs:save-to',
-    async (event, filePath: string, data: ArrayBuffer, overwrite: boolean) => {
+    async (
+      event,
+      filePath: string,
+      data: ArrayBuffer,
+      overwrite: boolean,
+      sourcePath?: string | null,
+    ) => {
       try {
         if (tornDownWcIds.has(event.sender.id)) return { ok: false }
         if (typeof filePath !== 'string' || !isAbsolute(filePath)) {
@@ -5557,6 +2213,11 @@ export function registerDocsIpc(): void {
         if (!canDocWrite(event.sender.id, filePath)) {
           return { ok: false, error: 'save target was not authorized' }
         }
+        if (
+          sourcePath &&
+          (typeof sourcePath !== 'string' || !canDocWrite(event.sender.id, sourcePath))
+        )
+          return { ok: false, error: 'save source was not authorized' }
         const existed = existsSync(filePath)
         if (!overwrite && existed) {
           return {
@@ -5565,17 +2226,15 @@ export function registerDocsIpc(): void {
           }
         }
         await mkdir(dirname(filePath), { recursive: true })
-        const passwordState = snapshotDocPassword(event.sender.id, null)
-        const { bytes: plain, hashes } = await materializeLazyDocx(Buffer.from(data))
+        const passwordState = snapshotDocPassword(event.sender.id, sourcePath || null)
+        const { bytes: plain, hashes } = await materializeLazyDocx(
+          Buffer.from(data),
+          event.sender.id,
+        )
         const bytes = passwordState.password ? encryptDocx(plain, passwordState.password) : plain
-        await atomicWriteFile(filePath, bytes)
-        // teardown may have happened while the write was in flight — only a file
-        // this handler created is safe to roll back; an overwritten one stays
-        const rollback = async (): Promise<{ ok: false }> => {
-          if (!existed) await unlink(filePath).catch(() => {})
-          return { ok: false }
-        }
-        if (tornDownWcIds.has(event.sender.id)) return rollback()
+        if (tornDownWcIds.has(event.sender.id)) return closedDocSave(filePath, false)
+        await atomicWriteFile(filePath, bytes, { overwrite })
+        if (tornDownWcIds.has(event.sender.id)) return closedDocSave(filePath, true)
         await rememberDiskState(event.sender.id, filePath, sha256Hex(bytes))
         pointLazyMediaAt(
           hashes,
@@ -5583,7 +2242,7 @@ export function registerDocsIpc(): void {
           event.sender.id,
           passwordState.password ? plain : undefined,
         )
-        if (tornDownWcIds.has(event.sender.id)) return rollback()
+        if (tornDownWcIds.has(event.sender.id)) return closedDocSave(filePath, true)
         const passwordIntentPending = commitDocPasswordSave(
           event.sender.id,
           passwordState,
@@ -5615,76 +2274,64 @@ export function registerDocsIpc(): void {
       properties: ['openFile'],
     })
     if (result.canceled || result.filePaths.length === 0) return null
-    const filePath = result.filePaths[0]
-    const ext = filePath.split('.').pop()?.toLowerCase() ?? ''
-    const mime = IMAGE_MIME[ext]
-    if (!mime) return null
-    return {
-      base64: readFileSync(filePath).toString('base64'),
-      mime,
-      name: basename(filePath),
-    }
+    return readPickedImage(result.filePaths[0])
   })
 
-  // Mailings tab: pick a local recipient list and read it as a data source.
-  // The file is read here, in the main process, where the file system is.
-  ipcMain.handle('docs:merge-data-source', async (event) => {
-    const result = await openDialog(event, {
-      title: tm('dlgMergeDataSource'),
-      filters: [
-        {
-          name: tm('filterMergeDataSource'),
-          extensions: [...MERGE_DATA_SOURCE_EXTENSIONS],
-        },
-      ],
-      properties: ['openFile'],
+  // The same recipient parser and exact-dialog output policy serve both native hosts.
+  const createMailMergeFor = async (event: IpcMainInvokeEvent) => {
+    const access = await createDocsFileAccess({
+      stateDirectory: app.getPath('userData'),
+      readRoots: [],
+      writeRoots: [],
     })
-    if (result.canceled || result.filePaths.length === 0) return null
+    const service = createDocsMailMergeServices({
+      access,
+      materialize: async (data) =>
+        (await materializeLazyDocx(Buffer.from(data), event.sender.id)).bytes,
+      dialogs: {
+        pickSource: async () => {
+          const result = await openDialog(event, {
+            title: tm('dlgMergeDataSource'),
+            filters: [
+              { name: tm('filterMergeDataSource'), extensions: [...MERGE_DATA_SOURCE_EXTENSIONS] },
+            ],
+            properties: ['openFile'],
+          })
+          return result.canceled ? null : (result.filePaths[0] ?? null)
+        },
+        pickSave: async ({ defaultName }) => {
+          const result = await saveDialog(event, {
+            title: tm('dlgSaveAs'),
+            defaultPath: defaultName,
+            filters: [{ name: tm('filterWord'), extensions: ['docx'] }],
+          })
+          return result.canceled ? null : (result.filePath ?? null)
+        },
+        pickDirectory: async () => {
+          const result = await openDialog(event, {
+            title: tm('dlgPickExportDir'),
+            properties: ['openDirectory', 'createDirectory'],
+          })
+          return result.canceled ? null : (result.filePaths[0] ?? null)
+        },
+      },
+    })
+    return { access, service }
+  }
+  ipcMain.handle('docs:merge-data-source', async (event) => {
+    const { access, service } = await createMailMergeFor(event)
     try {
-      return { ok: true, source: await readMergeDataSource(result.filePaths[0]) }
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      return await service.pickMergeDataSource()
+    } finally {
+      access.dispose()
     }
   })
-
-  // Mailings tab: write the merged documents. One file for the whole merge
-  // goes where the user says; one file per record goes into a folder they
-  // pick, every name kept unique so two records of the same name do not
-  // overwrite each other. The bytes carry the document's lazily served
-  // pictures, so they are materialized first — the merged file is a document
-  // of its own, not a view of the open one.
   ipcMain.handle('docs:merge-output', async (event, request: MergeOutputRequest) => {
-    const files = Array.isArray(request?.files) ? request.files : []
-    if (files.length === 0) return { ok: false, error: 'nothing to write' }
-    const write = async (path: string, data: ArrayBuffer): Promise<void> => {
-      const { bytes } = await materializeLazyDocx(Buffer.from(data))
-      await writeFile(path, bytes)
-    }
+    const { access, service } = await createMailMergeFor(event)
     try {
-      if (request.mode === 'single' || request.mode === 'labels') {
-        const file = files[0]!
-        const name = mergeOutputFileName(file.name)
-        const result = await saveDialog(event, {
-          title: tm('dlgSaveAs'),
-          defaultPath: name,
-          filters: [{ name: tm('filterWord'), extensions: ['docx'] }],
-        })
-        if (result.canceled || !result.filePath) return { ok: false, canceled: true }
-        await write(result.filePath, file.data)
-        return { ok: true, path: result.filePath, count: 1 }
-      }
-      const result = await openDialog(event, {
-        title: tm('dlgPickExportDir'),
-        properties: ['openDirectory', 'createDirectory'],
-      })
-      if (result.canceled || result.filePaths.length === 0) return { ok: false, canceled: true }
-      const folder = result.filePaths[0]!
-      for (const file of files) {
-        await write(mergeOutputPath(folder, file.name), file.data)
-      }
-      return { ok: true, folder, count: files.length }
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      return await service.writeMergeOutput(request)
+    } finally {
+      access.dispose()
     }
   })
 
@@ -6190,46 +2837,113 @@ export function setDocsShellHooks(hooks: DocsShellHooks | null): void {
  * sources are skipped and the reference in the Markdown dangles.
  */
 async function writeMarkdownMedia(mdPath: string, images: MarkdownImage[]): Promise<number> {
-  if (images.length === 0) return 0
-  const dir = join(dirname(mdPath), basename(mdPath).replace(/\.md$/i, '') + '_files')
-  let written = 0
-  for (const img of images) {
-    if (typeof img?.name !== 'string' || !/^image\d+\.\w+$/.test(img.name)) continue
-    if (typeof img.src !== 'string') continue
-    const data = /^data:image\/[\w.+-]+;base64,(.*)$/s.exec(img.src)
-    const body = data
-      ? Buffer.from(data[1], 'base64')
-      : ((await readLazyMedia(img.src).catch(() => null))?.body ?? null)
-    if (!body || body.length === 0) continue
-    if (written === 0) await mkdir(dir, { recursive: true })
-    await atomicWriteFile(join(dir, img.name), body)
-    written++
-  }
-  return written
+  return writeSharedMarkdownMedia(mdPath, images, { readAsset: readLazyMedia })
 }
 
-function openGeneratedFile(path: string): void {
+function openGeneratedFile(path: string): boolean {
   // Headless export has no tab strip and no user: revealing the file in Finder
   // would be the only visible effect of a run that must stay silent.
-  if (isHeadlessMode()) return
+  if (isHeadlessMode()) return false
   try {
-    if (shellHooks?.openGeneratedPath?.(path)) return
+    if (shellHooks?.openGeneratedPath?.(path)) return true
   } catch (err) {
     console.warn('[docs] Failed to open generated file:', err)
   }
   shell.showItemInFolder(path)
+  return false
 }
 
-/** Pick a safe file-name stem for an AI-created document. */
-export function sanitizeAiDocFileBase(title: string): string {
-  // Control characters are intentionally rejected from generated file names.
-  const cleaned = String(title ?? '')
-    // eslint-disable-next-line no-control-regex
-    .replace(/[/\\:*?"<>|\u0000-\u001f]/g, '_')
-    .trim()
-    .slice(0, 80)
-    .trim()
-  return cleaned && cleaned !== '.' && cleaned !== '..' ? cleaned : 'Untitled'
+function createWordView({
+  title,
+  html,
+  path,
+}: {
+  title: string
+  html: string
+  path: string
+}): Promise<DocsSaveOutcome> {
+  if (pendingCreatedWords.size >= 32)
+    return Promise.resolve({
+      ok: false,
+      committed: false,
+      pending: true,
+      error: 'Too many Word creation requests are pending',
+      errorCode: 'unavailable',
+    })
+  return new Promise((resolve) => {
+    const creationId = randomUUID()
+    const finish = (outcome: DocsSaveOutcome) => {
+      const job = pendingCreatedWords.get(creationId)
+      if (!job) return
+      pendingCreatedWords.delete(creationId)
+      clearTimeout(job.timer)
+      resolve(outcome)
+    }
+    const timer = setTimeout(() => {
+      const job = pendingCreatedWords.get(creationId)
+      finish({
+        ok: false,
+        committed: job?.started ? null : false,
+        pending: true,
+        error: 'The first Word save acknowledgement timed out',
+        errorCode: 'host_failure',
+      })
+    }, 120_000)
+    pendingCreatedWords.set(creationId, { path, started: false, timer, finish })
+    const payload: AiDocContent = { title, html, targetPath: path, creationId }
+    try {
+      if (shellHooks?.openAiDocTab) shellHooks.openAiDocTab(payload)
+      else {
+        const win = createDocsWindow(undefined)
+        markDocsNewBlank(win.webContents.id)
+        queueDocsAiContent(win.webContents.id, payload)
+      }
+    } catch (error) {
+      finish({
+        ok: false,
+        committed: pendingCreatedWords.get(creationId)?.started ? null : false,
+        pending: true,
+        error: error instanceof Error ? error.message : String(error),
+        errorCode: 'host_failure',
+      })
+    }
+  })
+}
+
+let documentCreator:
+  { directory: string; value: Promise<ReturnType<typeof createDocsDocumentCreation>> } | undefined
+
+function nativeDocumentCreator() {
+  const directory = defaultSaveDir()
+  if (documentCreator?.directory === directory) return documentCreator.value
+  const value = (async () => {
+    await mkdir(directory, { recursive: true })
+    const access = await createDocsFileAccess({
+      stateDirectory: app.getPath('userData'),
+      readRoots: [directory],
+      writeRoots: [directory],
+    })
+    return createDocsDocumentCreation({
+      access,
+      directory,
+      createWord: createWordView,
+      printHtml: (html) =>
+        printHtmlToPdf(
+          html,
+          () =>
+            new BrowserWindow({
+              show: false,
+              webPreferences: { sandbox: true, javascript: false },
+            }),
+        ),
+      openFile: async (path) => openGeneratedFile(path),
+    })
+  })()
+  documentCreator = { directory, value }
+  void value.catch(() => {
+    if (documentCreator?.value === value) documentCreator = undefined
+  })
+  return value
 }
 
 /**
@@ -6242,41 +2956,10 @@ export function sanitizeAiDocFileBase(title: string): string {
 export async function createAiDocument(
   request: CreateDocumentRequest,
 ): Promise<CreateDocumentResult> {
-  const type = request?.type
-  const title = sanitizeAiDocFileBase(request?.title)
-  const content = String(request?.content ?? '')
-  if (!content.trim()) return { ok: false, error: 'content must not be empty' }
   try {
-    if (type === 'docx') {
-      const payload: AiDocContent = { title, html: content }
-      if (shellHooks?.openAiDocTab) shellHooks.openAiDocTab(payload)
-      else {
-        const win = createDocsWindow(undefined)
-        markDocsNewBlank(win.webContents.id)
-        queueDocsAiContent(win.webContents.id, payload)
-      }
-      return { ok: true }
-    }
-    if (type === 'pdf') {
-      const bytes = await printHtmlToPdf(
-        buildPrintableHtml(title, content),
-        () =>
-          new BrowserWindow({ show: false, webPreferences: { sandbox: true, javascript: false } }),
-      )
-      const filePath = uniquePathIn(defaultSaveDir(), `${title}.pdf`)
-      await writeFile(filePath, bytes)
-      openGeneratedFile(filePath)
-      return { ok: true, path: filePath }
-    }
-    if (type === 'md' || type === 'html') {
-      const filePath = uniquePathIn(defaultSaveDir(), `${title}.${type}`)
-      await writeFile(filePath, content, 'utf8')
-      openGeneratedFile(filePath)
-      return { ok: true, path: filePath }
-    }
-    return { ok: false, error: `unsupported document type: ${String(type)}` }
+    return (await nativeDocumentCreator()).create(request)
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    return { ok: false, committed: false, error: err instanceof Error ? err.message : String(err) }
   }
 }
 
@@ -6715,7 +3398,7 @@ export function createDocsWindow(openPath?: string): BrowserWindow {
     height: 900,
     minWidth: 720,
     minHeight: 550,
-    title: 'GenOffice Docs',
+    title: 'ForaOffice Docs',
     // Word-like custom title bar (document name centered, quick-access buttons)
     ...(process.platform === 'darwin'
       ? { titleBarStyle: 'hiddenInset' as const }

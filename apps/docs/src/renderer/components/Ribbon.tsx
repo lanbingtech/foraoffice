@@ -1,3 +1,11 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
+import { getDocsHost } from '../host/docs-host'
+import type { DocsAiOperation } from '../../shared/editor-action'
+import { FileMenu } from './FileMenu'
+import { ASSISTANT_ICON_SIZE, HOME_RIBBON_ICON_SIZE, RIBBON_ICON_SIZE } from './ribbon-metrics'
+import { RibbonExtensionGroups, RibbonQuickAccess, ribbonItemVisible } from './RibbonExtensions'
+import type { DocsRibbonConfiguration } from '../sdk/ribbon'
+import type { DocsFileMenuCommand, DocsFileMenuItem } from '../sdk/file-menu'
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { Lang } from '@genoffice/i18n'
@@ -50,7 +58,7 @@ import {
   useDismissablePopover,
   useRibbonCollapse,
   useScrollWindow,
-} from '@genoffice/ui'
+} from '@genoffice/ui/editor'
 import { HIGHLIGHT_CSS } from '../editor/extensions'
 import { applyCase, type CaseMode } from '../editor/case-transform'
 import { isRtlUiLang, setParagraphDirection, setSelectionAlign } from '../editor/direction'
@@ -258,6 +266,8 @@ interface RibbonProps {
   quickActions?: React.ReactNode
   /** Right side of the tab row (file name, etc.) */
   trailingActions?: React.ReactNode
+  ribbonConfiguration?: DocsRibbonConfiguration | null
+  onRibbonAction?: (id: string, rendered: DocsRibbonConfiguration) => void
   editor: Editor
   /** shallow-stable snapshot of every editor-state read shown in the ribbon (memo invalidation key) */
   formatState: RibbonFormatState
@@ -290,6 +300,11 @@ interface RibbonProps {
   onFind?: () => void
   onReplace?: () => void
   onOpen: () => void
+  embedded?: boolean
+  fileMenuItems?: readonly DocsFileMenuItem[] | null
+  fileMenuToken?: string | null
+  canExecuteFileCommand?: (command: DocsFileMenuCommand) => boolean
+  onFileMenuAction?: (id: string, documentToken: string | null) => void
   onSave: () => void
   onSaveAs: () => void
   onConvert: (format: ConvertFormat) => void
@@ -348,7 +363,7 @@ interface RibbonProps {
   onZoomDialog: () => void
   darkPage: boolean
   onDarkPage: (v: boolean) => void
-  onAiPreset: (instruction: string) => void
+  onAiPreset: (instruction: string, operation: DocsAiOperation) => void
   /** external request (e.g. native menu Page Setup) to switch to a specific tab */
   tabRequest?: { tab: string; nonce: number } | null
   header: HeaderFooter | null
@@ -811,6 +826,8 @@ function RibbonInner({
   actionsRef,
   quickActions,
   trailingActions,
+  ribbonConfiguration,
+  onRibbonAction,
   editor,
   formatState: fs,
   hasDoc,
@@ -830,6 +847,11 @@ function RibbonInner({
   styles,
   docDefaults,
   onOpen,
+  embedded = false,
+  fileMenuItems,
+  fileMenuToken = null,
+  canExecuteFileCommand,
+  onFileMenuAction,
   onSave,
   onSaveAs,
   onConvert,
@@ -945,6 +967,8 @@ function RibbonInner({
   onPagePreview,
 }: RibbonProps) {
   const { t, lang } = useI18n()
+  const assistantButton = ribbonConfiguration?.assistantButton
+  const assistantLabel = assistantButton?.label ?? 'Genspark AI'
   const collapse = useRibbonCollapse('aidocs.ribbonCollapsed', {
     collapse: t('ribbonCollapse'),
     expand: t('ribbonExpand'),
@@ -982,6 +1006,37 @@ function RibbonInner({
   // a press inside a combo wrap (caret, list) blurs the input; that blur must not close the list
   const comboPressRef = useRef(false)
   const lastRegularTab = useRef<(typeof TABS)[number]>('home')
+  const extensionTabs = useMemo(
+    () =>
+      (ribbonConfiguration?.tabs ?? []).filter(
+        (candidate) =>
+          candidate.visible !== false &&
+          candidate.groups.some(
+            (group) => group.visible !== false && group.items.some(ribbonItemVisible),
+          ),
+      ),
+    [ribbonConfiguration],
+  )
+  const extensionTab = extensionTabs.find((candidate) => `extension:${candidate.id}` === tab)
+  useEffect(() => {
+    setDropdown((current) => (current?.startsWith('extension-menu:') ? null : current))
+    const valid = (value: string) =>
+      !value.startsWith('extension:') ||
+      extensionTabs.some(
+        (candidate) => `extension:${candidate.id}` === value && candidate.enabled !== false,
+      )
+    setTab((current) => (valid(current) ? current : 'home'))
+    if (!valid(lastRegularTab.current)) lastRegularTab.current = 'home'
+  }, [ribbonConfiguration, extensionTabs])
+  const extensionInteraction = {
+    openMenuId: dropdown?.startsWith('extension-menu:')
+      ? dropdown.slice('extension-menu:'.length)
+      : null,
+    onOpenMenu: (id: string | null) => setDropdown(id === null ? null : `extension-menu:${id}`),
+    onInvoke: (id: string) => {
+      if (ribbonConfiguration) onRibbonAction?.(id, ribbonConfiguration)
+    },
+  }
   const wasInTable = useRef(false)
   const wasInImage = useRef(false)
   const wasInHf = useRef(false)
@@ -1003,6 +1058,49 @@ function RibbonInner({
       setDropdown(null)
     }
   }, [tabRequest])
+
+  // Older embedded Chromium lacks CSS anchor positioning. Keep the same fixed
+  // panels outside the ribbon scroll clip, positioned from their owning wrap.
+  useLayoutEffect(() => {
+    if (
+      dropdown == null ||
+      (typeof CSS !== 'undefined' && CSS.supports?.('position-anchor', '--rb-drop-wrap'))
+    )
+      return
+    const panels = Array.from(
+      document.querySelectorAll<HTMLElement>('.ribbon .layout-menu[data-rb-panel]'),
+    )
+    const position = (event?: Event) => {
+      if (
+        event?.type === 'scroll' &&
+        event.target instanceof Node &&
+        panels.some((panel) => panel.contains(event.target as Node))
+      )
+        return
+      for (const panel of panels) {
+        const wrap = panel.parentElement
+        if (!wrap || getComputedStyle(panel).position !== 'fixed') continue
+        const anchor = wrap.getBoundingClientRect()
+        if (!anchor.width || !anchor.height) continue
+        panel.style.maxHeight = `min(70vh, 560px, ${Math.max(32, innerHeight - anchor.bottom - 12)}px)`
+        panel.style.overflowY = 'auto'
+        const bounds = panel.getBoundingClientRect()
+        const left = panel.classList.contains('align-right')
+          ? anchor.right - bounds.width
+          : anchor.left
+        panel.style.top = `${Math.max(8, Math.min(anchor.bottom + 4, innerHeight - bounds.height - 8))}px`
+        panel.style.left = `${Math.max(8, Math.min(left, innerWidth - bounds.width - 8))}px`
+        panel.style.right = 'auto'
+      }
+    }
+    position()
+    window.addEventListener('resize', position)
+    window.addEventListener('scroll', position, true)
+    return () => {
+      window.removeEventListener('resize', position)
+      window.removeEventListener('scroll', position, true)
+    }
+  }, [dropdown])
 
   // Unified dismissal: a press anywhere outside the open panel closes it (plus
   // window blur / shell chrome presses). The [data-rb-panel] element exists in
@@ -1368,7 +1466,7 @@ function RibbonInner({
   }
 
   const replacePicture = async () => {
-    const picked = await window.desktop.pickImage()
+    const picked = await getDocsHost().pickImage()
     if (!picked) return
     await applyPictureBytes(`data:${picked.mime};base64,${picked.base64}`)
   }
@@ -2309,62 +2407,95 @@ function RibbonInner({
       onMouseDown={keepDocumentFocus}
     >
       <div
-        className={`ribbon-tabs ${IN_TAB ? '' : IS_MAC ? 'ribbon-tabs-mac' : 'ribbon-tabs-win'}`}
+        className={`ribbon-tabs ${embedded ? 'ribbon-tabs-embedded' : IN_TAB ? '' : IS_MAC ? 'ribbon-tabs-mac' : 'ribbon-tabs-win'}`}
         onDoubleClick={collapse.onTabsDoubleClick}
       >
-        {!IS_MAC && (
-          <div className="file-tab-wrap">
-            <button
-              className={`ribbon-tab ribbon-tab-file ${dropdown === 'file' ? 'open' : ''}`}
-              onClick={() => setDropdown((v) => (v === 'file' ? null : 'file'))}
-            >
-              {t('ribbonTabFile')}
-            </button>
-            {dropdown === 'file' && (
-              <div data-rb-panel="" className="file-menu">
-                <button
-                  onClick={() => {
-                    setDropdown(null)
-                    onOpen()
-                  }}
-                >
-                  {t('ribbonOpen')} <span className="file-menu-key">Ctrl+O</span>
-                </button>
-                <button
-                  disabled={!hasDoc}
-                  onClick={() => {
-                    setDropdown(null)
-                    onSave()
-                  }}
-                >
-                  {t('ribbonSave')} <span className="file-menu-key">Ctrl+S</span>
-                </button>
-                <button
-                  disabled={!hasDoc}
-                  onClick={() => {
-                    setDropdown(null)
-                    onSaveAs()
-                  }}
-                >
-                  {t('ribbonSaveAs')} <span className="file-menu-key">Ctrl+Shift+S</span>
-                </button>
-                <button
-                  className="qa-name-with-ai"
-                  disabled={!hasDoc}
-                  onClick={() => {
-                    setDropdown(null)
-                    onNameWithAi()
-                  }}
-                >
-                  {t('ribbonNameWithAi')}
-                </button>
-                <div className="file-menu-sep" />
-                {convertItems}
-              </div>
-            )}
-          </div>
+        {(!IS_MAC || embedded) && (
+          <FileMenu
+            label={t('ribbonTabFile')}
+            open={dropdown === 'file'}
+            onOpenChange={(open) => setDropdown(open ? 'file' : null)}
+            items={
+              fileMenuItems ?? [
+                {
+                  type: 'group',
+                  id: 'files',
+                  items: [
+                    { type: 'command', id: 'open', command: 'open' },
+                    { type: 'command', id: 'save', command: 'save' },
+                    { type: 'command', id: 'saveAs', command: 'saveAs' },
+                    {
+                      type: 'action',
+                      id: 'name-with-ai',
+                      actionId: 'name-with-ai',
+                      label: t('ribbonNameWithAi'),
+                      enabled: hasDoc,
+                    },
+                  ],
+                },
+                {
+                  type: 'group',
+                  id: 'exports',
+                  items: [
+                    { type: 'command', id: 'exportPdf', command: 'exportPdf' },
+                    { type: 'command', id: 'exportHtml', command: 'exportHtml' },
+                    { type: 'command', id: 'exportMarkdown', command: 'exportMarkdown' },
+                    { type: 'command', id: 'exportImages', command: 'exportImages' },
+                  ],
+                },
+              ]
+            }
+            commandLabel={(command) =>
+              t(
+                (
+                  {
+                    new: 'appNew',
+                    open: 'ribbonOpen',
+                    save: 'ribbonSave',
+                    saveAs: 'ribbonSaveAs',
+                    exportPdf: 'ribbonConvertPdf',
+                    exportHtml: 'ribbonConvertHtml',
+                    exportMarkdown: 'ribbonConvertMarkdown',
+                    exportImages: 'ribbonConvertImages',
+                  } as const
+                )[command],
+              )
+            }
+            canExecute={
+              canExecuteFileCommand ??
+              ((command) => command === 'open' || command === 'new' || hasDoc)
+            }
+            itemClassName={(id) =>
+              fileMenuItems == null && id === 'name-with-ai' ? 'qa-name-with-ai' : undefined
+            }
+            onInvoke={(id) => {
+              if (fileMenuItems != null) {
+                onFileMenuAction?.(id, fileMenuToken)
+                return
+              }
+              if (id === 'open') onOpen()
+              else if (id === 'save') onSave()
+              else if (id === 'saveAs') onSaveAs()
+              else if (id === 'name-with-ai') onNameWithAi()
+              else
+                onConvert(
+                  (
+                    {
+                      exportPdf: 'pdf',
+                      exportHtml: 'html',
+                      exportMarkdown: 'md',
+                      exportImages: 'images',
+                    } as const
+                  )[id as 'exportPdf'],
+                )
+            }}
+          />
         )}
         {quickActions}
+        <RibbonQuickAccess
+          items={ribbonConfiguration?.quickAccess ?? []}
+          {...extensionInteraction}
+        />
         {TABS.filter((tabName) => tabName !== 'file').map((tabName) => (
           <button
             key={tabName}
@@ -2378,6 +2509,24 @@ function RibbonInner({
             }}
           >
             {t(TAB_LABEL_KEYS[tabName])}
+          </button>
+        ))}
+        {extensionTabs.map((candidate) => (
+          <button
+            type="button"
+            key={candidate.id}
+            data-ribbon-tab={candidate.id}
+            className={`ribbon-tab ${collapse.tabClass(tab === `extension:${candidate.id}`)}`}
+            data-tip={collapse.tabTip(tab === `extension:${candidate.id}`)}
+            disabled={candidate.enabled === false}
+            onClick={() => {
+              collapse.onTabPress(tab === `extension:${candidate.id}`)
+              lastRegularTab.current = `extension:${candidate.id}`
+              setTab(`extension:${candidate.id}`)
+              setDropdown(null)
+            }}
+          >
+            {candidate.label}
           </button>
         ))}
         {/* contextual tabs render as plain tabs appended to the row, like current Word */}
@@ -2527,7 +2676,13 @@ function RibbonInner({
       </div>
 
       <div className="ribbon-body" data-ribbon-body="">
-        {tab === 'headerFooter' && hfEditing ? (
+        {extensionTab ? (
+          <RibbonExtensionGroups
+            groups={extensionTab.groups}
+            disabled={extensionTab.enabled === false}
+            {...extensionInteraction}
+          />
+        ) : tab === 'headerFooter' && hfEditing ? (
           <HeaderFooterTab
             info={hfEditing}
             dropdown={dropdown}
@@ -2700,7 +2855,7 @@ function RibbonInner({
                       onClick={() => setPictureDialog('cutout')}
                     >
                       <span className="rb-big-icon">
-                        <IconRemoveBg size={28} />
+                        <IconRemoveBg size={RIBBON_ICON_SIZE} />
                       </span>
                       <span>{t('ribbonRemoveBg')}</span>
                     </button>
@@ -2711,7 +2866,7 @@ function RibbonInner({
                       onClick={() => setPictureDialog('crop')}
                     >
                       <span className="rb-big-icon">
-                        <IconCrop size={28} />
+                        <IconCrop size={RIBBON_ICON_SIZE} />
                       </span>
                       <span>{t('ribbonCrop')}</span>
                     </button>
@@ -2722,7 +2877,7 @@ function RibbonInner({
                       onClick={() => void replacePicture()}
                     >
                       <span className="rb-big-icon">
-                        <IconReplacePicture size={28} />
+                        <IconReplacePicture size={RIBBON_ICON_SIZE} />
                       </span>
                       <span>{t('ribbonReplacePicture')}</span>
                     </button>
@@ -3439,24 +3594,41 @@ function RibbonInner({
           </div>
         ) : tab === 'home' ? (
           <>
-            {/* ---- Genspark AI (first slot: entry + one-click AI actions) ---- */}
+            {/* ---- Assistant entry + one-click AI actions ---- */}
             <div className="ribbon-group">
               <div className="ribbon-group-items">
-                <button
-                  className={`rb-big ai-entry ${showAi ? 'active' : ''}`}
-                  data-tip={t('aiOpenAssistant')}
-                  onClick={onToggleAi}
-                >
-                  <span className="rb-big-icon">
-                    <GensparkMark size={26} />
-                  </span>
-                  <span>Genspark AI</span>
-                </button>
+                {assistantButton?.visible !== false && (
+                  <button
+                    className={`rb-big ai-entry ${showAi ? 'active' : ''}`}
+                    data-tip={t('aiOpenAssistant')}
+                    onClick={onToggleAi}
+                  >
+                    <span className="rb-big-icon">
+                      {assistantButton?.icon ? (
+                        <img
+                          src={assistantButton.icon}
+                          alt=""
+                          width={ASSISTANT_ICON_SIZE}
+                          height={ASSISTANT_ICON_SIZE}
+                          draggable={false}
+                        />
+                      ) : (
+                        <GensparkMark size={ASSISTANT_ICON_SIZE} />
+                      )}
+                    </span>
+                    <span>{assistantLabel}</span>
+                  </button>
+                )}
                 <button
                   className="rb-big ai-entry"
                   disabled={docEmpty}
                   data-tip={t('aiSummarizeBtn')}
-                  onClick={() => onAiPreset(t('aiSummarizePrompt'))}
+                  onClick={() =>
+                    onAiPreset(t('aiSummarizePrompt'), {
+                      operationId: 'summarize_document',
+                      parameters: {},
+                    })
+                  }
                 >
                   <span className="rb-big-icon">
                     <span className="ai-feature-icon" aria-hidden="true">
@@ -3493,6 +3665,12 @@ function RibbonInner({
                       t(
                         editor.state.selection.empty ? 'aiPolishPrompt' : 'aiPolishSelectionPrompt',
                       ),
+                      {
+                        operationId: editor.state.selection.empty
+                          ? 'polish_document'
+                          : 'polish_selection',
+                        parameters: {},
+                      },
                     )
                   }
                 >
@@ -3524,7 +3702,12 @@ function RibbonInner({
                   className="rb-big ai-entry"
                   disabled={docEmpty}
                   data-tip={t('aiTidyBtn')}
-                  onClick={() => onAiPreset(t('aiTidyPrompt'))}
+                  onClick={() =>
+                    onAiPreset(t('aiTidyPrompt'), {
+                      operationId: 'format_document',
+                      parameters: {},
+                    })
+                  }
                 >
                   <span className="rb-big-icon">
                     <span className="ai-feature-icon" aria-hidden="true">
@@ -3553,7 +3736,12 @@ function RibbonInner({
                   className="rb-big ai-entry"
                   disabled={docEmpty}
                   data-tip={t('aiMindMapBtn')}
-                  onClick={() => onAiPreset(t('aiMindMapPrompt'))}
+                  onClick={() =>
+                    onAiPreset(t('aiMindMapPrompt'), {
+                      operationId: 'create_mind_map',
+                      parameters: {},
+                    })
+                  }
                 >
                   <span className="rb-big-icon">
                     <span className="ai-feature-icon" aria-hidden="true">
@@ -3575,7 +3763,7 @@ function RibbonInner({
                   <span>{t('aiMindMapBtn')}</span>
                 </button>
               </div>
-              <div className="ribbon-group-label">Genspark AI</div>
+              <div className="ribbon-group-label">{assistantLabel}</div>
             </div>
 
             <div className="ribbon-sep" />
@@ -3591,7 +3779,7 @@ function RibbonInner({
                     onClick={() => setDropdown((v) => (v === 'convert' ? null : 'convert'))}
                   >
                     <span className="rb-big-icon">
-                      <IconConvert size={22} />
+                      <IconConvert size={HOME_RIBBON_ICON_SIZE} />
                       <IconCaret />
                     </span>
                     <span>{t('ribbonConvert')}</span>
@@ -3619,7 +3807,7 @@ function RibbonInner({
                     onClick={() => pasteAs()}
                   >
                     <span className="rb-big-icon">
-                      <IconPaste size={28} />
+                      <IconPaste size={RIBBON_ICON_SIZE} />
                     </span>
                   </button>
                   <button
@@ -4469,7 +4657,7 @@ function RibbonInner({
                   onClick={() => setDropdown((v) => (v === 'styleGallery' ? null : 'styleGallery'))}
                 >
                   <span className="rb-big-icon rb-styles-gallery-icon">
-                    <IconStyles size={22} />
+                    <IconStyles size={HOME_RIBBON_ICON_SIZE} />
                     <span className="rb-caret-inline">
                       <IconCaret />
                     </span>
@@ -4704,6 +4892,11 @@ function RibbonInner({
             onPagePreview={onPagePreview}
           />
         )}
+        <RibbonExtensionGroups
+          groups={(ribbonConfiguration?.groups ?? []).filter((group) => group.tabId === tab)}
+          iconSize={tab === 'home' ? HOME_RIBBON_ICON_SIZE : RIBBON_ICON_SIZE}
+          {...extensionInteraction}
+        />
       </div>
 
       {pictureDialog === 'cutout' && imageDataUrl && (

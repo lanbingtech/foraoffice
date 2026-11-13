@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: distinguish upstream installers from fork delivery. -->
+
 # GenOffice installieren
+
+> Die folgenden übernommenen Anweisungen beschreiben die ursprünglichen GenOffice-Installationspakete. Diese Downloads enthalten keine ForaOffice-Änderungen oder das Docs SDK und belegen keine Fork-Veröffentlichungen, Signaturen oder unterstützten Plattformen. Siehe [Projektvorstellung](https://github.com/lanbingtech/foraoffice) und [Docs-SDK-Anleitung](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Jeder Build wird auf der [Releases-Seite](https://github.com/genspark-ai/genoffice/releases/latest) veröffentlicht. Alle stammen aus `main`; die Installer für macOS und Windows sind signiert.
 

@@ -1,3 +1,5 @@
+// Modified for ForaOffice from GenOffice v0.12.852.
+import { getOptionalDocsHost } from './host/docs-host'
 /**
  * Renderer side of Word's face resolution: the generated word-faces.json plus
  * the main process's installed-font index (IPC docs:font-metrics), prefetched
@@ -54,7 +56,7 @@ export function setFontMetricsProvider(
 function metricsIpc(): ((family: string) => Promise<FaceVerticalMetrics | null>) | null {
   if (provider !== undefined) return provider
   if (typeof window === 'undefined') return null
-  const fn = window.desktop?.fontMetrics
+  const fn = getOptionalDocsHost()?.fontMetrics
   return typeof fn === 'function' ? fn : null
 }
 

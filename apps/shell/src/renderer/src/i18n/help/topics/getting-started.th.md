@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # เริ่มต้นอย่างรวดเร็ว: ส่วนติดต่อผู้ใช้และพื้นฐาน
+
+> คู่มือนี้อธิบายแอปเดสก์ท็อปที่ ForaOffice สืบทอดจาก GenOffice รวมถึงเอเจนต์และการตั้งค่าในตัว โฮสต์ที่ฝัง Docs ต้องจัดเตรียมบริการและการผสานเอเจนต์เอง ฟังก์ชันเดสก์ท็อปไม่ได้เป็นความสามารถของ SDK โดยอัตโนมัติ ดู[คู่มือ Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md)
 
 GenOffice เป็นชุดโปรแกรมสำนักงานที่ทำงานบนเครื่องของคุณทั้งหมด: หน้าต่างเดียว มีแถบแท็บแถวเดียว ภายในมีตัวแก้ไขหกตัวคือ Docs (ประมวลผลคำ), Sheets (สเปรดชีต), Slides (งานนำเสนอ), PDF, Markdown และ HTML ไฟล์ที่เปิดและบันทึกเป็น .docx / .xlsx / .pptx / .pdf ของจริง ใช้งานร่วมกับ Word, Excel และ PowerPoint ได้อย่างสมบูรณ์ ไม่ต้องต่ออินเทอร์เน็ต
 

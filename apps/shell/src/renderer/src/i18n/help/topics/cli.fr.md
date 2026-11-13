@@ -1,4 +1,8 @@
+<!-- Modified for ForaOffice: clarify the fork identity and integration scope. -->
+
 # Ligne de commande et agents
+
+> Ce manuel décrit l’application de bureau héritée de GenOffice dans ForaOffice, avec son agent et ses paramètres intégrés. Les hôtes intégrant Docs fournissent leurs propres services et agents ; les fonctions de bureau ne sont pas automatiquement des capacités du SDK. Voir le [guide Docs SDK](https://github.com/lanbingtech/foraoffice/blob/main/apps/docs/sdk/README.md).
 
 Chaque installation livre une commande `genoffice` qui pilote les mêmes moteurs que la fenêtre : les mêmes analyseurs, le même rédacteur, le même moteur de rendu. Un fichier enregistré par l’application et un fichier écrit par la commande sont le même fichier, et un contrôle que le panneau IA de l’application valide, la commande le valide aussi.
 

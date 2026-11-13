@@ -1869,4 +1869,3 @@ pub(crate) mod tests {
         format!("{letters}{}", row + 1)
     }
 }
-
