@@ -150,6 +150,8 @@ test('the embedded public editor edits, undoes, saves and reopens Word with its 
     await page.keyboard.press('Control+Home')
     for (let i = 0; i < 6; i++) await page.keyboard.press('Shift+ArrowRight')
     await page.locator('.ai-ask-trigger').click()
+    await page.locator('.ai-ask-pop-input').fill('Edit the selected text')
+    await page.locator('.ai-ask-confirm').click()
     await expect.poll(() => page.evaluate(() => window.docsTest.actions.length)).toBe(1)
     const bindingId = await page.evaluate(() => window.docsTest.actions[0].bindingId)
     const createBridge = (bindingId: string) =>
@@ -224,6 +226,8 @@ test('the embedded public editor edits, undoes, saves and reopens Word with its 
       for (let index = 0; index < 'Agent'.length; index++)
         await page.keyboard.press('Shift+ArrowRight')
       await page.locator('.ai-ask-trigger').click()
+      await page.locator('.ai-ask-pop-input').fill('Edit the selected text')
+      await page.locator('.ai-ask-confirm').click()
       await expect.poll(() => page.evaluate(() => window.docsTest.actions.length)).toBe(count + 1)
       return createBridge(await page.evaluate(() => window.docsTest.actions.at(-1)!.bindingId))
     }
