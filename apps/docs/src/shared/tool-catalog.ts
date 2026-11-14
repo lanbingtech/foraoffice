@@ -124,7 +124,7 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
         (operationNames.length
           ? `Run a list of formatting/structure ops as one atomic transaction: ${operationNames.join(', ')}. `
           : 'Run formatting/structure ops as one atomic transaction. Call get_editor_capabilities for operation names and signatures. ') +
-        'Each op is a flat { op, target?, ...fields } object; fields are patches (present = set, null = clear, absent = untouched). Any invalid op rejects the whole batch with its usage line.',
+        'Each op is a flat { op, target?, ...fields } object; fields are patches (present = set, null = clear, absent = untouched). Any invalid op rejects the whole batch with its usage line. findReplace defaults to exactly one literal match across formatting runs within one paragraph; zero/multiple matches reject atomically. Intentional bulk replacement requires match:"all" and an explicit target scope.',
       inputSchema: {
         type: 'object',
         properties: {

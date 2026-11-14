@@ -63,7 +63,13 @@ describe('genoffice docx (docs editor under jsdom)', () => {
     writeFileSync(
       ops,
       JSON.stringify([
-        { op: 'findReplace', find: firstText.split(' ')[0], replace: 'GENOFFICE' },
+        {
+          op: 'findReplace',
+          find: firstText.split(' ')[0],
+          replace: 'GENOFFICE',
+          match: 'all',
+          target: { scope: 'document' },
+        },
         { op: 'setFont', target: { blockIndexes: [0] }, color: 'FF0000', bold: true },
         { op: 'insert_content', afterBlockIndex: 0, html: '<p>Inserted by genoffice.</p>' },
         {

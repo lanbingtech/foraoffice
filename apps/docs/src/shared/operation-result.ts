@@ -23,6 +23,9 @@ export interface DocsOperationResult extends ToolExecution {
   committed: boolean | null
   pending?: boolean
   errorCode?: DocsErrorCode
+  /** Exact matching/changing occurrences or cells, when provided by the operation. */
+  matchCount?: number
+  changeCount?: number
   media?: { data: string; mimeType: string }
   imageReferenceErrors?: DocsImageReferenceIssue[]
 }

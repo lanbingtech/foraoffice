@@ -7,6 +7,15 @@ installers merely because the corresponding build commands exist.
 
 ## Compatibility policy
 
+Unreleased logical-text change: external `apply_ops/findReplace` now requires
+exactly one literal match by default, including text split across formatting
+runs. Existing bulk callers must pass `match: "all"` and an explicit target
+scope. Zero/multiple precise matches refuse atomically; identical replacements
+do not advance revision or split undo history. Native UI defaults are unchanged.
+The replacement inherits match-start formatting and stays inside one paragraph
+without crossing cells, protected/deleted spans, fields, images or formulas.
+Occurrence counts are separate from the existing block-count summaries.
+
 Unreleased safety change: public live-document HTML writes now require the
 document/revision-bound image tags returned by `read_blocks`. Bare `doc:B.I`,
 invalid/stale references and unsupported HTTP/data `<img>` sources refuse the

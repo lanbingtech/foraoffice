@@ -5,11 +5,12 @@ import type { Transaction } from '@tiptap/pm/state'
 import { generateTocFieldXml, type TabStop, type TocEntry } from '@genoffice/docx-engine'
 import { isEastAsianFontName } from '../font-list'
 import { t } from '../i18n/locale'
-import { blockRangePositions, isTrackedDeleted, liveText } from './doc-utils'
+import { blockRangePositions, hasDeletionRevision, isTrackedDeleted, liveText } from './doc-utils'
 import { tabSpecsToStops, validateTabs, type TabSpec } from './tab-stops'
 import { styleOpDefs, type AiStyleAccess } from './style-ops'
 import { fieldOpDefs } from './field-ops'
 import { tableOpDefs } from './table-ops'
+import { compileFind, findInDoc } from '../editor/find'
 
 /**
  * Canonical edit ops for the document. The model (apply_ops) and, later, the
@@ -110,6 +111,9 @@ export interface OpResult {
   skippedProtected: number
   /** targets skipped because the text is a pending tracked deletion */
   skippedDeleted?: number
+  /** Exact occurrence/cell counts, separate from the legacy block totals. */
+  matchCount?: number
+  changeCount?: number
   detail?: string
 }
 
@@ -120,6 +124,8 @@ export interface ExecuteOutcome {
   error?: string
   /** one line per op, in order (always on success, alone on dryRun) */
   plan?: string[]
+  /** Whether the validated provisional document differs; previews never dispatch it. */
+  wouldChange?: boolean
 }
 
 // ---- registry ----
@@ -895,7 +901,6 @@ function runFindReplace(op: Op, env: RunEnv): OpResult {
   const find = String(op.find)
   const replace = String(op.replace ?? '')
   const matchCase = op.matchCase !== false
-  const needle = matchCase ? find : find.toLowerCase()
   const blocks = op.target ? matchTarget(tr.doc, targetOf(op), sel) : topLevelBlocks(tr.doc)
   const scoped = op.target ? scopedRange(targetOf(op), sel) : null
   const replacements: Array<{ from: number; to: number; marks: PmDocNode['marks'] }> = []
@@ -906,29 +911,63 @@ function runFindReplace(op: Op, env: RunEnv): OpResult {
   for (const b of blocks) {
     if (b.node.type.name === 'docProtected') {
       if (blockText(b.node).includes(find)) skippedProtected++
-      continue
-    }
-    const blockDeleted = isTrackedDeleted(b.node)
-    for (const p of scanParagraphs(b, scoped)) {
-      const paraDeleted = blockDeleted || isTrackedDeleted(p.node)
-      p.node.forEach((child, offset) => {
-        if (!child.isText || !child.text) return
-        const struck = paraDeleted || child.marks.some((m) => m.type.name === 'del')
-        const hay = matchCase ? child.text : child.text.toLowerCase()
-        let at = hay.indexOf(needle)
-        while (at !== -1) {
-          const from = p.pos + 1 + offset + at
-          if (struck) {
-            skippedDeleted++
-          } else if (insideScope(b, scoped, from, from + needle.length)) {
-            replacements.push({ from, to: from + needle.length, marks: child.marks })
-            touchedIndexes.add(b.index)
-          }
-          at = hay.indexOf(needle, at + needle.length)
-        }
-      })
     }
   }
+  const options = { mode: 'literal' as const, matchCase, wholeWord: false, matchWidth: true }
+  // The operation takes literal text; native Word-style caret codes remain literal too.
+  const compiled = compileFind(find.replaceAll('^', '^^'), options)
+  if (!compiled.ok) throw new Error(`findReplace: invalid search (${compiled.error})`)
+  const include = (node: PmDocNode): boolean =>
+    !hasDeletionRevision(node) &&
+    !node.marks.some(
+      (mark) =>
+        mark.type.name === 'del' ||
+        (ctx.source !== 'ui' && ['instrField', 'refField'].includes(mark.type.name)),
+    )
+  // Preserve the deleted-hit diagnostic without allowing a match to bridge
+  // excluded text. Both scans use the same native matcher and coordinates.
+  const deletedAt = (from: number, to: number): boolean => {
+    const $from = tr.doc.resolve(from)
+    let deleted = false
+    for (let depth = 1; depth <= $from.depth; depth++) {
+      if (isTrackedDeleted($from.node(depth))) deleted = true
+    }
+    tr.doc.nodesBetween(from, to, (node) => {
+      if (hasDeletionRevision(node) || node.marks.some((mark) => mark.type.name === 'del'))
+        deleted = true
+    })
+    return deleted
+  }
+  for (const match of findInDoc(tr.doc, compiled.query, options)) {
+    const b = blocks.find((block) => block.index === tr.doc.resolve(match.from).index(0))
+    if (b && insideScope(b, scoped, match.from, match.to) && deletedAt(match.from, match.to))
+      skippedDeleted++
+  }
+  for (const match of findInDoc(tr.doc, compiled.query, options, include)) {
+    const $from = tr.doc.resolve(match.from)
+    const b = blocks.find((block) => block.index === $from.index(0))
+    if (!b || !insideScope(b, scoped, match.from, match.to)) continue
+    const first = $from.parent.childAfter($from.parentOffset).node
+    replacements.push({ from: match.from, to: match.to, marks: first?.marks ?? [] })
+    touchedIndexes.add(b.index)
+  }
+
+  const matchCount = replacements.length
+  const matchedBlocks = touchedIndexes.size
+  const matchMode = op.match ?? (ctx.source === 'ui' ? 'all' : 'one')
+  if (matchMode === 'all' && ctx.source !== 'ui' && !op.target)
+    throw new Error('findReplace: match="all" requires an explicit target scope')
+  if (matchMode === 'one' && matchCount !== 1)
+    throw new Error(
+      `findReplace: expected exactly one match, found ${matchCount}; narrow the target or explicitly use match="all" within a target scope`,
+    )
+  // An identical literal value is a successful match, not a document edit.
+  for (let index = replacements.length - 1; index >= 0; index--) {
+    const match = replacements[index]
+    if (tr.doc.textBetween(match.from, match.to) === replace) replacements.splice(index, 1)
+  }
+  touchedIndexes.clear()
+  replacements.forEach((match) => touchedIndexes.add(tr.doc.resolve(match.from).index(0)))
 
   // A rewrite is refused only when it would actually touch a withheld span: the
   // collected replacements are exactly the text the model is about to
@@ -1002,10 +1041,12 @@ function runFindReplace(op: Op, env: RunEnv): OpResult {
   }
   return {
     op: 'findReplace',
-    matched: touchedIndexes.size,
+    matched: matchedBlocks,
     changed: touchedIndexes.size,
     skippedProtected,
     skippedDeleted,
+    matchCount,
+    changeCount: replacements.length,
     detail: t('aiCmdReplacedCount', { count: replacements.length }),
   }
 }
@@ -1372,8 +1413,8 @@ register({
 register({
   name: 'findReplace',
   signature:
-    '{ op: "findReplace", find, replace, matchCase?, target? }  // plain-text find & replace inside runs (no cross-block matching); the replacement keeps the matched text\'s formatting — the right op for small in-place fixes; target narrows the scanned blocks (blockIndexes / scope:"selection" / nodeType), omitted = whole document',
-  keys: ['find', 'replace', 'matchCase'],
+    '{ op: "findReplace", find, replace, matchCase?, match?: "one"|"all", target? }  // literal logical-text replacement across formatting runs inside one paragraph; inherits match-start formatting, preserves outside text; default one rejects zero/multiple matches; all requires an explicit target scope',
+  keys: ['find', 'replace', 'matchCase', 'match'],
   target: 'optional',
   validate(op, where) {
     const shape = validateShape(op, this, where)
@@ -1384,6 +1425,8 @@ register({
     if (op.matchCase !== undefined && typeof op.matchCase !== 'boolean') {
       return `${where}: matchCase must be a boolean`
     }
+    if (op.match !== undefined && op.match !== 'one' && op.match !== 'all')
+      return `${where}: match must be "one" or "all"`
     return null
   },
   apply: runFindReplace,
@@ -1712,7 +1755,8 @@ export function executeOps(editor: Editor, ops: unknown, ctx: OpContext = {}): E
 
   // Build the complete transaction even for a preview: schema and target checks
   // must agree with execution, but no document or history state is dispatched.
-  if (ctx.dryRun) return { ok: true, results: [], summary: '', plan }
+  if (ctx.dryRun)
+    return { ok: true, results: [], summary: '', plan, wouldChange: !tr.doc.eq(editor.state.doc) }
 
   if (tr.steps.length > 0) {
     // intent record for consumers downstream of the Step stream (journal, analytics)

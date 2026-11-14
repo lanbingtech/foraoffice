@@ -157,6 +157,9 @@ export interface ToolExecution {
   mutated: boolean
   /** short human-readable label for the chat activity chip */
   summary: string
+  /** Exact match/change counts when all operations report those units. */
+  matchCount?: number
+  changeCount?: number
   /** UI-only side channel (never enters the LLM context) */
   display?: ToolDisplay
 }
@@ -1569,6 +1572,9 @@ function executeSyncTool(
         }
       }
       const changed = outcome.results.reduce((sum, r) => sum + r.changed, 0)
+      const exactCounts = outcome.results.every(
+        (result) => result.matchCount !== undefined && result.changeCount !== undefined,
+      )
       const skippedDeleted = outcome.results.reduce((sum, r) => sum + (r.skippedDeleted ?? 0), 0)
       // explicit model-facing note so it stops retrying deletions of already-deleted text
       const deletedNote =
@@ -1578,6 +1584,13 @@ function executeSyncTool(
       return {
         output: outcome.summary + deletedNote,
         mutated: changed > 0,
+        committed: changed > 0,
+        ...(exactCounts
+          ? {
+              matchCount: outcome.results.reduce((sum, result) => sum + result.matchCount!, 0),
+              changeCount: outcome.results.reduce((sum, result) => sum + result.changeCount!, 0),
+            }
+          : {}),
         summary: outcome.summary,
       }
     }

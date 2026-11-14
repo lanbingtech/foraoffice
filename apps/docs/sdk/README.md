@@ -918,6 +918,18 @@ they do not depend on a particular host, agent or report template.
   zero-based `data-row`/`data-col` grid coordinates. Covered positions are not
   synthetic blank cells. Preserve the spans in replacement HTML; coordinates
   describe the read location and do not override the written layout.
+- `apply_ops/findReplace` matches literal text across formatting runs within a
+  paragraph, preserving non-target text and inheriting the first matched
+  character's formatting. It does not cross paragraph/cell, image, formula,
+  field, protected or deleted-content boundaries. External writes default to
+  `match: "one"`: zero or multiple matches refuse the entire batch. Read and
+  narrow the target, or explicitly use `match: "all"` with a target such as
+  `{ scope: "document" }` for intentional bulk edits. Native UI bulk behavior
+  is unchanged. Receipts expose occurrence `matchCount`/`changeCount` when all
+  operations provide exact counts; legacy `matched`/`changed` summaries count
+  blocks. An identical replacement has zero changes, and refusals/no-ops leave
+  content, revision and undo grouping unchanged. Search caret codes and
+  replacement expressions are literal text at this operation boundary.
 - `apply_ops` batches remain atomic. `setList` accepts paragraphs/list items;
   headings keep their role, protected objects retain the documented skip
   behavior, and unsupported structures such as native tables are rejected with

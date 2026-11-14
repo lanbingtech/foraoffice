@@ -299,7 +299,13 @@ describe('findReplace', () => {
   it('replaces every occurrence and keeps marks', () => {
     const editor = createEditor(fixtureDoc())
     const outcome = executeOps(editor, [
-      { op: 'findReplace', find: 'GenSpark', replace: 'Genspark' },
+      {
+        op: 'findReplace',
+        find: 'GenSpark',
+        replace: 'Genspark',
+        match: 'all',
+        target: { scope: 'document' },
+      },
     ])
     expect(outcome.ok).toBe(true)
     expect(outcome.results[0].detail).toBe('Replaced 2 occurrence(s)')
@@ -312,11 +318,19 @@ describe('findReplace', () => {
   it('matchCase: sensitive by default, insensitive when false', () => {
     const editor = createEditor(fixtureDoc())
     const strict = executeOps(editor, [{ op: 'findReplace', find: 'genspark', replace: 'X' }])
-    expect(strict.results[0].changed).toBe(0)
+    expect(strict.ok).toBe(false)
+    expect(strict.error).toContain('exactly one match, found 0')
     expect(editor.state.doc.child(1).textContent).toContain('GenSpark')
 
     const loose = executeOps(editor, [
-      { op: 'findReplace', find: 'genspark', replace: 'X', matchCase: false },
+      {
+        op: 'findReplace',
+        find: 'genspark',
+        replace: 'X',
+        matchCase: false,
+        match: 'all',
+        target: { scope: 'document' },
+      },
     ])
     expect(loose.results[0].detail).toBe('Replaced 2 occurrence(s)')
     expect(editor.state.doc.child(1).textContent).toBe('X intro,X is great')
@@ -515,7 +529,13 @@ describe('transaction atomicity and aiChanged', () => {
     const before = JSON.stringify(editor.getJSON())
     const outcome = executeOps(editor, [
       { op: 'setFont', target: { nodeType: 'docHeading' }, color: 'FF0000' },
-      { op: 'findReplace', find: 'GenSpark', replace: 'Genspark' },
+      {
+        op: 'findReplace',
+        find: 'GenSpark',
+        replace: 'Genspark',
+        match: 'all',
+        target: { scope: 'document' },
+      },
       { op: 'deleteBlocks', target: { blockIndexes: [3] } },
     ])
     expect(outcome.ok).toBe(true)
