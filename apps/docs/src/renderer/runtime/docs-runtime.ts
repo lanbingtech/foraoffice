@@ -15,7 +15,7 @@ import {
   type AiTrack,
   type NumIds,
 } from '../ai/protocol'
-import { opCatalog, opNames } from '../ai/ops'
+import { executeOps, opCatalog, opNames } from '../ai/ops'
 import {
   executeTool,
   markDocSeen,
@@ -144,6 +144,7 @@ const failure = (
   output,
   summary: 'Document operation refused',
   isError: true,
+  mutated: false,
   errorCode,
 })
 const executionFailure = (error: unknown): RuntimeExecution =>
@@ -611,8 +612,20 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
               mutated: true,
             }
           }
-          if (!DOCS_READ_TOOLS.has(call.name))
-            doc.editor.view.dispatch(closeHistory(doc.editor.state.tr))
+          let changesHistory = !DOCS_READ_TOOLS.has(call.name)
+          if (call.name === 'apply_ops') {
+            const preview = executeOps(doc.editor, call.input.ops, {
+              numIds: doc.numIds,
+              track: doc.track,
+              selection: frozen?.doc === doc.editor.state.doc ? frozen.scope : null,
+              styles: doc.extras?.styles,
+              dryRun: true,
+            })
+            if (!preview.ok)
+              return failure(preview.error ?? 'The operation batch cannot execute', 'invalid_input')
+            changesHistory = call.input.dryRun !== true && preview.wouldChange === true
+          }
+          if (changesHistory) doc.editor.view.dispatch(closeHistory(doc.editor.state.tr))
           let expectedDoc = doc.editor.state.doc
           let expectedState = doc.stateVersion
           markDocSeen(doc.editor)

@@ -87,6 +87,7 @@ export const OPS_GUIDE = [
   '- "Turn blocks 2 to 4 into a numbered list" → ops: [{"op":"setList","target":{"blockIndexes":[2,3,4]},"kind":"number"}]',
   '- "Center all images" → ops: [{"op":"setImageProperties","target":{"nodeType":"image"},"align":"center"}]',
   '- "In block 5, change 8% to 9%" → ops: [{"op":"findReplace","find":"8%","replace":"9%","target":{"blockIndexes":[5]}}]',
+  '- findReplace defaults to exactly one literal match: zero or multiple matches reject the whole batch. It spans formatting runs in one paragraph and inherits match-start formatting; it cannot cross cells, paragraphs, fields, protected/deleted content, images or formulas. Read the target first. For intentional bulk replacement, set match:"all" with an explicit target (for example {scope:"document"}); matchCount/changeCount count occurrences, while matched/changed count blocks.',
   '- "Bold every TODO:" → ops: [{"op":"setMatchedFont","text":"TODO:","bold":true}]',
   '- "Turn all the red text back to normal" → ops: [{"op":"setMatchedFont","matchColor":"#FF0000","color":null}]  (read_blocks shows the red runs as <span style="color:#FF0000">; links and other colors are untouched)',
   '- "Make every 9 pt run 10.5 pt" → ops: [{"op":"setMatchedFont","matchFontSize":9,"fontSize":10.5}]',
