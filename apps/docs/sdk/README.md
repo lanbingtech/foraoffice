@@ -873,6 +873,23 @@ they do not depend on a particular host, agent or report template.
   are distinct from changing other sections' stored content. `{PAGE}` and
   `{NUMPAGES}` remain live fields after save/reopen. Per-line styling and picture
   relationships are preserved when cloning an existing part.
+  Each strip reports `textEditable` for whole-part replacement and lists
+  `textboxes: { index, text, editable, lifetime }[]` for individual targets.
+  An optional `textboxIndex` on `set_header_footer` edits only that container;
+  omit it to replace the part's advertised text scope. Indexes are zero-based
+  coordinates in the current part (`lifetime: "current-part"`), not persistent
+  IDs: refresh context after edits, reloads or part changes. Supported plain-text
+  DrawingML and VML textboxes are rewritten in their original containers,
+  preserving their anchors and compatible Choice/Fallback twins; replacement
+  and clear remove the old text and page fields without adding flow paragraphs.
+  `{PAGE}`, `{NUMPAGES}` and `{SECTIONPAGES}` remain live fields. Unsupported
+  structured textboxes (including tables, content controls, nested objects,
+  unmodelled fields or ambiguous compatibility groups) expose `editable: false`;
+  writes that include them fail before changing document state or first/even
+  visibility. A supported textbox can still be targeted independently of other
+  protected containers. Whole-part replacement refuses mixed drawing paragraphs
+  whose ordinary text cannot be rewritten faithfully. If original textbox
+  correspondence cannot be recovered, the whole part remains read-only.
 - Context and `read_blocks` list revision-bound `mediaRef` values corresponding
   to `doc:B.I` image ordinals. Pass `mediaRef` to `read_document_media`; results
   use standard MCP image content without exposing resource URLs or credentials.
