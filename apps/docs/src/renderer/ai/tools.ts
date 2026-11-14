@@ -98,6 +98,7 @@ export interface AiHeaderFooterAccess {
     text: string,
     section?: number,
     scope?: 'section' | 'shared',
+    textboxIndex?: number,
   ): string | null
 }
 
@@ -1410,10 +1411,23 @@ function executeSyncTool(
       if (text.length > 2000) {
         return fail(summaryOf(), 'text is too long for a header/footer (2000 characters max)')
       }
-      const error = hf.set(kind, view, text, section, scope)
+      const textboxIndex = call.input.textboxIndex
+      if (
+        textboxIndex !== undefined &&
+        (!Number.isInteger(textboxIndex) || Number(textboxIndex) < 0)
+      )
+        return fail(summaryOf(), 'textboxIndex must be a non-negative integer from current context')
+      const error = hf.set(
+        kind,
+        view,
+        text,
+        section,
+        scope,
+        textboxIndex === undefined ? undefined : Number(textboxIndex),
+      )
       if (error) return fail(summaryOf(), error)
       return {
-        output: `Updated section ${section} ${kind}${view !== 'default' ? ` (${view}-page variant)` : ''}; scope=${scope}; affected targets: ${JSON.stringify(affected)}. ${scope === 'section' ? 'Other sections retain their content; shared/inherited parts are isolated on save.' : 'All listed aliases of the owning part are affected.'}${view === 'even' ? ' Even/odd display is enabled document-wide.' : ''}`,
+        output: `Updated section ${section} ${kind}${view !== 'default' ? ` (${view}-page variant)` : ''}${textboxIndex === undefined ? '' : ` textbox ${textboxIndex}`}; scope=${scope}; affected targets: ${JSON.stringify(affected)}. ${scope === 'section' ? 'Other sections retain their content; shared/inherited parts are isolated on save.' : 'All listed aliases of the owning part are affected.'}${view === 'even' ? ' Even/odd display is enabled document-wide.' : ''}`,
         mutated: false, // app state only, saved with the document; not part of the PM doc
         summary: summaryOf(),
       }

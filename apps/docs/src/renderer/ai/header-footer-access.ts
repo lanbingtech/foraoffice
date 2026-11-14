@@ -1,6 +1,6 @@
 ﻿// Modified for ForaOffice: section-addressed header/footer access shared by every host.
 import type { AiHeaderFooterAccess } from './tools'
-import { applyHfText, hfEditText } from '../editor/hf-text'
+import { applyHfText, hfEditText, hfTextboxes } from '../editor/hf-text'
 import { editKey, resolveHf, withHfEdit, type HfKind, type HfSectionState } from '../hf-sections'
 import type { HfView } from '../doc-state'
 
@@ -44,10 +44,19 @@ export function createHeaderFooterAccess(bindings: {
           strips: kinds.flatMap((kind) =>
             views.map((view) => {
               const resolved = resolveHf(state, index, kind, view)
+              const textboxes = hfTextboxes(resolved.value)
               return {
                 kind,
                 view,
                 text: hfEditText(resolved.value ?? { text: '' }),
+                textEditable:
+                  !resolved.value?.textReadOnly &&
+                  textboxes.every((box) => box.editable) &&
+                  !resolved.value?.paras?.some(
+                    (para) =>
+                      para.textReadOnly || ((para.box || para.boxAnchored) && !para.textbox),
+                  ),
+                textboxes,
                 owner: resolved.owner,
                 inherited: resolved.owner !== index,
                 sharedWith: state.sections.flatMap((_, other) =>
@@ -66,13 +75,34 @@ export function createHeaderFooterAccess(bindings: {
         })),
       }
     },
-    set(kind, view, text, section = 0, scope = 'section') {
+    set(kind, view, text, section = 0, scope = 'section', textboxIndex) {
       if (bindings.locked()) return 'the document is read-only; headers/footers cannot be edited'
       const state = bindings.current()
       if (!Number.isInteger(section) || !state.sections[section])
         return `section ${section} does not exist`
       const current = resolveHf(state, section, kind, view).value
-      const next = applyHfText(current, text)
+      if (current?.textReadOnly)
+        return 'This header/footer has unsupported textbox correspondence and is read-only; no changes were made.'
+      const textboxes = hfTextboxes(current)
+      if (
+        textboxIndex !== undefined &&
+        (!Number.isInteger(textboxIndex) || !textboxes.some((box) => box.index === textboxIndex))
+      )
+        return 'The textboxIndex is not in the current part; read fresh header/footer context.'
+      if (
+        textboxes.some(
+          (box) => !box.editable && (textboxIndex === undefined || box.index === textboxIndex),
+        )
+      )
+        return 'This header/footer textbox has unsupported structured content and is read-only; no changes were made.'
+      if (
+        textboxIndex === undefined &&
+        current?.paras?.some(
+          (para) => para.textReadOnly || ((para.box || para.boxAnchored) && !para.textbox),
+        )
+      )
+        return 'This header/footer contains unmodelled text in a drawing paragraph; target a supported textbox or leave the part unchanged.'
+      const next = applyHfText(current, text, textboxIndex)
       if (scope === 'section' || current?.sectionOnly) next.sectionOnly = true
       if (view === 'first') {
         const error = bindings.enableFirst(section)

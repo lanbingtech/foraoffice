@@ -466,11 +466,17 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
       name: 'set_header_footer',
       description:
         'Set the page header or footer text (the current contents are listed in the message context). Plain text; \\n separates lines; the tokens {PAGE} and {NUMPAGES} become live page-number fields; an empty string clears the text. ' +
-        'Per-line alignment/styling and images are preserved. section is zero-based, default 0 for BOTH kinds. scope=section (default) isolates the target and preserves other sections, including inherited/shared parts; scope=shared edits the owning part and affects the sharedWith sections listed in context. view first enables titlePg for that section; even enables document-wide even/odd display.',
+        'Per-line alignment/styling and images are preserved. Supported textboxes are patched in their original containers, including compatibility twins; unsupported textbox structures are refused before editing. textboxIndex selects one zero-based textbox from the current strip context and expires when the part changes; omitted replaces all editable text lines. section is zero-based, default 0 for BOTH kinds. scope=section (default) isolates the target and preserves other sections, including inherited/shared parts; scope=shared edits the owning part and affects the sharedWith sections listed in context. view first enables titlePg for that section; even enables document-wide even/odd display.',
       inputSchema: {
         type: 'object',
         properties: {
           kind: { type: 'string', enum: ['header', 'footer'] },
+          textboxIndex: {
+            type: 'integer',
+            minimum: 0,
+            description:
+              'One textbox from fresh section/variant context; omitted edits all supported text lines.',
+          },
           section: {
             type: 'integer',
             minimum: 0,

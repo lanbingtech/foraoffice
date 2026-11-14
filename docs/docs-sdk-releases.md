@@ -22,6 +22,13 @@ breaking public contract change. Patch versions are intended for compatible
 fixes; document any unavoidable behavior change explicitly. Do not infer stable
 API guarantees from the current development version.
 
+The development `0.1.0` header/footer tools now support optional `textboxIndex`
+coordinates and report each textbox's current-part lifetime and editability.
+Supported replacements retain their original OOXML containers and compatibility
+twins. Previously accepted writes to unsupported structured textboxes now fail
+before mutation; consumers must refresh context and select an editable container
+or leave the part unchanged. Existing section/view/scope defaults are unchanged.
+
 Before a versioned delivery, update the Docs workspace version and any native
 package identity that represents that delivery, then record consumer-facing
 release notes in GitHub Releases or the delivery issue. Notes must identify:

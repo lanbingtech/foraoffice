@@ -711,6 +711,14 @@ export interface AiHfState {
       kind: 'header' | 'footer'
       view: 'default' | 'first' | 'even'
       text: string
+      /** Whether whole-part plain-text replacement is supported. */
+      textEditable?: boolean
+      textboxes?: Array<{
+        index: number
+        text: string
+        editable: boolean
+        lifetime: 'current-part'
+      }>
       owner: number
       inherited: boolean
       sharedWith: number[]
@@ -731,7 +739,7 @@ export interface AiHfState {
 function hfContextLines(hf: AiHfState): string[] {
   if (hf.sections)
     return [
-      "Headers & footers: zero-based section indexes, variants default/first/even. set_header_footer defaults to section 0 for BOTH kinds; scope=section isolates the chosen section, scope=shared changes every listed sharedWith section. first enables that section's titlePg; even enables document-wide even/odd display. {PAGE}/{NUMPAGES} remain live fields.",
+      "Headers & footers: zero-based section indexes, variants default/first/even. set_header_footer defaults to section 0 for BOTH kinds; scope=section isolates the chosen section, scope=shared changes every listed sharedWith section. Optional textboxIndex selects one editable textbox in the current part; refresh context when the part changes. first enables that section's titlePg; even enables document-wide even/odd display. {PAGE}/{NUMPAGES}/{SECTIONPAGES} remain live fields.",
       ...hf.sections.map(
         (section) =>
           `- section ${section.index} (titlePg=${section.titlePg}, evenOddHf=${hf.evenOddHf}): ${JSON.stringify(section.strips)}`,

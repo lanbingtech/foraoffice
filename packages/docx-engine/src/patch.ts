@@ -15,7 +15,9 @@ import {
   inlinePictureDrawingXml,
   NEW_PICTURE_TOKEN_PREFIX,
   patchTableCellTexts,
+  patchTextboxParas,
   type CellParaPatch,
+  type TextboxParaPatch,
 } from './generate'
 import {
   NOTE_CONTENT_TYPE,
@@ -2704,6 +2706,40 @@ function headerFooterPartXml(
     '<w:r><w:t>1</w:t></w:r>' +
     '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
   const totalMarksRe = new RegExp(`([${TOTAL_PAGES_MARK}${SECTION_PAGES_MARK}])`)
+  if (originalXml && hf.paras?.some((para) => para.textbox?.rewrite)) {
+    const byIndex: Array<Array<TextboxParaPatch | null>> = []
+    for (const para of hf.paras) {
+      if (!para.textbox?.rewrite) continue
+      const { index, paragraph } = para.textbox
+      const patches = (byIndex[index] ??= [])
+      while (patches.length <= paragraph) patches.push(null)
+      const runs = para.runs.flatMap((run): Run[] =>
+        run.text
+          .split(new RegExp(`([${PAGE_MARK}${TOTAL_PAGES_MARK}${SECTION_PAGES_MARK}])`))
+          .filter(Boolean)
+          .map((text) => {
+            const instrField =
+              text === PAGE_MARK
+                ? 'PAGE'
+                : text === TOTAL_PAGES_MARK
+                  ? 'NUMPAGES'
+                  : text === SECTION_PAGES_MARK
+                    ? 'SECTIONPAGES'
+                    : undefined
+            return instrField
+              ? {
+                  ...run,
+                  text:
+                    instrField === 'NUMPAGES' ? String(Math.max(1, Math.round(pageCount))) : '1',
+                  instrField,
+                }
+              : { ...run, text }
+          }),
+      )
+      patches[paragraph] = { runs }
+    }
+    originalXml = patchTextboxParas(originalXml, { byIndex })
+  }
   let content: string
   /** edited layout-table cells of the n-th top-level w:tbl (in part order), to patch into its bytes */
   let cellPatches: (tblIndex: number) => Array<Array<CellParaPatch[] | null> | null> | null = () =>
@@ -2767,7 +2803,11 @@ function headerFooterPartXml(
       // still-empty drawing-only lines are display-only: the part's original
       // drawing paragraph bytes are kept below. Text typed into such a line, or
       // a rebuild without the original part, is written out like any paragraph.
-      .filter((para) => !(para.lineOnly && originalXml && para.runs.length === 0))
+      .filter(
+        (para) =>
+          !originalXml ||
+          (!para.textbox && !para.textReadOnly && !(para.lineOnly && para.runs.length === 0)),
+      )
       .map((para) => {
         if (para.cells) return originalXml ? '' : rowParas(para)
         // the parsed format, not just w:jc: hand-building it here dropped w:bidi and wrote
