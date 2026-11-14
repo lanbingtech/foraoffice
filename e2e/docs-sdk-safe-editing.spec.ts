@@ -323,7 +323,6 @@ test('explicit section deletion updates live routing, undo and saved section own
       resolve(__dirname, '../apps/docs/tests/fixtures/foraoffice-header-textbox.docx'),
     ),
   )
-  const originalHeader = await fixture.file('word/header1.xml')!.async('string')
   const source = await fixture.file('word/document.xml')!.async('string')
   fixture.file(
     'word/document.xml',
@@ -399,6 +398,22 @@ test('explicit section deletion updates live routing, undo and saved section own
           input: { action: 'redo' },
         })
         const sectionsRedone = await query('sections-redone', { domain: 'sections' })
+        caller.context()
+        const routed = await caller.execute({
+          id: 'edit-routed-header',
+          name: 'set_header_footer',
+          input: {
+            kind: 'header',
+            section: 0,
+            textboxIndex: 0,
+            text: 'ROUTED_HEADER {PAGE}/{NUMPAGES}',
+          },
+        })
+        const headersRouted = await query('headers-routed', {
+          domain: 'headers',
+          type: 'textbox',
+          containsText: 'ROUTED_HEADER',
+        })
         const saved = await editor.documents.save()
         return {
           before,
@@ -414,6 +429,8 @@ test('explicit section deletion updates live routing, undo and saved section own
           headersUndone,
           redo,
           sectionsRedone,
+          routed,
+          headersRouted,
           saved,
           bytes: fixture.saved,
         }
@@ -438,6 +455,12 @@ test('explicit section deletion updates live routing, undo and saved section own
     expect(result.headersUndone.items[0].target.address?.section).toBe(1)
     expect(result.redo.isError).not.toBe(true)
     expect(result.sectionsRedone.items).toHaveLength(1)
+    expect(result.routed.isError).not.toBe(true)
+    expect(result.routed).toMatchObject({ committed: true, mutated: true })
+    expect(result.headersRouted.items).toHaveLength(1)
+    expect(result.headersRouted.items[0].target.address?.section).toBe(0)
+    expect(result.headersRouted.items[0].html).toContain('ROUTED_HEADER')
+    expect(result.headersRouted.items[0].html).not.toContain('OLD_HEADER')
     expect(result.saved).toBe(true)
 
     const saved = Uint8Array.from(result.bytes)
@@ -462,7 +485,10 @@ test('explicit section deletion updates live routing, undo and saved section own
       .flat()
       .find((rel) => rel.Id === reference['r:id']).Target
     const part = posix.normalize(target.startsWith('/') ? target.slice(1) : `word/${target}`)
-    expect(await zip.file(part)!.async('string')).toBe(originalHeader)
+    expect(part).toBe('word/header1.xml')
+    const header = await zip.file(part)!.async('string')
+    expect(header).toContain('ROUTED_HEADER')
+    expect(header).not.toContain('OLD_HEADER')
 
     const reopened = await page.evaluate(async () => {
       const { editor } = window as unknown as FixtureWindow
@@ -477,7 +503,7 @@ test('explicit section deletion updates live routing, undo and saved section own
         const headers = await caller.execute({
           id: 'reopened-headers',
           name: 'query_document',
-          input: { domain: 'headers', type: 'textbox', containsText: 'OLD_HEADER' },
+          input: { domain: 'headers', type: 'textbox', containsText: 'ROUTED_HEADER' },
         })
         if (sections.isError || headers.isError) throw new Error(sections.output + headers.output)
         return {
