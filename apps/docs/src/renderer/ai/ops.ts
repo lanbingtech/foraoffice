@@ -11,6 +11,8 @@ import { styleOpDefs, type AiStyleAccess } from './style-ops'
 import { fieldOpDefs } from './field-ops'
 import { tableOpDefs } from './table-ops'
 import { compileFind, findInDoc } from '../editor/find'
+import type { DocsEngineTarget } from '../../shared/document-query'
+import { inventoryStructures } from './structure-inventory'
 
 /**
  * Canonical edit ops for the document. The model (apply_ops) and, later, the
@@ -27,6 +29,7 @@ import { compileFind, findInDoc } from '../editor/find'
 
 /** All given conditions filter with AND; at least one condition is required */
 export interface Target {
+  engine?: DocsEngineTarget
   /** 'image' matches protected image blocks (docProtected + blockType image); 'table' matches native (editable) tables */
   nodeType?: 'docHeading' | 'docParagraph' | 'docListItem' | 'image' | 'table'
   /** Restrict heading level (only with nodeType: 'docHeading') */
@@ -80,6 +83,7 @@ export interface Op {
 }
 
 export interface OpContext {
+  engineEpoch?: { documentId: string; revision: number }
   /** numbering context so converted list items join real docx numbering on save */
   numIds?: { bullet: string | null; ordered: string | null } | null
   /** record the batch's changes as tracked revisions under this author */
@@ -105,6 +109,11 @@ export interface OpContext {
 const wantsAiMark = (ctx: OpContext): boolean => ctx.markAi ?? ctx.source !== 'ui'
 
 export interface OpResult {
+  structuralEffects?: Array<{
+    reference: string
+    kind: string
+    effect: 'removed' | 'marked-for-deletion'
+  }>
   op: string
   matched: number
   changed: number
@@ -118,6 +127,7 @@ export interface OpResult {
 }
 
 export interface ExecuteOutcome {
+  previewResults?: OpResult[]
   ok: boolean
   results: OpResult[]
   summary: string
@@ -240,6 +250,7 @@ function validateTarget(target: unknown, where: string): string | null {
     }
   }
   const hasCondition =
+    tg.engine !== undefined ||
     tg.nodeType !== undefined ||
     tg.headingLevel !== undefined ||
     typeof tg.containsText === 'string' ||
@@ -265,7 +276,7 @@ function validateShape(op: Op, def: OpDef, where: string): string | null {
     if (error) return error
   }
   const unknown = Object.keys(op).filter(
-    (k) => k !== 'op' && k !== 'target' && !def.keys.includes(k),
+    (k) => k !== 'op' && k !== 'target' && k !== 'deleteStructures' && !def.keys.includes(k),
   )
   if (unknown.length > 0) {
     return `${where}: unknown field(s) ${unknown.join(', ')}; allowed: ${def.keys.join(', ')}`
@@ -1718,7 +1729,11 @@ export function executeOps(editor: Editor, ops: unknown, ctx: OpContext = {}): E
       errors.push(`${where}: must be an object with an "op" name field`)
       return
     }
-    const op = raw as Op
+    const input = raw as Op
+    const op =
+      input.op === 'setTableCellText' && input.range === undefined && input.target?.engine?.cell
+        ? { ...input, range: input.target.engine.cell }
+        : input
     const def = REGISTRY.get(op.op)
     if (!def || (def.hidden && ctx.source !== 'ui')) {
       errors.push(`${where}: unknown op "${op.op}". Supported ops: [${opNames().join(', ')}]`)
@@ -1743,12 +1758,106 @@ export function executeOps(editor: Editor, ops: unknown, ctx: OpContext = {}): E
   const results: OpResult[] = []
   try {
     for (const [op, def] of planned) {
+      let resolved = op
+      let mappedIntent: string[] | undefined
+      if (op.deleteStructures !== undefined) {
+        if (
+          !Array.isArray(op.deleteStructures) ||
+          op.deleteStructures.some((id) => typeof id !== 'string')
+        )
+          throw new Error('deleteStructures must contain exact structure references')
+        const originalStructures = inventoryStructures(tr.before)
+        mappedIntent = op.deleteStructures.map((id: string) => {
+          const original = originalStructures.find((item) => item.id === id)
+          if (!original)
+            throw new Error('Structure reference is not present in the initial document')
+          const from = tr.mapping.mapResult(original.from, 1)
+          const to = tr.mapping.mapResult(original.to, -1)
+          if (from.deletedAcross || to.deletedAcross || from.pos >= to.pos)
+            throw new Error('Structure reference was removed by an earlier operation')
+          return `${original.kind}:${from.pos}:${to.pos}`
+        })
+      }
+      if (op.target?.engine) {
+        const target = op.target.engine
+        if ((target.cell || target.kind === 'cell') && op.op !== 'setTableCellText')
+          throw new Error(
+            'Cell targets support setTableCellText only; query a block target for structural operations.',
+          )
+        if (target.address || (target.kind && target.kind !== 'block' && target.kind !== 'cell'))
+          throw new Error('This target kind does not support apply_ops')
+        const epoch = ctx.engineEpoch
+        if (!epoch || target.documentId !== epoch.documentId || target.revision !== epoch.revision)
+          throw new Error('Stale engine target; use query_document for a fresh target.')
+        const range = target.range
+        if (
+          !range ||
+          !Number.isSafeInteger(range.from) ||
+          !Number.isSafeInteger(range.to) ||
+          range.from < 0 ||
+          range.to > tr.before.content.size ||
+          range.from >= range.to
+        )
+          throw new Error('Invalid engine target range')
+        const original = tr.before.nodeAt(range.from)
+        if (
+          !original ||
+          original.type.name !== target.expectedType ||
+          range.to !== range.from + original.nodeSize
+        )
+          throw new Error('Engine target type or extent does not match the document')
+        const from = tr.mapping.mapResult(range.from, 1)
+        const to = tr.mapping.mapResult(range.to, -1)
+        if (from.deletedAcross || to.deletedAcross || from.pos >= to.pos)
+          throw new Error('Engine target was removed by an earlier operation')
+        const current = tr.doc.nodeAt(from.pos)
+        if (
+          !current ||
+          current.type.name !== target.expectedType ||
+          current.nodeSize !== to.pos - from.pos
+        )
+          throw new Error('Engine target no longer resolves to its expected object')
+        resolved = { ...op, target: { ...op.target, range: { from: from.pos, to: to.pos } } }
+      }
       // selection positions mapped through the steps applied so far
       const sel: SelRange = {
         from: tr.mapping.map(selection.from),
         to: tr.mapping.map(selection.to),
       }
-      results.push(def.apply(op, { tr, schema, sel, ctx, editor }))
+      const structures = ctx.source === 'ui' ? [] : inventoryStructures(tr.doc)
+      const stepStart = tr.steps.length
+      const result = def.apply(resolved, { tr, schema, sel, ctx, editor })
+      if (ctx.source !== 'ui') {
+        const after = inventoryStructures(tr.doc)
+        const mapping = tr.mapping.slice(stepStart)
+        const removed =
+          op.op === 'moveBlocks'
+            ? []
+            : structures.filter((item) => {
+                const from = mapping.mapResult(item.from, 1)
+                const to = mapping.mapResult(item.to, -1)
+                return (
+                  from.deletedAcross ||
+                  to.deletedAcross ||
+                  !after.some(
+                    (next) =>
+                      next.kind === item.kind && next.from === from.pos && next.to === to.pos,
+                  )
+                )
+              })
+        const actual = removed.map((item) => item.id).sort()
+        if (JSON.stringify([...(mappedIntent ?? [])].sort()) !== JSON.stringify(actual))
+          throw new Error(
+            'This operation would delete protected structures without exact deleteStructures intent. Query the current targets and declare the exact structures to delete.',
+          )
+        if (removed.length)
+          result.structuralEffects = removed.map((item) => ({
+            reference: (op.deleteStructures as string[])[mappedIntent!.indexOf(item.id)],
+            kind: item.kind,
+            effect: ctx.track ? 'marked-for-deletion' : 'removed',
+          }))
+      }
+      results.push(result)
     }
   } catch (e) {
     return failure(e instanceof Error ? e.message : String(e))
@@ -1757,7 +1866,14 @@ export function executeOps(editor: Editor, ops: unknown, ctx: OpContext = {}): E
   // Build the complete transaction even for a preview: schema and target checks
   // must agree with execution, but no document or history state is dispatched.
   if (ctx.dryRun)
-    return { ok: true, results: [], summary: '', plan, wouldChange: !tr.doc.eq(editor.state.doc) }
+    return {
+      ok: true,
+      results: [],
+      previewResults: results,
+      summary: '',
+      plan,
+      wouldChange: !tr.doc.eq(editor.state.doc),
+    }
 
   if (tr.steps.length > 0) {
     // intent record for consumers downstream of the Step stream (journal, analytics)

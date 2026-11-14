@@ -14,6 +14,7 @@ import {
 import { DOCS_IMAGE_SOURCE_SCHEMA } from './media-policy'
 
 export const DOCS_READ_TOOLS = new Set([
+  'query_document',
   'read_attachment',
   'search_knowledge_base',
   'read_knowledge_file',
@@ -88,6 +89,12 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
       inputSchema: {
         type: 'object',
         properties: {
+          deleteStructures: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Exact revision-bound structure IDs from query_document that this replacement intentionally removes.',
+          },
           startBlockIndex: {
             type: 'integer',
             description: 'start block index (0-based, inclusive)',
@@ -109,6 +116,12 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
       inputSchema: {
         type: 'object',
         properties: {
+          deleteStructures: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Exact revision-bound structure IDs from query_document that this replacement intentionally removes.',
+          },
           html: {
             type: 'string',
             description:
@@ -471,6 +484,10 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
         type: 'object',
         properties: {
           kind: { type: 'string', enum: ['header', 'footer'] },
+          engineTarget: {
+            type: 'object',
+            description: 'Revision-bound header/footer/textbox target from query_document.',
+          },
           textboxIndex: {
             type: 'integer',
             minimum: 0,
@@ -498,7 +515,8 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
             description: 'which variant to write (default when omitted)',
           },
         },
-        required: ['kind', 'text'],
+        required: ['text'],
+        anyOf: [{ required: ['kind'] }, { required: ['engineTarget'] }],
       },
     },
     PAGE_SETUP_TOOL,

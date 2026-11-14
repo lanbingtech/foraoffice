@@ -5,7 +5,8 @@ import { docsToolCatalog, DOCS_READ_TOOLS } from '../shared/tool-catalog'
 import { DOCS_RUNTIME_TOOLS } from '../shared/runtime-tools'
 import { DOCS_RESOURCE_TOOLS } from '../shared/resource-tools'
 import type { McpCommandMessage } from '../shared/ipc'
-import { DocsOperationError } from '../shared/operation-result'
+import { DocsOperationError, isDocsOperationResult } from '../shared/operation-result'
+import type { DocsQueryResult } from '../shared/document-query'
 import { formatDocsMcpResult } from '../shared/mcp-result'
 import type { AgentToolDef } from '@genoffice/agent-core'
 
@@ -81,6 +82,32 @@ export function createDocsMcpServer(options: DocsMcpServerOptions): McpServer {
             },
             AbortSignal.any([extra.signal, lifetime.signal]),
           )
+          if (options.readOnly && isDocsOperationResult(result) && !result.isError) {
+            if (tool.name === 'query_document') {
+              const query = JSON.parse(result.output) as DocsQueryResult
+              for (const item of query.items)
+                item.supportedOperations = item.supportedOperations.filter((name) =>
+                  DOCS_READ_TOOLS.has(name),
+                )
+              return formatDocsMcpResult({ ...result, output: JSON.stringify(query) }, tool.name)
+            }
+            if (tool.name === 'get_editor_capabilities') {
+              const capabilities = JSON.parse(result.output) as {
+                editable: boolean
+                operations: unknown[]
+                tools: Array<{ name: string }>
+              }
+              capabilities.editable = false
+              capabilities.operations = []
+              capabilities.tools = capabilities.tools.filter((entry) =>
+                DOCS_READ_TOOLS.has(entry.name),
+              )
+              return formatDocsMcpResult(
+                { ...result, output: JSON.stringify(capabilities) },
+                tool.name,
+              )
+            }
+          }
           return formatDocsMcpResult(result, tool.name)
         } catch (error) {
           if (error instanceof DocsOperationError) return formatDocsMcpResult(error.result)
