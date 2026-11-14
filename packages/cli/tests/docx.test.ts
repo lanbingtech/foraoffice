@@ -1118,10 +1118,10 @@ describe('genoffice docs: comments, revisions, header/footer, images, charts', (
       ops,
       JSON.stringify([
         {
-          op: 'replace_blocks',
-          startBlockIndex: 1,
-          endBlockIndex: 1,
-          html: '<p>Part one ends here</p>',
+          op: 'findReplace',
+          target: { blockIndexes: [1] },
+          find: 'Last line of part one',
+          replace: 'Part one ends here',
         },
         { op: 'set_page_setup', section: 0, orientation: 'landscape' },
       ]),

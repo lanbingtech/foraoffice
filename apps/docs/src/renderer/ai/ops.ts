@@ -2,6 +2,7 @@ import { checkPlaceholders, placeholderSource, REDACT_MARK } from './redact'
 import type { Editor } from '@tiptap/core'
 import type { Node as PmDocNode, Schema } from '@tiptap/pm/model'
 import type { Transaction } from '@tiptap/pm/state'
+import { TableMap } from '@tiptap/pm/tables'
 import { generateTocFieldXml, type TabStop, type TocEntry } from '@genoffice/docx-engine'
 import { isEastAsianFontName } from '../font-list'
 import { t } from '../i18n/locale'
@@ -1818,6 +1819,48 @@ export function executeOps(editor: Editor, ops: unknown, ctx: OpContext = {}): E
         )
           throw new Error('Engine target no longer resolves to its expected object')
         resolved = { ...op, target: { ...op.target, range: { from: from.pos, to: to.pos } } }
+        if (target.cell) {
+          const originalMap = TableMap.get(original)
+          const { row, col } = target.cell
+          if (
+            !Number.isInteger(row) ||
+            !Number.isInteger(col) ||
+            row < 0 ||
+            col < 0 ||
+            row >= originalMap.height ||
+            col >= originalMap.width
+          )
+            throw new Error('Invalid engine cell address')
+          const owner = originalMap.map[row * originalMap.width + col]
+          const explicit = op.range as {
+            row: number
+            col: number
+            rowEnd?: number
+            colEnd?: number
+          }
+          if (
+            (explicit.rowEnd ?? explicit.row) < explicit.row ||
+            (explicit.colEnd ?? explicit.col) < explicit.col
+          )
+            throw new Error('Explicit cell range is reversed')
+          for (let r = explicit.row; r <= (explicit.rowEnd ?? explicit.row); r++)
+            for (let c = explicit.col; c <= (explicit.colEnd ?? explicit.col); c++)
+              if (
+                r >= originalMap.height ||
+                c >= originalMap.width ||
+                originalMap.map[r * originalMap.width + c] !== owner
+              )
+                throw new Error(
+                  'Explicit cell range disagrees with or widens the engine cell target',
+                )
+          const mappedOwner = tr.mapping.mapResult(range.from + 1 + owner, 1)
+          const currentMap = TableMap.get(current)
+          const relative = mappedOwner.pos - from.pos - 1
+          if (mappedOwner.deleted || !currentMap.map.includes(relative))
+            throw new Error('The targeted physical cell was removed by an earlier operation')
+          const rect = currentMap.findCell(relative)
+          resolved.range = { row: rect.top, col: rect.left }
+        }
       }
       // selection positions mapped through the steps applied so far
       const sel: SelRange = {

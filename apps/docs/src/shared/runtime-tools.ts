@@ -65,7 +65,7 @@ export const DOCS_RUNTIME_TOOLS: AgentToolDef[] = [
   {
     name: 'start_document_draft',
     description:
-      'Start a visible, unaccepted draft. The external Harness supplies cumulative HTML updates; the editor performs no inference.',
+      'Start a visible, unaccepted draft and capture its runtime-owned referenceSnapshot. Read full context and references first. replaceDocument selects the landing position; structural deletion still requires exact deleteStructures on each cumulative update. The external Harness supplies HTML; the editor performs no inference.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -83,13 +83,19 @@ export const DOCS_RUNTIME_TOOLS: AgentToolDef[] = [
   {
     name: 'update_document_draft',
     description:
-      'Update a draft with cumulative restricted HTML and an increasing sequence number. Replays must have identical content.',
+      'Update a draft with cumulative restricted HTML and an increasing sequence number. Replays must have identical content and deletion intent. Complete image references and structural effects are checked before preview; image/structure references bind to the draft referenceSnapshot while its authored source remains unchanged. Incomplete image tokens buffer without publishing; inspect validatedSequence/buffering. New images use insert_picture.',
     inputSchema: {
       type: 'object',
       properties: {
         draftId: { type: 'string' },
         sequence: { type: 'integer', minimum: 1 },
         html: { type: 'string', maxLength: 200_000 },
+        deleteStructures: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Exact removed structure references from the runtime-owned draft referenceSnapshot. Required for whole-document structural deletion; preserved images/compatible tables are excluded.',
+        },
       },
       required: ['draftId', 'sequence', 'html'],
     },
@@ -116,7 +122,7 @@ export const DOCS_RUNTIME_TOOLS: AgentToolDef[] = [
   {
     name: 'finish_document_draft',
     description:
-      'Finalize, retain incomplete content, or discard a stopped or streaming draft. Committed content uses normal tracking and undo.',
+      'Finalize, retain an identified validated prefix, or discard a draft. Reference/deletion drafts refuse after captured body or authored-side state changes; discard and read fresh context to restart. Incomplete HTML cannot finalize; retain_partial reports omittedTail and validatedSequence when retaining an earlier validated snapshot. Committed content uses normal tracking and undo.',
     inputSchema: {
       type: 'object',
       properties: {

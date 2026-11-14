@@ -1431,6 +1431,23 @@ export function inlineImageEntriesOf(
   return out
 }
 
+/** Exact source occurrence IDs retained by writable inline-image references. */
+export function preservedImageStructureIds(
+  doc: ProseMirrorNode,
+  kept: Array<{ block: number; index: number }>,
+): string[] {
+  const result: string[] = []
+  doc.forEach((block, pos, index) => {
+    const images = inlineImageEntriesOf(block)
+    for (const reference of kept.filter((reference) => reference.block === index)) {
+      const image = images[reference.index]
+      if (image)
+        result.push(`image:${pos + 1 + image.from}:${pos + 1 + image.from + image.node.nodeSize}`)
+    }
+  })
+  return result
+}
+
 /** Visible images in the same order as the restricted-HTML image references. */
 export function documentImagesOf(block: ProseMirrorNode): ProseMirrorNode[] {
   if (
@@ -1451,13 +1468,13 @@ export function documentImagesOf(block: ProseMirrorNode): ProseMirrorNode[] {
  * pictures of the replaced range survive.
  */
 export function resolveImageRefs(
-  editor: Editor,
+  editor: Editor | ProseMirrorNode,
   nodes: PmNode[],
   html?: string,
 ): { nodes: PmNode[]; kept: Array<{ block: number; index: number }>; unresolved: number } {
   const kept: Array<{ block: number; index: number }> = []
   let unresolved = 0
-  const doc = editor.state.doc
+  const doc = 'state' in editor ? editor.state.doc : editor
   const visit = (list: PmNode[]): PmNode[] =>
     list.flatMap((n) => {
       if (n.type === IMAGE_REF_NODE) {
@@ -1635,13 +1652,13 @@ const TRACKABLE_TYPES = new Set(['docParagraph', 'docHeading', 'docListItem'])
  * pass false.
  */
 export function inheritBlockFormatting(
-  editor: Editor,
+  editor: Editor | ProseMirrorNode,
   startIndex: number,
   endIndex: number,
   nodes: PmNode[],
   anchors: boolean,
 ): PmNode[] {
-  const doc = editor.state.doc
+  const doc = 'state' in editor ? editor.state.doc : editor
   const templates: Array<{ node: ProseMirrorNode; at: number }> = []
   const tables: Array<{ node: ProseMirrorNode; at: number }> = []
   for (let i = startIndex; i <= Math.min(endIndex, doc.childCount - 1); i++) {

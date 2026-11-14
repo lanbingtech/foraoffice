@@ -58,7 +58,7 @@ import {
   buildRevisionsContext,
   insertBlocksAfter,
   inheritBlockFormatting,
-  inlineImageEntriesOf,
+  preservedImageStructureIds,
   isBlankDocument,
   isTrackedDeleted,
   liveInlineRanges,
@@ -277,17 +277,7 @@ function preservedImageStructures(
   editor: Editor,
   kept: Array<{ block: number; index: number }>,
 ): string[] {
-  const result: string[] = []
-  editor.state.doc.forEach((block, pos, index) => {
-    const images = inlineImageEntriesOf(block)
-    const requested = kept.filter((reference) => reference.block === index)
-    for (const reference of requested) {
-      const image = images[reference.index]
-      if (image)
-        result.push(`image:${pos + 1 + image.from}:${pos + 1 + image.from + image.node.nodeSize}`)
-    }
-  })
-  return result
+  return preservedImageStructureIds(editor.state.doc, kept)
 }
 
 /** Pure refusal preflight, also called by the runtime before opening an undo group. */
