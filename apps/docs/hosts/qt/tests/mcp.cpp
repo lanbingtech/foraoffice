@@ -209,9 +209,11 @@ private slots:
         QCOMPARE(stale.value("receipt").toObject().value("outcome").toString(), QStringLiteral("rejected"));
         QCOMPARE(sdk(*editor, "snapshot").value("result"), beforeStale);
         const auto edited = callLiveTool("read_document", {});
-        QVERIFY(edited.value("output").toString().contains("Queried Agent edit"));
-        QVERIFY(!edited.value("output").toString().contains("Unsaved Agent edit"));
-        QVERIFY(!edited.value("output").toString().contains("STALE_EDIT_MUST_NOT_APPEAR"));
+        QVERIFY2(edited.value("text").isString(), qPrintable(QString::fromUtf8(QJsonDocument(edited).toJson())));
+        const auto editedText = edited.value("text").toString();
+        QVERIFY(editedText.contains("Queried Agent edit"));
+        QVERIFY(!editedText.contains("Unsaved Agent edit"));
+        QVERIFY(!editedText.contains("STALE_EDIT_MUST_NOT_APPEAR"));
         // Embedded images must be readable through the public MCP transport, not only displayed.
         const QString png = QStringLiteral("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=");
         const auto picture = rpc(connection, "tools/call", {{"name", "insert_picture"}, {"arguments", QJsonObject{{"url", "data:image/png;base64," + png}, {"afterBlockIndex", 0}}}}, session);
