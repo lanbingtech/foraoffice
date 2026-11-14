@@ -6,6 +6,7 @@ import { extname, posix, resolve, sep } from 'node:path'
 import JSZip from 'jszip'
 import { XMLParser } from 'fast-xml-parser'
 import type { DocsEditorHandle } from '../apps/docs/src/renderer/embedded'
+import type { DocsQueryResult } from '../apps/docs/src/shared/document-query'
 import { launchSdkTestHost, sdkHostIsElectron, type SdkTestHost } from './sdk-host'
 
 type FixtureWindow = Window & {
@@ -14,7 +15,7 @@ type FixtureWindow = Window & {
   fixture: { saved: number[]; saves: number }
 }
 
-test('mounted SDK refuses an invalid image and saves header edits in their original containers', async () => {
+test('mounted SDK validates queried edits and saves body and header effects in their original containers', async () => {
   test.setTimeout(120_000)
   const original = await readFile(
     resolve(__dirname, '../apps/docs/tests/fixtures/foraoffice-header-textbox.docx'),
@@ -100,6 +101,67 @@ test('mounted SDK refuses an invalid image and saves header edits in their origi
         })
         const afterRefusal = caller.context()
         const dirtyAfterRefusal = editor.documents.state()!.dirty
+        const query = await caller.execute({
+          id: 'query-body',
+          name: 'query_document',
+          input: { containsText: 'HEADER FIXTURE', limit: 1 },
+        })
+        if (query.isError) throw new Error(query.output)
+        const queried: DocsQueryResult = JSON.parse(query.output)
+        if (queried.items.length !== 1) throw new Error('Expected one body target')
+        const target = queried.items[0].target
+        const applied = await caller.execute({
+          id: 'edit-queried-body',
+          name: 'apply_ops',
+          input: {
+            ops: [
+              {
+                op: 'findReplace',
+                target: { engine: target },
+                find: 'HEADER FIXTURE',
+                replace: 'QUERY EDIT',
+              },
+            ],
+          },
+        })
+        const refreshed = await caller.execute({
+          id: 'query-edited-body',
+          name: 'query_document',
+          input: { containsText: 'QUERY EDIT', limit: 1 },
+        })
+        if (refreshed.isError) throw new Error(refreshed.output)
+        const current: DocsQueryResult = JSON.parse(refreshed.output)
+        if (current.items.length !== 1) throw new Error('Expected the edited body target')
+        const noOp = await caller.execute({
+          id: 'unchanged-queried-body',
+          name: 'apply_ops',
+          input: {
+            ops: [
+              {
+                op: 'findReplace',
+                target: { engine: current.items[0].target },
+                find: 'QUERY EDIT',
+                replace: 'QUERY EDIT',
+              },
+            ],
+          },
+        })
+        const beforeStale = caller.context()
+        const stale = await caller.execute({
+          id: 'expired-body-target',
+          name: 'apply_ops',
+          input: {
+            ops: [
+              {
+                op: 'findReplace',
+                target: { engine: target },
+                find: 'HEADER FIXTURE',
+                replace: 'STALE_EDIT_MUST_NOT_APPEAR',
+              },
+            ],
+          },
+        })
+        const afterStale = caller.context()
         const header = await caller.execute({
           id: 'header',
           name: 'set_header_footer',
@@ -117,6 +179,13 @@ test('mounted SDK refuses an invalid image and saves header edits in their origi
           afterRefusal,
           dirtyBefore,
           dirtyAfterRefusal,
+          queried,
+          applied,
+          current,
+          noOp,
+          beforeStale,
+          stale,
+          afterStale,
           header,
           saved,
           state: editor.documents.state(),
@@ -139,6 +208,44 @@ test('mounted SDK refuses an invalid image and saves header edits in their origi
     expect(result.afterRefusal).toEqual(result.before)
     expect(result.dirtyBefore).toBe(false)
     expect(result.dirtyAfterRefusal).toBe(false)
+    expect(result.queried.page.complete).toBe(true)
+    expect(result.queried.items[0].supportedOperations).toContain('findReplace')
+    expect(result.applied).toMatchObject({
+      committed: true,
+      mutated: true,
+      matchCount: 1,
+      changeCount: 1,
+      receipt: {
+        outcome: 'applied',
+        revisionBefore: result.queried.revision,
+        persistence: 'pending',
+      },
+    })
+    expect(result.applied.isError).not.toBe(true)
+    expect(result.applied.revision).toBeGreaterThan(result.queried.revision)
+    expect(result.noOp).toMatchObject({
+      committed: false,
+      mutated: false,
+      matchCount: 1,
+      changeCount: 0,
+      revision: result.current.revision,
+      receipt: {
+        outcome: 'no-op',
+        revisionBefore: result.current.revision,
+        revisionAfter: result.current.revision,
+        persistence: 'unchanged',
+      },
+    })
+    expect(result.noOp.isError).not.toBe(true)
+    expect(result.stale).toMatchObject({
+      isError: true,
+      errorCode: 'stale_target',
+      committed: false,
+      mutated: false,
+      revision: result.current.revision,
+      receipt: { outcome: 'rejected' },
+    })
+    expect(result.afterStale).toEqual(result.beforeStale)
     expect(result.header).toMatchObject({ committed: true })
     expect(result.header.isError).not.toBe(true)
     expect(result.saved).toBe(true)
@@ -149,7 +256,9 @@ test('mounted SDK refuses an invalid image and saves header edits in their origi
     await writeFile(test.info().outputPath('hosted-safe.docx'), saved)
     const zip = await JSZip.loadAsync(saved)
     const body = await zip.file('word/document.xml')!.async('string')
-    expect(body).toContain('HEADER FIXTURE')
+    expect(body).toContain('QUERY EDIT')
+    expect(body).not.toContain('HEADER FIXTURE')
+    expect(body).not.toContain('STALE_EDIT_MUST_NOT_APPEAR')
     expect(body).not.toContain('INVALID_IMAGE_MUST_NOT_APPEAR')
     const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '' })
     const section = parser.parse(body)['w:document']['w:body']['w:sectPr']
@@ -190,7 +299,9 @@ test('mounted SDK refuses an invalid image and saves header edits in their origi
     expect(reopened.context.documentId).not.toBe(result.before.documentId)
     expect(reopened.context.text).toContain('SAFE_HEADER {PAGE} / {NUMPAGES}')
     expect(reopened.context.text).not.toContain('OLD_HEADER')
-    expect(reopened.body).toContain('HEADER FIXTURE')
+    expect(reopened.body).toContain('QUERY EDIT')
+    expect(reopened.body).not.toContain('HEADER FIXTURE')
+    expect(reopened.body).not.toContain('STALE_EDIT_MUST_NOT_APPEAR')
     expect(reopened.body).not.toContain('INVALID_IMAGE_MUST_NOT_APPEAR')
     expect(errors).toEqual([])
   } finally {

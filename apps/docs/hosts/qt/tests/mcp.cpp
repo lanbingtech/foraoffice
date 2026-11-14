@@ -122,12 +122,15 @@ private slots:
         QVERIFY(!readSession.isEmpty());
         const auto readTools = rpc(readConnection, "tools/list", {}, readSession).body.value("result").toObject().value("tools").toArray();
         bool hasRead = false;
+        bool hasQuery = false;
         for (const auto& tool : readTools) {
             const auto name = tool.toObject().value("name").toString();
             hasRead |= name == "read_document";
+            hasQuery |= name == "query_document";
             QVERIFY(name != "apply_ops" && name != "save_document" && name != "run_cli");
         }
         QVERIFY(hasRead);
+        QVERIFY(hasQuery);
         const auto forbiddenWrite = rpc(readConnection, "tools/call", {{"name", "insert_content"},
             {"arguments", QJsonObject{{"html", "<p>FORBIDDEN READ GRANT WRITE</p>"}}}}, readSession);
         QVERIFY(forbiddenWrite.body.contains("error") || forbiddenWrite.body.value("result").toObject().value("isError").toBool());
@@ -153,6 +156,62 @@ private slots:
         QVERIFY(sdk(*editor, "documents.state").value("result").toObject().value("dirty").toBool());
         const auto read = rpc(connection, "tools/call", {{"name", "read_document"}}, session);
         QVERIFY(QJsonDocument(read.body).toJson().contains("Unsaved Agent edit"));
+        const auto query = rpc(readConnection, "tools/call", {{"name", "query_document"},
+            {"arguments", QJsonObject{{"containsText", "Unsaved Agent edit"}, {"limit", 1}}}}, readSession);
+        const auto queryResult = query.body.value("result").toObject().value("structuredContent").toObject();
+        QVERIFY2(!queryResult.value("isError").toBool(), qPrintable(QString::fromUtf8(QJsonDocument(query.body).toJson())));
+        const auto queried = QJsonDocument::fromJson(queryResult.value("output").toString().toUtf8()).object();
+        QCOMPARE(queried.value("items").toArray().size(), 1);
+        QVERIFY(queried.value("page").toObject().value("complete").toBool());
+        const auto target = queried.value("items").toArray().first().toObject().value("target").toObject();
+        const auto callLiveTool = [&](const QString& name, const QJsonObject& arguments) {
+            return rpc(connection, "tools/call", {{"name", name}, {"arguments", arguments}}, session)
+                .body.value("result").toObject().value("structuredContent").toObject();
+        };
+        const auto applied = callLiveTool("apply_ops", {{"ops", QJsonArray{QJsonObject{
+            {"op", "findReplace"}, {"target", QJsonObject{{"engine", target}}},
+            {"find", "Unsaved Agent edit"}, {"replace", "Queried Agent edit"}}}}});
+        QVERIFY2(!applied.value("isError").toBool(), qPrintable(QString::fromUtf8(QJsonDocument(applied).toJson())));
+        QVERIFY(applied.value("committed").toBool());
+        QVERIFY(applied.value("mutated").toBool());
+        QCOMPARE(applied.value("matchCount").toInt(), 1);
+        QCOMPARE(applied.value("changeCount").toInt(), 1);
+        QCOMPARE(applied.value("receipt").toObject().value("outcome").toString(), QStringLiteral("applied"));
+        QCOMPARE(applied.value("receipt").toObject().value("persistence").toString(), QStringLiteral("pending"));
+        QVERIFY(applied.value("revision").toDouble() > queried.value("revision").toDouble());
+        const auto refreshed = callLiveTool("query_document", {{"containsText", "Queried Agent edit"}, {"limit", 1}});
+        const auto current = QJsonDocument::fromJson(refreshed.value("output").toString().toUtf8()).object();
+        QCOMPARE(current.value("items").toArray().size(), 1);
+        const auto currentTarget = current.value("items").toArray().first().toObject().value("target").toObject();
+        const auto noOp = callLiveTool("apply_ops", {{"ops", QJsonArray{QJsonObject{
+            {"op", "findReplace"}, {"target", QJsonObject{{"engine", currentTarget}}},
+            {"find", "Queried Agent edit"}, {"replace", "Queried Agent edit"}}}}});
+        QVERIFY(!noOp.value("isError").toBool());
+        QVERIFY(!noOp.value("committed").toBool());
+        QVERIFY(!noOp.value("mutated").toBool());
+        QCOMPARE(noOp.value("matchCount").toInt(), 1);
+        QCOMPARE(noOp.value("changeCount").toInt(), 0);
+        QCOMPARE(noOp.value("revision"), current.value("revision"));
+        const auto noOpReceipt = noOp.value("receipt").toObject();
+        QCOMPARE(noOpReceipt.value("outcome").toString(), QStringLiteral("no-op"));
+        QCOMPARE(noOpReceipt.value("revisionBefore"), current.value("revision"));
+        QCOMPARE(noOpReceipt.value("revisionAfter"), current.value("revision"));
+        QCOMPARE(noOpReceipt.value("persistence").toString(), QStringLiteral("unchanged"));
+        const auto beforeStale = sdk(*editor, "snapshot").value("result");
+        const auto stale = callLiveTool("apply_ops", {{"ops", QJsonArray{QJsonObject{
+            {"op", "findReplace"}, {"target", QJsonObject{{"engine", target}}},
+            {"find", "Unsaved Agent edit"}, {"replace", "STALE_EDIT_MUST_NOT_APPEAR"}}}}});
+        QVERIFY(stale.value("isError").toBool());
+        QCOMPARE(stale.value("errorCode").toString(), QStringLiteral("stale_target"));
+        QVERIFY(!stale.value("committed").toBool());
+        QVERIFY(!stale.value("mutated").toBool());
+        QCOMPARE(stale.value("revision"), current.value("revision"));
+        QCOMPARE(stale.value("receipt").toObject().value("outcome").toString(), QStringLiteral("rejected"));
+        QCOMPARE(sdk(*editor, "snapshot").value("result"), beforeStale);
+        const auto edited = callLiveTool("read_document", {});
+        QVERIFY(edited.value("output").toString().contains("Queried Agent edit"));
+        QVERIFY(!edited.value("output").toString().contains("Unsaved Agent edit"));
+        QVERIFY(!edited.value("output").toString().contains("STALE_EDIT_MUST_NOT_APPEAR"));
         // Embedded images must be readable through the public MCP transport, not only displayed.
         const QString png = QStringLiteral("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=");
         const auto picture = rpc(connection, "tools/call", {{"name", "insert_picture"}, {"arguments", QJsonObject{{"url", "data:image/png;base64," + png}, {"afterBlockIndex", 0}}}}, session);
