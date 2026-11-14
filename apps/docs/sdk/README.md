@@ -993,3 +993,106 @@ are refused as a whole. Use a
 narrower supported text operation when appropriate; removing structure requires
 its separate explicit operation. This is an additive operation: existing table
 row/column/format operations keep their contracts.
+
+### Revision-bound queries and execution receipts
+
+Refresh full context with `read_document` (MCP) or `client.context()` before a
+new editing sequence. `query_document` reads bounded, current content and returns
+`{ documentId, revision, page: { complete, nextCursor? }, items }`. Each item
+contains a mutation-ready `target`, `type`, display `blockIndex`, restricted
+`html`, per-item `complete`, and `supportedOperations`.
+
+```ts
+const query = await client.execute({
+  id: 'locate',
+  name: 'query_document',
+  input: { domain: 'body', containsText: 'Original', limit: 1 },
+})
+const item = JSON.parse(query.output).items[0]
+await client.execute({
+  id: 'replace',
+  name: 'apply_ops',
+  input: {
+    ops: [
+      { op: 'findReplace', target: { engine: item.target }, find: 'Original', replace: 'Updated' },
+    ],
+  },
+})
+```
+
+Domains are `body` (default), `cells`, `images`, `sections`, `headers`, and
+`footers`. Filters include inclusive `startBlockIndex`/`endBlockIndex`, `type`,
+and case-sensitive `containsText`. Filtering uses the same redacted, current
+content projection as output; deleted and withheld words are not searchable.
+Cell targets address one physical merged owner and support `setTableCellText`
+without an additional `range`. Image items expose `mediaRef` for
+`read_document_media`; an image target does not authorize a whole-block write.
+Section and header/footer/textbox items use `engineTarget: item.target` on
+`set_page_setup` or `set_header_footer`; explicit address parameters must agree.
+
+Targets expire on any body or authored-state revision or document replacement.
+They validate type/extent and optionally exact `expectedHtml`. Original targets
+are mapped through preceding operations in the same atomic batch; a removed
+target refuses the batch. Positions are scoped addresses, not permanent IDs.
+Cell and image targets cannot be widened implicitly into table/block deletion.
+An engine-target operation following `moveBlocks` is currently refused before
+the batch commits: that operation rebuilds the whole body and has no retained
+position mapping. Perform the move, query fresh targets, then edit.
+
+Body items also expose `structures` with revision-bound IDs and
+`structuresComplete`. A complete inventory is required before declaring whole
+range deletion. Inventories are bounded to 32 entries per item; when incomplete,
+follow `item.structuresPage.nextCursor` using the same `query_document` cursor
+argument and collect entries until `structuresPage.complete`. These cursors
+retain the same document/revision and owner block. A response can enumerate all
+body items while one item's HTML or structure inventory remains partial.
+`replace_blocks`, `replace_selection`, and native `apply_ops` accept
+`deleteStructures: string[]`: the exact discovered IDs intentionally removed.
+Missing, duplicated, unrelated, expired or partial-object intent refuses before
+mutation. Referenced pictures and compatible table geometry retained by HTML
+replacement are excluded from deletion intent. Removing a field, formula,
+textbox, protected object, section boundary, or table requires checked intent;
+a boolean permission flag is insufficient. Native row/column edits retain
+their explicit topology semantics but still require intent for protected
+objects they actually remove. Moves preserve objects. Ordinary text and cell
+operations never acquire permission to consume structured payloads.
+
+`limit` is 1–50 (default 20); `maxItemChars` is 1–4000 (default 2000). An overall
+response budget can yield fewer items. Pass only `cursor: nextCursor` to
+continue the same query; changed filters/budgets and expired continuations are
+refused. Cursors are generation-local, bounded to the 128 most recent pending
+continuations; restart a query if one expires. `page.complete` describes item
+enumeration, while each item's `complete` describes its HTML projection. Neither
+claims that an external transport or Harness preserved every byte: consumers
+must validate the JSON/envelope and transport completion before treating it as
+a complete read. Query reads refresh body freshness only; they do not acknowledge
+unread authored stores. A stale side-state refusal requires `read_document` or
+`get_document_context`, rather than a blind retry or another partial query.
+
+Operations return an additive `receipt` with `revisionBefore`, `revisionAfter`,
+`outcome`, and `persistence`; applicable batches include `resolvedTargets` and
+per-operation counts. Outcomes distinguish `read`, `preview`, `rejected`,
+`no-op`, `applied`, `failure-after-commit`, and `independent-effect`. Exact text
+occurrences/cells use `matchCount`/`changeCount`; legacy matched/changed block
+summaries retain their meaning. An accepted no-op has `committed: false` and
+does not advance the revision. A post-commit error exposes the committed effect
+and must not be replayed blindly.
+Per-operation `structuralEffects` identify removed objects separately from
+objects marked for tracked deletion. Preview counts/effects describe the
+provisional transaction and are not committed effects.
+
+Live mutation has persistence `pending`; successful acknowledged saving has
+`completed` only when the host reports `ok`, `committed: true`, and
+`pending: false`. Unknown independent IO remains `unknown`. `apply_ops` provides
+one provisional body transaction and one body undo group; a preview reserves
+no version. Header/footer, page, style, file/CLI, and independent host effects
+do not acquire rollback or shared undo guarantees from that body transaction.
+
+Hosts should supply an authoritative `RuntimeDocument.stateVersion` that changes
+only when authored stores change. Detached runtimes can compare complete
+header/footer, page, comment, and note snapshots when it is omitted. Style and
+watermark getters do not expose complete authored data; those writes require
+the host epoch and otherwise refuse before mutation. This intentionally removes
+the former inference that any accepted write-named request changed the document.
+Existing positional targets and legacy range reads remain available; automation
+should migrate to revision-bound targets and inspect completeness and receipts.

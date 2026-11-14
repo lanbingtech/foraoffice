@@ -4,6 +4,8 @@ import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { executeOps } from '../src/renderer/ai/ops'
 import { setModuleLang } from '../src/renderer/i18n/locale'
+import { createDocsRuntime } from '../src/renderer/runtime/docs-runtime'
+import type { DocsQueryResult } from '../src/shared/document-query'
 
 interface JsonNode {
   type: string
@@ -471,9 +473,39 @@ describe('protected blocks', () => {
     expect(outcome.summary).toContain('protected block')
   })
 
-  it('deleteBlocks does delete docProtected', () => {
+  it('deleteBlocks does delete docProtected with discovered exact intent', async () => {
     const editor = createEditor(fixtureDoc())
-    executeOps(editor, [{ op: 'deleteBlocks', target: { blockIndexes: [5] } }])
+    const runtime = createDocsRuntime({
+      current: () => ({ editor, identity: editor, numIds: { bullet: null, ordered: null } }),
+    })
+    const client = runtime.connect({ id: 'delete-protected' })
+    client.context()
+    try {
+      const query = await client.execute({
+        id: 'query',
+        name: 'query_document',
+        input: { startBlockIndex: 5, endBlockIndex: 5 },
+      })
+      const item = (JSON.parse(query.output) as DocsQueryResult).items[0]
+      expect(item.structuresComplete).toBe(true)
+      expect(
+        await client.execute({
+          id: 'delete',
+          name: 'apply_ops',
+          input: {
+            ops: [
+              {
+                op: 'deleteBlocks',
+                target: { engine: item.target },
+                deleteStructures: item.structures!.map((structure) => structure.id),
+              },
+            ],
+          },
+        }),
+      ).toMatchObject({ committed: true })
+    } finally {
+      runtime.dispose()
+    }
     expect(editor.state.doc.childCount).toBe(5)
     editor.state.doc.forEach((n) => expect(n.type.name).not.toBe('docProtected'))
   })
@@ -739,10 +771,39 @@ describe('setImageProperties', () => {
     expect(node.attrs.imageHeightPx).toBe(100)
   })
 
-  it('nodeType image never matches non-image blocks', () => {
+  it('nodeType image never matches non-image blocks', async () => {
     const editor = createEditor(imageDoc())
-    const outcome = executeOps(editor, [{ op: 'deleteBlocks', target: { nodeType: 'image' } }])
-    expect(outcome.results[0].matched).toBe(1)
+    const runtime = createDocsRuntime({
+      current: () => ({ editor, identity: editor, numIds: { bullet: null, ordered: null } }),
+    })
+    const client = runtime.connect({ id: 'delete-image' })
+    client.context()
+    try {
+      const query = await client.execute({
+        id: 'query',
+        name: 'query_document',
+        input: { startBlockIndex: 1, endBlockIndex: 1 },
+      })
+      const item = (JSON.parse(query.output) as DocsQueryResult).items[0]
+      expect(item.structuresComplete).toBe(true)
+      const outcome = await client.execute({
+        id: 'delete',
+        name: 'apply_ops',
+        input: {
+          ops: [
+            {
+              op: 'deleteBlocks',
+              target: { nodeType: 'image' },
+              deleteStructures: item.structures!.map((structure) => structure.id),
+            },
+          ],
+        },
+      })
+      expect(outcome.receipt?.operations?.[0].matched).toBe(1)
+      expect(outcome.committed).toBe(true)
+    } finally {
+      runtime.dispose()
+    }
     expect(editor.state.doc.childCount).toBe(2)
     expect(editor.state.doc.child(0).textContent).toBe('before')
   })

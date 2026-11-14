@@ -4,6 +4,28 @@ import type { AgentToolDef } from '@genoffice/agent-core'
 /** Runtime lifecycle controls, separate from the pinned native AI tool catalog. */
 export const DOCS_RUNTIME_TOOLS: AgentToolDef[] = [
   {
+    name: 'query_document',
+    description:
+      'Read a bounded current-content window with revision-bound mutation targets. Partial reads refresh only the body baseline. Continue using nextCursor; stale continuation requires a fresh query.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        startBlockIndex: { type: 'integer', minimum: 0 },
+        endBlockIndex: { type: 'integer', minimum: 0 },
+        type: { type: 'string' },
+        containsText: { type: 'string', maxLength: 2000 },
+        domain: {
+          type: 'string',
+          enum: ['body', 'cells', 'images', 'sections', 'headers', 'footers'],
+        },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+        maxItemChars: { type: 'integer', minimum: 1, maximum: 4000 },
+        cursor: { type: 'string', maxLength: 6000 },
+      },
+    },
+  },
+  {
     name: 'read_document_media',
     description:
       'Read an authorized standalone, inline or table-cell image as standard MCP image content. Prefer the revision-bound mediaRef from fresh context/read_blocks; alternatively use blockIndex and imageIndex (required for multiple images). Missing resources, stale references and unsupported targets are distinguished. Internal asset addresses are not exposed.',

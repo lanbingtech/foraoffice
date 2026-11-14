@@ -17,6 +17,32 @@ export interface DocsImageReferenceIssue {
 }
 
 export interface DocsOperationResult extends ToolExecution {
+  receipt?: {
+    outcome:
+      | 'rejected'
+      | 'preview'
+      | 'read'
+      | 'no-op'
+      | 'applied'
+      | 'failure-after-commit'
+      | 'independent-effect'
+    revisionBefore: number
+    revisionAfter: number
+    persistence: 'unchanged' | 'pending' | 'completed' | 'unknown'
+    resolvedTargets?: import('./document-query').DocsEngineTarget[]
+    operations?: Array<{
+      op: string
+      matched: number
+      changed: number
+      matchCount?: number
+      changeCount?: number
+      structuralEffects?: Array<{
+        reference: string
+        kind: string
+        effect: 'removed' | 'marked-for-deletion'
+      }>
+    }>
+  }
   documentId: string
   revision: number
   /** null means the host lost the IO response and the file effect is unknown. */

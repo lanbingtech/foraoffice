@@ -29,6 +29,7 @@ export type { DocsResourceTools } from '../shared/resource-tools'
 export { createDocsResourceTools } from './runtime/resource-tools'
 export type { DocsResourceOptions } from './runtime/resource-tools'
 export type { DocsRuntime, DocsRuntimeClient, DocsRuntimeScope } from './runtime/docs-runtime'
+export type { DocsEngineTarget, DocsQueryItem, DocsQueryResult } from '../shared/document-query'
 export type { DocsCommands } from './runtime/command-router'
 export type {
   DocsDocumentHost,
