@@ -63,7 +63,7 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
     {
       name: 'insert_content',
       description:
-        'Insert new content at a given position (restricted HTML, may contain multiple blocks). For writing/continuing/generating new content; to rewrite existing content use replace_blocks.',
+        'Insert new content at a given position (restricted HTML, may contain multiple blocks). For writing/continuing/generating new content; to rewrite existing content use replace_blocks. Image tags must use exact current media:D:R:B.I references from read_blocks; every invalid or unsupported image rejects the whole write. New images use insert_picture.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -84,7 +84,7 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
     {
       name: 'replace_blocks',
       description:
-        'Replace a block range with new content (restricted HTML). For rewriting/translating/condensing/expanding existing content; the new block count may differ from the old. Compatible paragraph/text formatting (font, size, color, indent, spacing, alignment) is inherited by block role; this is not a lossless DOCX round trip and does not guarantee section boundaries, fields or protected objects. A rewritten <table> keeps column widths, borders, shading and cell formatting (unchanged cells keep their content). Read-only data-doc-readonly elements are refused before editing; exclude those ranges or edit surrounding text in place. Intentional replacement or explicit deleteBlocks may remove structures. Preserve inline pictures with the exact doc:B.I image references.',
+        'Replace a block range with new content (restricted HTML). For rewriting/translating/condensing/expanding existing content; the new block count may differ from the old. Compatible paragraph/text formatting (font, size, color, indent, spacing, alignment) is inherited by block role; this is not a lossless DOCX round trip and does not guarantee section boundaries, fields or protected objects. A rewritten <table> keeps column widths, borders, shading and cell formatting (unchanged cells keep their content). Read-only data-doc-readonly elements are refused before editing; exclude those ranges or edit surrounding text in place. Intentional replacement or explicit deleteBlocks may remove structures. Preserve writable inline pictures with the exact current media:D:R:B.I HTML references from read_blocks. Invalid, stale, unsupported or legacy unbound image references reject the whole write.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -105,7 +105,7 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
     {
       name: 'replace_selection',
       description:
-        "Replace exactly the user's selected text (the <sel>…</sel> span in the context) with new inline content, leaving the rest of the block untouched. For rewording/translating/correcting a selected phrase or sentence inside a paragraph, including a table cell. The new text inherits the selection's formatting unless the fragment styles it. Requires a range selection inside one paragraph/heading/list item; ranges across paragraphs or cells are refused. Pending deletion revisions are preserved and cannot be rewritten. For whole blocks use replace_blocks.",
+        "Replace exactly the user's selected text (the <sel>…</sel> span in the context) with new inline content, leaving the rest of the block untouched. For rewording/translating/correcting a selected phrase or sentence inside a paragraph, including a table cell. The new text inherits the selection's formatting unless the fragment styles it. Requires a range selection inside one paragraph/heading/list item; ranges across paragraphs or cells are refused. Pending deletion revisions are preserved and cannot be rewritten. Image tags must copy exact current media:D:R:B.I references; invalid or unsupported images reject the whole write. For whole blocks use replace_blocks.",
       inputSchema: {
         type: 'object',
         properties: {
