@@ -922,7 +922,8 @@ function runFindReplace(op: Op, env: RunEnv): OpResult {
     !node.marks.some(
       (mark) =>
         mark.type.name === 'del' ||
-        (ctx.source !== 'ui' && ['instrField', 'refField'].includes(mark.type.name)),
+        (ctx.source !== 'ui' &&
+          ['instrField', 'refField', 'ctrlCheckbox', 'docSym'].includes(mark.type.name)),
     )
   // Preserve the deleted-hit diagnostic without allowing a match to bridge
   // excluded text. Both scans use the same native matcher and coordinates.

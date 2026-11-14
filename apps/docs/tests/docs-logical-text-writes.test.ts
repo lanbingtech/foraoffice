@@ -123,6 +123,71 @@ it('does not rewrite or match through a Word field', async () => {
   }
 })
 
+it.each([
+  { kind: 'symbol', glyph: '\u2212', xml: '<w:r><w:sym w:font="Symbol" w:char="F02D"/></w:r>' },
+  {
+    kind: 'checkbox',
+    glyph: '☐',
+    xml:
+      '<w:sdt xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wordx="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:sdtPr><wordx:alias wordx:val="Agree"/><w14:checkbox>' +
+      '<w14:checked w14:val="0"/><w14:checkedState w14:val="2611" w14:font="MS Gothic"/>' +
+      '<w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox></w:sdtPr>' +
+      '<w:sdtContent><w:r><w:t>☐</w:t></w:r></w:sdtContent></w:sdt>',
+  },
+])(
+  'does not erase, copy or match through semantic $kind payload',
+  async ({ kind, glyph, xml: inline }) => {
+    const { caller, read, write, saved } = await fixture(
+      '<w:p><w:r><w:t>A</w:t></w:r>' + inline + '<w:r><w:t>B</w:t></w:r></w:p>',
+    )
+    const before = await read()
+    for (const find of [glyph, `A${glyph}B`]) {
+      for (const replace of ['', 'BROKEN']) {
+        expect(await write([{ op: 'findReplace', find, replace }])).toMatchObject({
+          isError: true,
+          committed: false,
+          revision: before.revision,
+        })
+        expect((await read()).output).toBe(before.output)
+      }
+    }
+    // Regenerate the same paragraph with a supported neighboring edit before saving.
+    expect(await write([{ op: 'findReplace', find: 'B', replace: 'NEIGHBOR' }])).toMatchObject({
+      committed: true,
+      matchCount: 1,
+      changeCount: 1,
+    })
+    expect(await caller.save({ path: '/semantic-payload.docx', overwrite: true })).toMatchObject({
+      ok: true,
+      pending: false,
+    })
+    const reopened = await parseDocx(saved())
+    expect(reopened.blocks[0].runs?.map((run) => run.text).join('')).toBe(`A${glyph}NEIGHBOR`)
+    const xml = new DOMParser().parseFromString(
+      await (await JSZip.loadAsync(saved())).file('word/document.xml')!.async('string'),
+      'application/xml',
+    )
+    expect(
+      xml.getElementsByTagName('parsererror'),
+      xml.documentElement.textContent ?? '',
+    ).toHaveLength(0)
+    if (kind === 'symbol') {
+      const ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+      const symbols = xml.getElementsByTagNameNS(ns, 'sym')
+      expect(symbols).toHaveLength(1)
+      expect(symbols[0].getAttributeNS(ns, 'char')).toBe('F02D')
+    } else {
+      const ns = 'http://schemas.microsoft.com/office/word/2010/wordml'
+      expect(xml.getElementsByTagNameNS(ns, 'checkbox')).toHaveLength(1)
+      expect(xml.getElementsByTagNameNS(ns, 'checked')[0].getAttributeNS(ns, 'val')).toBe('0')
+      const wordNs = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+      expect(xml.getElementsByTagNameNS(wordNs, 'alias')[0].getAttributeNS(wordNs, 'val')).toBe(
+        'Agree',
+      )
+    }
+  },
+)
+
 it.each(['refusal', 'no-op'] as const)(
   'does not split user undo history on a precise %s',
   async (decision) => {
