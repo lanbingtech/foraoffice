@@ -190,6 +190,7 @@ import {
   anchorElement,
   lineStartAnchor,
   liveSections,
+  liveSectionsForDocument,
   nextLineAnchor,
   measureBlocks,
   alignJoinedParagraphs,
@@ -1188,7 +1189,7 @@ export function App({
   }, [revisionDisplay, balloonMode, balloonsActive])
   // section breaks on tracked-deleted paragraph marks don't break in Word's
   // markup views (only the Original view restores them)
-  const delSectBreaks = useMemo(
+  const trackedDeletedSectBreaks = useMemo(
     () =>
       revisionDisplay === 'original'
         ? undefined
@@ -1622,6 +1623,16 @@ export function App({
   // document itself (not the paint-time measurement), so a strip edit lands in the right
   // slot even before the canvas has re-measured
   const hfSectionsMemoRef = useRef<SectionInfo[] | null>(null)
+  const delSectBreaks = useMemo(() => {
+    const removed = new Set(trackedDeletedSectBreaks)
+    editor?.state.doc.forEach((node) => {
+      if (node.attrs.sectionBoundary === false && typeof node.attrs.docxIndex === 'number')
+        removed.add(node.attrs.docxIndex)
+    })
+    return removed.size ? removed : undefined
+    // The source marker changes with the document transaction, including undo.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor, trackedDeletedSectBreaks, docVersion])
   const hfSections = useMemo(() => {
     if (!editor || sections.length <= 1) return sections
     const present: Array<{ docxIndex: number }> = []
@@ -7433,12 +7444,34 @@ export function App({
   )
 
   const aiPageSetupRef = useRef<{ access: AiPageSetupAccess; sections: SectionInfo[] } | null>(null)
-  const aiHfFlagsRef = useRef({ evenOddHf, locked: isProtected || readMode })
-  aiHfFlagsRef.current = { evenOddHf, locked: isProtected || readMode }
+  const aiHfFlagsRef = useRef({
+    evenOddHf,
+    locked: isProtected || readMode,
+    deletedBreaks: trackedDeletedSectBreaks,
+  })
+  aiHfFlagsRef.current = {
+    evenOddHf,
+    locked: isProtected || readMode,
+    deletedBreaks: trackedDeletedSectBreaks,
+  }
   const aiHfAccess = useMemo<AiHeaderFooterAccess>(
     () =>
       createHeaderFooterAccess({
-        current: () => hfStateRef.current,
+        current: () => {
+          const state = hfStateRef.current
+          const active = editorRef.current
+          const source = aiPageSetupRef.current?.sections ?? state.sections
+          return active
+            ? {
+                ...state,
+                sections: liveSectionsForDocument(
+                  source,
+                  active.state.doc,
+                  aiHfFlagsRef.current.deletedBreaks,
+                ),
+              }
+            : state
+        },
         locked: () => aiHfFlagsRef.current.locked,
         evenOdd: () => aiHfFlagsRef.current.evenOddHf,
         enableEven: () => {
@@ -7448,11 +7481,9 @@ export function App({
         },
         enableFirst: (index) => {
           const pageSetup = aiPageSetupRef.current
-          const end = hfStateRef.current.sections[index]?.lastBlockIndex
-          const target = pageSetup?.sections.findIndex((s) => s.lastBlockIndex === end) ?? -1
-          const section = pageSetup?.access.current(target)
+          const section = pageSetup?.access.current(index)
           if (!section) return 'the section is unavailable'
-          return pageSetup!.access.set(target, { settings: section.settings, titlePg: true })
+          return pageSetup!.access.set(index, { settings: section.settings, titlePg: true })
         },
         commit: (state) => {
           hfStateRef.current = state
@@ -7481,20 +7512,42 @@ export function App({
         const ctx = aiPageCtxRef.current
         if (!editor || ctx.isBlank || ctx.sections.length === 0) return []
         const pmDoc = editor.state.doc
-        const ranges = ctx.sections.map(() => ({ first: -1, last: -1 }))
+        const live = liveSectionsForDocument(
+          ctx.sections,
+          pmDoc,
+          aiHfFlagsRef.current.deletedBreaks,
+        )
+        const ranges = live.map(() => ({ first: -1, last: -1 }))
         for (let i = 0; i < pmDoc.childCount; i++) {
-          const r = ranges[sectionIndexAtBlock(pmDoc, ctx.sections, i)]!
+          const r = ranges[sectionIndexAtBlock(pmDoc, live, i)]!
           if (r.first < 0) r.first = i
           r.last = i
         }
-        return ctx.sections.map((sec, i) =>
+        return live.map((sec, i) =>
           describeSection(sec, i, Math.max(ranges[i]!.first, 0), Math.max(ranges[i]!.last, 0)),
         )
       },
-      current: (index) => aiPageCtxRef.current.sections[index],
+      current: (index) =>
+        editor
+          ? liveSectionsForDocument(
+              aiPageCtxRef.current.sections,
+              editor.state.doc,
+              aiHfFlagsRef.current.deletedBreaks,
+            )[index]
+          : undefined,
       set: (index, resolved) => {
         const ctx = aiPageCtxRef.current
         if (ctx.locked) return 'the document is read-only; the page setup cannot be changed'
+        const live = editor
+          ? liveSectionsForDocument(
+              ctx.sections,
+              editor.state.doc,
+              aiHfFlagsRef.current.deletedBreaks,
+            )
+          : []
+        index = ctx.sections.findIndex(
+          (section) => section.lastBlockIndex === live[index]?.lastBlockIndex,
+        )
         const sec = ctx.sections[index]
         if (!sec || !editor) return `section ${index} does not exist`
         const nextXml = applyResolvedPageSetup(ctx.effective[index] ?? sec.sectPrXml, resolved)
@@ -7534,7 +7587,15 @@ export function App({
         if (ctx.locked) return 'the document is read-only; a section break cannot be inserted'
         if (!editor || ctx.isBlank) return 'no document is open'
         const pmDoc = editor.state.doc
-        const ownerIdx = sectionIndexAtBlock(pmDoc, ctx.sections, Math.max(afterBlockIndex, 0))
+        const live = liveSectionsForDocument(
+          ctx.sections,
+          pmDoc,
+          aiHfFlagsRef.current.deletedBreaks,
+        )
+        const ownerSection = live[sectionIndexAtBlock(pmDoc, live, Math.max(afterBlockIndex, 0))]
+        const ownerIdx = ctx.sections.findIndex(
+          (section) => section.lastBlockIndex === ownerSection?.lastBlockIndex,
+        )
         const owner = ctx.sections[ownerIdx]
         const copyXml = ctx.effective[ownerIdx]
         insertSectionBreakRef.current(
@@ -7593,7 +7654,12 @@ export function App({
     [editor],
   )
 
-  aiPageSetupRef.current = { access: aiPageSetupAccess, sections }
+  aiPageSetupRef.current = {
+    access: aiPageSetupAccess,
+    get sections() {
+      return aiPageCtxRef.current.sections
+    },
+  }
 
   const hostedId = doc?.hosted?.id
   const runtimeIdentity = useMemo(

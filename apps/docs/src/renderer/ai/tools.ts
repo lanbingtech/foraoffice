@@ -12,6 +12,7 @@ import type { AgentToolCall, CreateDocumentType } from '../../shared/ipc'
 import { t } from '../i18n/locale'
 import { MIND_MAP_LIMITS, parseMindMapTree } from '@genoffice/agent-core/mind-map'
 import { executeOps, opNames } from './ops'
+import { preservedTableStructures, validateStructureDeletion } from './structure-inventory'
 import { clipExcerpt, repliesOf, resolveCommentAnchor } from './comment-ops'
 import { insertPictureAtSelection } from '../editor/insert-picture'
 import {
@@ -56,6 +57,8 @@ import {
   buildDocumentContext,
   buildRevisionsContext,
   insertBlocksAfter,
+  inheritBlockFormatting,
+  inlineImageEntriesOf,
   isBlankDocument,
   isTrackedDeleted,
   liveInlineRanges,
@@ -268,6 +271,71 @@ function replacementStructureNote(
       ? ' The range contained Word fields; visible HTML text does not encode their field instructions.'
       : '')
   )
+}
+
+function preservedImageStructures(
+  editor: Editor,
+  kept: Array<{ block: number; index: number }>,
+): string[] {
+  const result: string[] = []
+  editor.state.doc.forEach((block, pos, index) => {
+    const images = inlineImageEntriesOf(block)
+    const requested = kept.filter((reference) => reference.block === index)
+    for (const reference of requested) {
+      const image = images[reference.index]
+      if (image)
+        result.push(`image:${pos + 1 + image.from}:${pos + 1 + image.from + image.node.nodeSize}`)
+    }
+  })
+  return result
+}
+
+/** Pure refusal preflight, also called by the runtime before opening an undo group. */
+export function validateHtmlStructureIntent(
+  editor: Editor,
+  call: AgentToolCall,
+  scope?: SelectionScope | null,
+  numIds: NumIds = { bullet: null, ordered: null },
+): string | null {
+  if (call.name !== 'replace_blocks' && call.name !== 'replace_selection') return null
+  try {
+    const html = String(call.input.html ?? '')
+    if (call.name === 'replace_blocks') {
+      const range = validRange(editor, call.input.startBlockIndex, call.input.endBlockIndex)
+      if (!range) return rangeError(editor)
+      const resolved = resolveImageRefs(editor, parseHtmlFragment(html, numIds), html)
+      const nodes = inheritBlockFormatting(editor, range.start, range.end, resolved.nodes, false)
+      const positions = blockRangePositions(editor, range.start, range.end)
+      const kept = [
+        ...preservedImageStructures(editor, resolved.kept),
+        ...preservedTableStructures(
+          editor.state.doc,
+          positions.from,
+          positions.to,
+          nodes.map((node) => editor.schema.nodeFromJSON(node)),
+        ),
+      ]
+      return validateStructureDeletion(
+        editor.state.doc,
+        positions.from,
+        positions.to,
+        call.input.deleteStructures,
+        kept,
+      )
+    }
+    const range = selectionRange(editor, scope)
+    if (!range) return null
+    const resolved = resolveImageRefs(editor, parseInlineFragment(html), html)
+    return validateStructureDeletion(
+      editor.state.doc,
+      range.from,
+      range.to,
+      call.input.deleteStructures,
+      preservedImageStructures(editor, resolved.kept),
+    )
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
 }
 
 /** the range selection tools act on: the frozen scope when valid, else the live selection; null for a caret */
@@ -893,6 +961,25 @@ function executeSyncTool(
       nodes = resolved.nodes
       if (nodes.length === 0)
         return fail(t('aiSumReplaceContent'), 'html did not parse into any content blocks')
+      const positions = blockRangePositions(editor, range.start, range.end)
+      const inherited = inheritBlockFormatting(editor, range.start, range.end, nodes, false)
+      const keptStructures = [
+        ...preservedImageStructures(editor, resolved.kept),
+        ...preservedTableStructures(
+          editor.state.doc,
+          positions.from,
+          positions.to,
+          inherited.map((node) => editor.schema.nodeFromJSON(node)),
+        ),
+      ]
+      const structureError = validateStructureDeletion(
+        editor.state.doc,
+        positions.from,
+        positions.to,
+        call.input.deleteStructures,
+        keptStructures,
+      )
+      if (structureError) return fail(t('aiSumReplaceContent'), structureError)
       const had = countInlineImages(editor, range.start, range.end)
       const keptInRange = new Set(
         resolved.kept
@@ -901,7 +988,10 @@ function executeSyncTool(
       ).size
       const lost = had - keptInRange
       const structureNote = replacementStructureNote(editor, range.start, range.end, !!track)
-      replaceBlockRange(editor, range.start, range.end, nodes, track)
+      const omittedAnchors: number[] = []
+      for (let index = range.start; index <= range.end; index++)
+        if (editor.state.doc.child(index).attrs.sectionBoundary) omittedAnchors.push(index)
+      replaceBlockRange(editor, range.start, range.end, nodes, track, omittedAnchors)
       const pictureNote =
         lost > 0
           ? ` ${lost} picture(s) that were in the replaced range are not in the new content and have been deleted${track ? ' (as a tracked change the user can reject)' : ' (the user can undo this)'}; tell the user if that was not intended. To keep pictures, include their exact current <img> reference tags from read_blocks in the new HTML.`
@@ -941,15 +1031,26 @@ function executeSyncTool(
         )
       }
       let inline: ReturnType<typeof parseInlineFragment>
+      let keptImages: Array<{ block: number; index: number }>
       try {
         inline = parseInlineFragment(html)
-        inline = resolveImageRefs(editor, inline, html).nodes
+        const resolved = resolveImageRefs(editor, inline, html)
+        inline = resolved.nodes
+        keptImages = resolved.kept
       } catch (e) {
         return fail(t('aiSumReplaceSelection'), e instanceof Error ? e.message : String(e))
       }
       if (inline.length === 0) {
         return fail(t('aiSumReplaceSelection'), 'html did not parse into any text')
       }
+      const structureError = validateStructureDeletion(
+        editor.state.doc,
+        range.from,
+        range.to,
+        call.input.deleteStructures,
+        preservedImageStructures(editor, keptImages),
+      )
+      if (structureError) return fail(t('aiSumReplaceSelection'), structureError)
       const schema = editor.schema
       // a carried-over picture's own marks are not the model restyling the selection
       const fragmentStyled = inline.some((n) => n.type === 'text' && (n.marks ?? []).length > 0)
@@ -958,6 +1059,7 @@ function executeSyncTool(
       const inherited = (anchor?.marks ?? []).filter(
         (m) =>
           !REVISION_MARK_TYPES.has(m.type.name) &&
+          !['instrField', 'refField', 'ctrlCheckbox', 'docSym'].includes(m.type.name) &&
           !(fragmentStyled && FRAGMENT_MARK_TYPES.has(m.type.name)),
       )
       const nodes = inline.map((n) => {

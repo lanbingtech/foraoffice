@@ -1405,8 +1405,15 @@ const IMAGE_REF_NODE = '__imageRef'
 
 /** the pictures read_blocks showed for this block, in the same order: no rules, no pending deletions, no withheld pictures */
 export function inlineImagesOf(block: ProseMirrorNode): ProseMirrorNode[] {
-  const out: ProseMirrorNode[] = []
-  block.descendants((n) => {
+  return inlineImageEntriesOf(block).map((entry) => entry.node)
+}
+
+/** The same media ordinal projection, with occurrence positions for preservation checks. */
+export function inlineImageEntriesOf(
+  block: ProseMirrorNode,
+): Array<{ node: ProseMirrorNode; from: number }> {
+  const out: Array<{ node: ProseMirrorNode; from: number }> = []
+  block.descendants((n, from) => {
     if (
       hasDeletionRevision(n) ||
       n.attrs.redact ||
@@ -1418,7 +1425,7 @@ export function inlineImagesOf(block: ProseMirrorNode): ProseMirrorNode[] {
       !n.attrs.rule &&
       !n.marks.some((m) => m.type.name === 'del' || m.type.name === REDACT_MARK)
     )
-      out.push(n)
+      out.push({ node: n, from })
     return true
   })
   return out
@@ -1693,11 +1700,19 @@ export function replaceBlockRange(
   endIndex: number,
   parsed: PmNode[],
   track?: AiTrack,
+  deletedSections: readonly number[] = [],
 ): boolean {
   if (parsed.length === 0) return false
   // a tracked rewrite keeps the old blocks (struck through) next to the new
   // ones, so the anchors stay with the old blocks until the user accepts
-  const nodes = inheritBlockFormatting(editor, startIndex, endIndex, parsed, !track)
+  const removedSectionAnchors = new Set(
+    deletedSections.map((index) => editor.state.doc.child(index).attrs.docxIndex),
+  )
+  const nodes = inheritBlockFormatting(editor, startIndex, endIndex, parsed, !track).map((node) =>
+    node.attrs?.docxIndex != null && removedSectionAnchors.has(node.attrs.docxIndex)
+      ? { ...node, attrs: { ...node.attrs, sectionBoundary: false } }
+      : node,
+  )
   const { from, to } = blockRangePositions(editor, startIndex, endIndex)
   const pmNodes = nodes.map((n) => editor.schema.nodeFromJSON(n))
 
