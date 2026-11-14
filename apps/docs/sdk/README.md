@@ -921,8 +921,9 @@ they do not depend on a particular host, agent or report template.
 - `apply_ops/findReplace` matches literal text across formatting runs within a
   paragraph, preserving non-target text and inheriting the first matched
   character's formatting. It does not cross paragraph/cell, image, formula,
-  field, protected or deleted-content boundaries. External writes default to
-  `match: "one"`: zero or multiple matches refuse the entire batch. Read and
+  field, checkbox control, symbol payload, protected content or deleted content
+  boundaries. External writes default to `match: "one"`: zero or multiple matches
+  refuse the entire batch. Read and
   narrow the target, or explicitly use `match: "all"` with a target such as
   `{ scope: "document" }` for intentional bulk edits. Native UI bulk behavior
   is unchanged. Receipts expose occurrence `matchCount`/`changeCount` when all
@@ -938,3 +939,57 @@ they do not depend on a particular host, agent or report template.
   validity, then discards it. It changes neither content, undo history nor the
   runtime revision. It is a preview, not a reservation: subsequent edits can
   invalidate the plan. Any failed batch leaves the whole document unchanged.
+
+### Addressed table-cell text
+
+`apply_ops` supports `setTableCellText` for filling or clearing ordinary text in
+an existing native table, without rebuilding its rows or cells:
+
+```ts
+await caller.execute({
+  id: crypto.randomUUID(),
+  name: 'apply_ops',
+  input: {
+    ops: [
+      {
+        op: 'setTableCellText',
+        target: { blockIndexes: [3] },
+        range: { row: 0, col: 2 },
+        text: 'Approved', // empty string clears
+      },
+    ],
+  },
+})
+```
+
+The target must resolve to exactly one native table block. Existing engine
+targets such as `blockIndexes`, `nodeType: 'table'`, `containsText` and captured
+selection scope remain available. Read current context/`read_blocks` first;
+indexes and coordinates describe the current document, and must be refreshed
+after edits, reloads or structural changes. The runtime's existing document and
+caller freshness checks apply; coordinates are not persistent cell IDs.
+
+`range` uses zero-based logical grid coordinates, with optional inclusive
+`rowEnd`/`colEnd`. A covered merged coordinate addresses its physical owner.
+The default `match: 'one'` requires one physical cell, even when several covered
+coordinates name it. Explicit `match: 'all'` applies to the bounded rectangle,
+deduplicating merged owners. When the rectangle includes multiple physical
+cells, it must include each merged owner in full. Invalid bounds, ambiguous
+targets and omitted grid slots are refused.
+
+`matchCount` and `changeCount` count physical cells, including deduplication of
+covered coordinates; the existing block summary counts the table once. An
+unchanged cell contributes zero changes, and a wholly unchanged batch reports
+`committed: false` without advancing the runtime revision.
+
+This operation replaces plain text only. It preserves spans, widths, table/cell
+properties, neighboring cells and every existing paragraph's type and
+properties. Replacement text goes into the first paragraph, using its first
+run's formatting; remaining paragraphs are retained empty. Newlines become
+ordinary line breaks. Literal authored `{{tokens}}` remain ordinary text.
+Cells containing redaction/protection, revision text, fields, checkbox controls,
+symbol payloads, images, formulas, notes, nested tables or unsupported structures
+are refused as a whole. Use a
+narrower supported text operation when appropriate; removing structure requires
+its separate explicit operation. This is an additive operation: existing table
+row/column/format operations keep their contracts.
