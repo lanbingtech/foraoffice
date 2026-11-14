@@ -230,13 +230,25 @@ refused when echoed over a protected target. Ordinary authored text discussing
 that old wording remains valid; literal HTML examples must escape their markup.
 Markdown document creation remains plain Markdown, not an HTML write.
 
-For ordinary inline images, the existing `<img src="doc:B.I">` reference is
-writable: copy the exact reference from the current read to preserve that image.
-This also applies to table cells. Table and row formatting templates do not
+For ordinary inline images, public runtime reads return
+`<img src="media:D:R:B.I">`, bound to document `D` and revision `R`. Copy the
+exact current tag to preserve that image, including in table cells. Every
+explicit `<img>` is validated before insertion, block replacement or selection
+replacement. Missing, malformed, unsupported, wrong-document and expired
+references reject the whole write; `imageReferenceErrors` identifies the
+reference and reason in the operation result and standard MCP structured data.
+Refreshing context does not make an old reference current. Bare `doc:B.I`
+coordinates lack identity and are refused by public runtime writes; callers
+must migrate to the bound tags returned by `read_blocks`. They remain an
+internal coordinate projection, not an external preservation contract.
+HTTP/data sources are not accepted by these HTML writers; insert new pictures
+through `insert_picture`. Table and row formatting templates do not
 implicitly retain images or copy them into newly inserted rows. An explicit
 image in a formerly merged-away cell dissolves that merge to keep the content.
-Omitting the reference removes the image, as reported by the tool. Protected block objects
-and Word fields have no equivalent generic HTML preservation reference; keep
+Omitting the reference removes the image, as reported by the tool. Protected
+block images, OLE/formula objects and their previews are readable media but
+have no generic HTML preservation reference; a write cannot convert their
+preview into a claimed preserved object. Word fields likewise have no such reference. Keep
 them outside replacement ranges. Use `apply_ops/findReplace` on a known text
 range, or `replace_selection` for text within a single paragraph/cell, when
 surrounding objects and boundaries must remain intact.
@@ -873,11 +885,11 @@ they do not depend on a particular host, agent or report template.
   are distinct from changing other sections' stored content. `{PAGE}` and
   `{NUMPAGES}` remain live fields after save/reopen. Per-line styling and picture
   relationships are preserved when cloning an existing part.
-- Context and `read_blocks` list revision-bound `mediaRef` values corresponding
-  to `doc:B.I` image ordinals. Pass `mediaRef` to `read_document_media`; results
+- Context and `read_blocks` list revision-bound `mediaRef` values; writable
+  inline-image HTML uses the same `media:D:R:B.I` identity. Pass `mediaRef` to `read_document_media`; results
   use standard MCP image content without exposing resource URLs or credentials.
   Standalone images, inline images and images in table cells use the same path.
-  The compatibility form is `blockIndex` plus `imageIndex`; an ordinal is
+  The read-only compatibility form is `blockIndex` plus `imageIndex`; an ordinal is
   required when a block has several images. Redacted/deleted/decorative pictures
   are excluded. Refresh context after changes: an old `mediaRef` remains stale
   even after another read. `stale_target` means an expired reference/baseline;

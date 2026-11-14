@@ -11,6 +11,11 @@ export const DOCS_ERROR_CODES = [
 ] as const
 export type DocsErrorCode = (typeof DOCS_ERROR_CODES)[number]
 
+export interface DocsImageReferenceIssue {
+  reference: string
+  reason: 'unbound' | 'malformed' | 'expired' | 'unsupported' | 'missing'
+}
+
 export interface DocsOperationResult extends ToolExecution {
   documentId: string
   revision: number
@@ -19,6 +24,7 @@ export interface DocsOperationResult extends ToolExecution {
   pending?: boolean
   errorCode?: DocsErrorCode
   media?: { data: string; mimeType: string }
+  imageReferenceErrors?: DocsImageReferenceIssue[]
 }
 
 export interface DocsSaveOutcome {
