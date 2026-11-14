@@ -1,5 +1,9 @@
 ﻿import { afterEach, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'
+import JSZip from 'jszip'
+import { parseDocx, saveDocx } from '@genoffice/docx-engine'
+import { buildDocx } from '../../../packages/docx-engine/tests/helpers/build-docx'
+import { blocksToPmDoc, pmDocToSavePlan, type PmNode } from '../src/renderer/editor/convert'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { executeOps } from '../src/renderer/ai/ops'
 import { serializeRangeToHtml } from '../src/renderer/ai/protocol'
@@ -176,8 +180,26 @@ it('distinguishes unsupported targets from missing image bytes', async () => {
   }
 })
 
-it('keeps vertical merges through the actual replace_blocks formatting inheritance path', async () => {
-  const editor = create([table()])
+it('keeps merged geometry through runtime replacement and DOCX save/reopen', async () => {
+  const para = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`
+  const tc = (properties: string, text: string) =>
+    `<w:tc><w:tcPr>${properties}</w:tcPr>${para(text)}</w:tc>`
+  const parsed = await parseDocx(
+    await buildDocx({
+      bodyXml:
+        '<w:tbl><w:tblPr><w:tblW w:w="7200" w:type="dxa"/></w:tblPr>' +
+        '<w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid>' +
+        '<w:tr>' +
+        tc('<w:gridSpan w:val="2"/><w:vMerge w:val="restart"/>', 'merged') +
+        tc('', 'top') +
+        '</w:tr><w:tr>' +
+        tc('<w:gridSpan w:val="2"/><w:vMerge/>', '') +
+        tc('', 'bottom') +
+        '</w:tr></w:tbl>' +
+        para('Keep neighbor'),
+    }),
+  )
+  const editor = create(blocksToPmDoc(parsed.blocks).content ?? [])
   const runtime = createDocsRuntime({
     current: () => ({
       editor,
@@ -214,6 +236,28 @@ it('keeps vertical merges through the actual replace_blocks formatting inheritan
     expect(dom.querySelector('[colspan="2"][rowspan="2"]')?.textContent).toBe('rewritten')
     expect(dom.querySelectorAll('td,th')).toHaveLength(3)
     expect(dom.querySelector('[data-row="1"][data-col="2"]')?.textContent).toBe('bottom')
+    const plan = pmDocToSavePlan(editor.getJSON() as PmNode, parsed.blocks)
+    const saved = await saveDocx(parsed, plan.saveBlocks)
+    const zip = await JSZip.loadAsync(saved)
+    const xml = new DOMParser().parseFromString(
+      await zip.file('word/document.xml')!.async('string'),
+      'application/xml',
+    )
+    const ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    expect(
+      [...xml.getElementsByTagNameNS(ns, 'gridCol')].map((node) => node.getAttributeNS(ns, 'w')),
+    ).toEqual(['2400', '2400', '2400'])
+    expect(xml.getElementsByTagNameNS(ns, 'vMerge')).toHaveLength(2)
+    const reopened = await parseDocx(saved)
+    const reopenedEditor = create(blocksToPmDoc(reopened.blocks).content ?? [])
+    const reopenedDom = new DOMParser().parseFromString(
+      serializeRangeToHtml(reopenedEditor, 0, 0),
+      'text/html',
+    )
+    expect(reopenedDom.querySelector('[colspan="2"][rowspan="2"]')?.textContent).toBe('rewritten')
+    expect(reopenedDom.querySelector('[data-row="1"][data-col="2"]')?.textContent).toBe('bottom')
+    expect(reopenedDom.querySelectorAll('td,th')).toHaveLength(3)
+    expect(reopenedEditor.state.doc.child(1).textContent).toBe('Keep neighbor')
   } finally {
     runtime.dispose()
   }

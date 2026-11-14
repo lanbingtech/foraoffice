@@ -63,6 +63,13 @@ The next awaited call can read or edit that document immediately, including its
 revision settings; no render delay or UI interaction is required. Existing
 document bindings are invalidated by replacement.
 
+A completed save of the active document publishes its new DOCX baseline,
+file/host identity metadata and authored stores before its promise resolves. The
+next immediate context/media read uses that baseline without a render delay.
+Save As with `adopt: false` exports a copy instead and preserves the active
+baseline, identity and dirty state. A save that reports pending work is not this
+completion guarantee; edits made during a save remain dirty until persisted.
+
 Mounted editors use the native ribbon's normal 10px side insets on macOS,
 Windows and Linux, with File immediately before Save. They do not reserve space
 for window buttons or turn the ribbon into a window drag region; the embedding
@@ -622,8 +629,15 @@ its token in document text or tool results. Public Agent traffic uses standard
 MCP; the bridge is local host IPC, not an alternative Agent protocol.
 
 `examples/mcp-client.mjs` lists tools and reads the bound live document without a
-model. `createDocsMcpServer({ endpoint, bindingId?, version })` is also available
-for hosts that own a standard MCP transport directly.
+model. `createDocsMcpServer({ endpoint, bindingId?, version, readOnly? })` is also
+available for hosts that own a standard MCP transport directly. `readOnly: true`
+registers only `read_document` and the shared nonmutating tools: attachment and
+knowledge reads/search, document media/context/blocks, revisions/comments/notes,
+styles, capabilities, mind-map validation and draft inspection. Editing, saving,
+history changes, draft changes and `run_cli` are not registered and cannot be
+called through that server. This restriction is enforced by registration, not
+the advisory MCP `readOnlyHint` annotation. It does not change the underlying
+document's editing policy for other authorized callers.
 
 ### Host-controlled HTTP MCP in Qt
 
@@ -635,22 +649,35 @@ an active document reports an error; create/open a document first.
 ```cpp
 editor.startMcp([](const QJsonObject& reply) {
     if (reply.contains("error")) return; // Handle the normal JSON-RPC error.
-    const auto connection = reply.value("result").toObject().value("connection").toObject();
-    // Give connection to a compatible external MCP client through trusted host IPC.
+    const auto result = reply.value("result").toObject();
+    const auto connection = result.value("connection").toObject();
+    const auto readOnlyConnection = result.value("readOnlyConnection").toObject();
+    // Give each connection only to the intended client through trusted host IPC.
 });
 ```
 
-The JSON-RPC result contains `{ status: "running", connection }`. `connection`
-contains `url`, `transport: "streamable-http"`, `headers` (including its Bearer
-credential), an opaque runtime `documentId`, and `protocolVersions`.
-Configure a standard client with the URL and headers. Never publish the
-credential in document text, tool results or logs. `mcpState(completion)` returns
-the same running connection or `{ status: "stopped" | "failed" }`.
+The JSON-RPC result contains
+`{ status: "running", connection, readOnlyConnection }`. Both connections contain
+`url`, `transport: "streamable-http"`, `headers` (including a Bearer credential),
+the same opaque runtime `documentId`, and `protocolVersions`. They are separate
+loopback services with independent credentials and MCP sessions; a reviewer
+receives only `readOnlyConnection`, never the editing connection's credentials.
+Configure a standard client with the selected URL and headers. Never publish
+either credential in document text, prompts, tool results or logs.
+`mcpState(completion)` returns both running connections or
+`{ status: "stopped" | "failed" }`.
 `mcpStateChanged(state)` reports status and optional document identity without
 credentials. All native methods/completions use the GUI thread.
 
-`stopMcp(completion)` revokes access without closing the editor and is safe to
-repeat. Repeated start for the same active document reuses its grant. Document
+The two services share one captured document binding, but each MCP session has
+its own caller and read baseline. Reads by a reviewer do not refresh the editing
+caller's baseline. The read-only service enforces the tool restriction described
+above even when the live document is editable. Authorized resource helpers use
+the host's current resource selections and read permissions.
+
+`stopMcp(completion)` closes both services and revokes their shared binding
+without closing the editor, and is safe to repeat. Repeated start for the same
+active document reuses both grants. Document
 replacement, close checks, view disposal and backend/renderer failure revoke
 access; a replacement document requires an explicit new start. A canceled close
 check may already have revoked access. A connection binds when enabled, even
@@ -665,17 +692,22 @@ each session has independent document caller state. Terminating one session
 does not revoke the host grant. This is not a claim of support for the changed
 `2026-07-28` transport, legacy SSE endpoints, or remote network publication.
 
-`examples/mcp-http-client.mjs` accepts the connection object on stdin, discovers
-tools and reads the live document using the standard client. It prints no
+`examples/mcp-http-client.mjs` accepts either connection object on stdin, discovers
+its permitted tools and reads the live document using the standard client. It prints no
 credentials and needs no model. The host supplies any external client's own
 configuration format and conversation lifecycle.
 
 Node hosts can reuse `createDocsHttpMcpServer({ version, endpoint, bindingId,
-documentId, releaseScope })` from `@foraoffice/docs-sdk/services`. Bind a captured
+documentId, releaseScope, readOnly? })` from `@foraoffice/docs-sdk/services`. Bind a captured
 runtime scope before creating the service; release/close the service on document
 replacement and host disposal. `service.connection` has the same connection
 shape; `service.close()` is idempotent. The existing `/docs` command bridge is
 private host IPC and is never the HTTP MCP URL.
+
+Each HTTP service normally releases its binding through `releaseScope` when
+closed. When multiple services share a binding, the trusted host coordinates its
+single release and closes all services together; closing a session or a secondary
+read-only service must not accidentally release another service's authority.
 
 ## Resource helpers
 
@@ -698,6 +730,23 @@ and knowledge selections. Selection does not grant access to arbitrary files.
 The CLI accepts bounded argument arrays, enforces the same file policy and
 refuses in-place changes to the host's open document. Cancellation waits for the
 child process to close and preserves uncertain file effects.
+
+Qt hosts replace the current source selections with
+`configureResources(attachments, knowledge, completion)`, using the existing
+trusted `resources.configure` backend operation. Each list accepts up to 200
+paths and the successful result lists `attachments`, `knowledge` and
+`cliAvailable`; resource-change notifications update the renderer. Every path
+must already be readable under the configured roots or an exact host read grant.
+For an approved file outside the roots, complete
+`grantFile(path, true, false, completion)` before selecting it. Selection never
+grants write access or exposes this configuration operation to MCP callers.
+
+Pass empty lists to clear the selections. Removing a source prevents its pending
+read from publishing late data; use `revokeFile` as well when an exact temporary
+file grant ends. Source selections and file permissions are host-owned state:
+stopping MCP removes access through its connections but does not itself clear the
+host's resource configuration. Clear/revoke resources when their application
+scope ends, including document changes where the old sources no longer apply.
 
 The former inference tools are described in `get_editor_capabilities` as Harness
 workflows: web/image search, image generation, media analysis and document
