@@ -292,6 +292,8 @@ export interface DocReadState {
   markSeen(): void
   apply?<T>(operation: () => T): T
   selection?(): SelectionScope | null
+  /** Project image identity before paging, so continuation offsets address the returned HTML. */
+  imageHtml?(html: string): string
 }
 
 type BaselineCarry = (before: ProseMirrorNode, after: ProseMirrorNode) => void
@@ -721,7 +723,19 @@ export function executeTool(
   if (call.name === 'set_watermark' && typeof call.input.image === 'string')
     return setPictureWatermark(editor, call, signal, extras, readState)
   return settle(
-    executeSyncTool(editor, call, numIds, track, scope, comments, hf, pageSetup, extras, notes),
+    executeSyncTool(
+      editor,
+      call,
+      numIds,
+      track,
+      scope,
+      comments,
+      hf,
+      pageSetup,
+      extras,
+      notes,
+      readState?.imageHtml,
+    ),
   )
 }
 
@@ -736,6 +750,7 @@ function executeSyncTool(
   pageSetup?: AiPageSetupAccess,
   extras?: AiDocExtras,
   notes?: AiNotesAccess,
+  imageHtml?: (html: string) => string,
 ): ToolExecution {
   switch (call.name) {
     case 'get_document_context':
@@ -772,7 +787,8 @@ function executeSyncTool(
     case 'read_blocks': {
       const range = validRange(editor, call.input.startBlockIndex, call.input.endBlockIndex)
       if (!range) return fail(t('aiSumReadBlocks'), rangeError(editor))
-      const html = serializeRangeToHtml(editor, range.start, range.end)
+      const serialized = serializeRangeToHtml(editor, range.start, range.end)
+      const html = imageHtml?.(serialized) ?? serialized
       const offset = Math.max(0, Math.trunc(Number(call.input.offset)) || 0)
       if (offset > 0 && offset >= html.length) {
         return fail(
@@ -823,10 +839,10 @@ function executeSyncTool(
       let nodes: ReturnType<typeof parseHtmlFragment>
       try {
         nodes = parseHtmlFragment(html, numIds)
+        nodes = resolveImageRefs(editor, nodes, html).nodes
       } catch (e) {
         return fail(t('aiSumInsertContent'), e instanceof Error ? e.message : String(e))
       }
-      nodes = resolveImageRefs(editor, nodes).nodes
       if (nodes.length === 0)
         return fail(t('aiSumInsertContent'), 'html did not parse into any content blocks')
       const count = editor.state.doc.childCount
@@ -863,12 +879,13 @@ function executeSyncTool(
         legacyProtectedEchoError(editor, range.start, range.end, html)
       if (echo) return fail(t('aiSumReplaceContent'), echo)
       let nodes: ReturnType<typeof parseHtmlFragment>
+      let resolved: ReturnType<typeof resolveImageRefs>
       try {
         nodes = parseHtmlFragment(html, numIds)
+        resolved = resolveImageRefs(editor, nodes, html)
       } catch (e) {
         return fail(t('aiSumReplaceContent'), e instanceof Error ? e.message : String(e))
       }
-      const resolved = resolveImageRefs(editor, nodes)
       nodes = resolved.nodes
       if (nodes.length === 0)
         return fail(t('aiSumReplaceContent'), 'html did not parse into any content blocks')
@@ -883,7 +900,7 @@ function executeSyncTool(
       replaceBlockRange(editor, range.start, range.end, nodes, track)
       const pictureNote =
         lost > 0
-          ? ` ${lost} picture(s) that were in the replaced range are not in the new content and have been deleted${track ? ' (as a tracked change the user can reject)' : ' (the user can undo this)'}; tell the user if that was not intended. To keep pictures, include their <img src="doc:B.I"> tags from read_blocks in the new HTML.`
+          ? ` ${lost} picture(s) that were in the replaced range are not in the new content and have been deleted${track ? ' (as a tracked change the user can reject)' : ' (the user can undo this)'}; tell the user if that was not intended. To keep pictures, include their exact current <img> reference tags from read_blocks in the new HTML.`
           : ''
       return {
         output: `Replaced blocks ${range.start}-${range.end} with ${nodes.length} block(s). Compatible paragraph/text formatting was inherited; this does not guarantee preservation of section boundaries, fields or other document structures.${structureNote}${pictureNote} Block indexes have changed; use get_document_context if needed.`,
@@ -922,10 +939,10 @@ function executeSyncTool(
       let inline: ReturnType<typeof parseInlineFragment>
       try {
         inline = parseInlineFragment(html)
+        inline = resolveImageRefs(editor, inline, html).nodes
       } catch (e) {
         return fail(t('aiSumReplaceSelection'), e instanceof Error ? e.message : String(e))
       }
-      inline = resolveImageRefs(editor, inline).nodes
       if (inline.length === 0) {
         return fail(t('aiSumReplaceSelection'), 'html did not parse into any text')
       }

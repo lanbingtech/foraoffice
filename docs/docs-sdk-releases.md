@@ -7,6 +7,15 @@ installers merely because the corresponding build commands exist.
 
 ## Compatibility policy
 
+Unreleased safety change: public live-document HTML writes now require the
+document/revision-bound image tags returned by `read_blocks`. Bare `doc:B.I`,
+invalid/stale references and unsupported HTTP/data `<img>` sources refuse the
+whole write rather than silently omitting requested content. Coordinate-based
+media reads remain available; new pictures use `insert_picture`. This is an
+intentional tightening of unsafe behavior, not a claim of compatible legacy
+write semantics. See the authoritative SDK guide for reference diagnostics and
+supported image versus protected-object boundaries.
+
 The public contract is the [SDK guide](../apps/docs/sdk/README.md), its exported
 types and observed public behavior. During `0.x`, a minor version may contain a
 breaking public contract change. Patch versions are intended for compatible

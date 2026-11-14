@@ -1,7 +1,11 @@
 // Modified for ForaOffice: reliable document targeting and portable inspection.
 import type { Editor } from '@tiptap/core'
 import type { ToolExecution } from '@genoffice/agent-core'
-import type { DocsOperationResult, DocsErrorCode } from '../../shared/operation-result'
+import type {
+  DocsOperationResult,
+  DocsErrorCode,
+  DocsImageReferenceIssue,
+} from '../../shared/operation-result'
 import { documentImagesOf } from '../ai/protocol'
 import { DOCS_IMAGE_MAX_BYTES } from '../../shared/media-policy'
 
@@ -13,6 +17,65 @@ const refused = (output: string, errorCode: DocsErrorCode): MediaResult => ({
   isError: true,
   mutated: false,
 })
+
+/** Public HTML writes require the same document/revision identity as media reads. */
+export function prepareDocumentImageWrite(
+  editor: Editor,
+  html: string,
+  documentId: string,
+  revision: number,
+): { html: string; errors: DocsImageReferenceIssue[] } {
+  const parsed = new DOMParser().parseFromString(html, 'text/html')
+  const images = [...parsed.querySelectorAll('img')]
+  const errors: DocsImageReferenceIssue[] = []
+  for (const image of images) {
+    const reference = image.getAttribute('src') ?? ''
+    const ref = /^media:([^:]+):(\d+):(\d+)\.(\d+)$/.exec(reference)
+    if (!ref) {
+      errors.push({
+        reference,
+        reason: reference.startsWith('doc:')
+          ? 'unbound'
+          : reference.startsWith('media:')
+            ? 'malformed'
+            : 'unsupported',
+      })
+      continue
+    }
+    if (ref.slice(2).some((value) => !Number.isSafeInteger(Number(value)))) {
+      errors.push({ reference, reason: 'malformed' })
+      continue
+    }
+    if (ref[1] !== documentId || Number(ref[2]) !== revision) {
+      errors.push({ reference, reason: 'expired' })
+      continue
+    }
+    const block = editor.state.doc.maybeChild(Number(ref[3]))
+    const picture = block && documentImagesOf(block)[Number(ref[4])]
+    if (
+      !picture ||
+      (picture.type.name === 'docInlineImage' &&
+        (typeof picture.attrs.dataUrl !== 'string' || !picture.attrs.dataUrl))
+    )
+      errors.push({ reference, reason: 'missing' })
+    else if (
+      picture.type.name !== 'docInlineImage' ||
+      /<w:object[\s>]|<o:OLEObject[\s>]|<m:oMath/.test(String(picture.attrs.xml ?? ''))
+    )
+      errors.push({ reference, reason: 'unsupported' })
+    else image.setAttribute('src', `doc:${ref[3]}.${ref[4]}`)
+  }
+  return { html: images.length ? parsed.body.innerHTML : html, errors }
+}
+
+/** Only generated HTML image tags are projected; authored/escaped examples stay text. */
+export function bindDocumentImageHtml(html: string, documentId: string, revision: number): string {
+  return html.replace(
+    /<img src="doc:(\d+)\.(\d+)">/g,
+    (_tag, block: string, index: string) =>
+      `<img src="media:${documentId}:${revision}:${block}.${index}">`,
+  )
+}
 
 export function documentMediaReferences(
   editor: Editor,

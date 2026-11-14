@@ -129,7 +129,7 @@ describe('pictures are visible to the model and survive a block rewrite when ech
     expect(editor.state.doc.child(0).content.child(1).attrs.dataUrl).toBe(PNG)
   })
 
-  it('an unknown ref and a foreign <img> are ignored rather than inserted', async () => {
+  it('refuses an unknown ref or foreign image instead of silently omitting it', async () => {
     const editor = createEditor([para([text('Body')])])
     const r = await replace(
       editor,
@@ -137,9 +137,9 @@ describe('pictures are visible to the model and survive a block rewrite when ech
       0,
       '<p>A <img src="doc:9.9"> B <img src="https://x/y.png"> C</p>',
     )
-    expect(r.isError).toBeFalsy()
+    expect(r).toMatchObject({ isError: true, mutated: false })
     expect(pictureCount(editor)).toBe(0)
-    expect(editor.state.doc.child(0).textContent).toBe('A  B  C')
+    expect(editor.state.doc.child(0).textContent).toBe('Body')
   })
 
   it('a ref from outside the replaced range copies that picture in without counting as a loss', async () => {
@@ -150,14 +150,14 @@ describe('pictures are visible to the model and survive a block rewrite when ech
     expect(pictureCount(editor)).toBe(2)
   })
 
-  it('a withheld picture gets no ref, and a guessed ref to it resolves to nothing', async () => {
+  it('a withheld picture gets no ref, and a guessed ref is refused without mutation', async () => {
     const editor = createEditor([
       para([picture([{ type: 'redaction', attrs: { label: 'private' } }]), text(' after')]),
     ])
     expect(serializeRangeToHtml(editor, 0, 0)).not.toContain('doc:')
     const r = await replace(editor, 0, 0, '<p>x <img src="doc:0.0"></p>')
-    expect(r.isError).toBeFalsy()
-    expect(pictureCount(editor)).toBe(0)
+    expect(r).toMatchObject({ isError: true, mutated: false })
+    expect(pictureCount(editor)).toBe(1)
   })
 
   it('a picture pending deletion is neither numbered nor counted as lost', async () => {
@@ -403,11 +403,12 @@ describe('table formatting inheritance obeys explicit image references', () => {
     expect(editor.state.doc.child(0).child(0).child(1).child(0).child(0).attrs.dataUrl).toBe(PNG)
   })
 
-  it('does not restore an image for an unknown reference in a blank cell', async () => {
+  it('refuses an unknown reference in a blank cell without changing the original table', async () => {
     const editor = createEditor([table([[cell([text('Old label')]), cell([picture()])]])])
     const result = await replace(editor, 0, 0, parameterTable(1, '<img src="doc:99.0">'))
-    expect(pictureCount(editor)).toBe(0)
-    expect(result.output).toContain('1 picture(s) that were in the replaced range')
+    expect(result).toMatchObject({ isError: true, mutated: false })
+    expect(pictureCount(editor)).toBe(1)
+    expect(editor.state.doc.child(0).textContent).toContain('Old label')
   })
 
   it('does not restore an omitted image when a different image is explicitly duplicated', async () => {

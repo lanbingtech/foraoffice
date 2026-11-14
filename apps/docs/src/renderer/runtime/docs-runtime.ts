@@ -9,6 +9,9 @@ import {
   buildDocContext,
   getSelectionScope,
   HTML_RULES,
+  parseHtmlFragment,
+  parseInlineFragment,
+  resolveImageRefs,
   type AiTrack,
   type NumIds,
 } from '../ai/protocol'
@@ -37,7 +40,12 @@ import type {
   DocsSaveOutcome,
   DocsSaveResult,
 } from '../../shared/operation-result'
-import { readDocumentMedia, documentMediaReferences } from './document-media'
+import {
+  readDocumentMedia,
+  documentMediaReferences,
+  prepareDocumentImageWrite,
+  bindDocumentImageHtml,
+} from './document-media'
 import {
   DOCS_RESOURCE_TOOL_NAMES,
   DOCS_RESOURCE_TOOLS,
@@ -47,7 +55,7 @@ import {
 import { redactLabelsOf } from '../ai/redact-view'
 
 type RuntimeExecution = ToolExecution &
-  Pick<DocsOperationResult, 'errorCode' | 'media'> &
+  Pick<DocsOperationResult, 'errorCode' | 'media' | 'imageReferenceErrors'> &
   Partial<Pick<DocsOperationResult, 'committed'>>
 
 interface DocumentGenerationState {
@@ -341,12 +349,16 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
           documentId,
           revision: documentState.revision,
           text:
-            buildDocContext(
-              doc.editor,
-              frozen.scope,
-              doc.comments?.list(),
-              doc.headerFooter?.read(),
-              doc.pageSetup?.list(),
+            bindDocumentImageHtml(
+              buildDocContext(
+                doc.editor,
+                frozen.scope,
+                doc.comments?.list(),
+                doc.headerFooter?.read(),
+                doc.pageSetup?.list(),
+              ),
+              documentId,
+              documentState.revision,
             ) + documentMediaReferences(doc.editor, documentId, documentState.revision),
         }
       },
@@ -377,6 +389,44 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
               'The document was replaced; create a new document binding',
               'stale_target',
             )
+          if (['insert_content', 'replace_blocks', 'replace_selection'].includes(call.name)) {
+            const images = prepareDocumentImageWrite(
+              doc.editor,
+              String(call.input.html ?? ''),
+              boundState.documentId,
+              boundState.revision,
+            )
+            if (images.errors.length)
+              return {
+                ...failure(
+                  'Explicit image references could not be applied; no changes were made. Use current media: references from read_blocks; use insert_picture for new images. Protected block/OLE previews are not writable image references.',
+                  images.errors.some((error) => error.reason === 'expired')
+                    ? 'stale_target'
+                    : 'invalid_input',
+                ),
+                mutated: false,
+                imageReferenceErrors: images.errors,
+              }
+            // Reuse execution's representation checks before any history metadata is dispatched.
+            if (/<img\b/i.test(images.html)) {
+              try {
+                const nodes =
+                  call.name === 'replace_selection'
+                    ? parseInlineFragment(images.html)
+                    : parseHtmlFragment(images.html, doc.numIds)
+                resolveImageRefs(doc.editor, nodes, images.html)
+              } catch (error) {
+                return {
+                  ...failure(
+                    error instanceof Error ? error.message : String(error),
+                    'invalid_input',
+                  ),
+                  mutated: false,
+                }
+              }
+            }
+            call = { ...call, input: { ...call.input, html: images.html } }
+          }
           if (call.name === 'get_editor_capabilities') {
             const helperTools = resources()?.tools ?? []
             const tools = [
@@ -602,6 +652,8 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
                         },
                         apply,
                         selection: () => frozen?.scope ?? null,
+                        imageHtml: (html) =>
+                          bindDocumentImageHtml(html, boundState.documentId, boundState.revision),
                       },
                     ),
               ),
@@ -628,6 +680,12 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
               doc.editor.view.dispatch(transaction.setMeta('addToHistory', false))
           }
           if (!result.isError) {
+            if (call.name === 'get_document_context')
+              result.output = bindDocumentImageHtml(
+                result.output,
+                boundState.documentId,
+                boundState.revision,
+              )
             if (readsBlocks)
               result.output += documentMediaReferences(
                 doc.editor,
