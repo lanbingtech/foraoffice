@@ -27,6 +27,17 @@ compatibility environment variables or private resource schemes solely to change
 branding. These names do not imply affiliation with upstream or an SDK dependency
 on its agent.
 
+The imported downstream integration adds Qt `configureResources`, optional
+`readOnly` MCP server creation and `readOnlyConnection` in trusted-host start/state
+results. Existing `connection` consumers keep their editing access; review clients
+must receive only the separate read-only configuration. Both connections end with
+their shared document binding. Resource selection still needs read grants and does
+not grant writes. Include these additive contracts and their lifetime rules in
+the next delivery's compatibility notes. Successful saving of the active document
+also publishes its saved baseline before the next call; no caller-side delay is
+required. Save As with `adopt: false` exports a copy and retains the active
+baseline, identity and dirty state.
+
 ## Build and consume
 
 From the repository root with Node 24+ and npm 10+:
