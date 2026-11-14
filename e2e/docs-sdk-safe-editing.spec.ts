@@ -1,6 +1,7 @@
 // Modified for ForaOffice: verify safe edits through real mounted SDK hosts and hosted bytes.
 import { test, expect, type Page } from '@playwright/test'
 import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { extname, posix, resolve, sep } from 'node:path'
 import JSZip from 'jszip'
@@ -474,21 +475,70 @@ test('explicit section deletion updates live routing, undo and saved section own
     const first = [body['w:p']].flat()[0]
     expect(first['w:pPr']).toHaveProperty('w:mirrorIndents')
     expect(first['w:pPr']).not.toHaveProperty('w:sectPr')
-    expect(first['w:r']['w:t']).toBe('SECTION REMOVED')
+    const firstText = first['w:r']['w:t']
+    expect(
+      typeof firstText === 'object' && firstText !== null ? firstText['#text'] : firstText,
+    ).toBe('SECTION REMOVED')
     const section = body['w:sectPr']
     expect(section['w:pgSz']['w:w']).toBe('11906')
     const reference = [section['w:headerReference']]
       .flat()
       .find((ref) => ref['w:type'] === 'default')
     const rels = parser.parse(await zip.file('word/_rels/document.xml.rels')!.async('string'))
-    const target = [rels.Relationships.Relationship]
+    const relationship = [rels.Relationships.Relationship]
       .flat()
-      .find((rel) => rel.Id === reference['r:id']).Target
+      .find((rel) => rel.Id === reference['r:id'])
+    const target = relationship.Target
     const part = posix.normalize(target.startsWith('/') ? target.slice(1) : `word/${target}`)
-    expect(part).toBe('word/header1.xml')
+    expect(zip.file(part)).not.toBeNull()
     const header = await zip.file(part)!.async('string')
     expect(header).toContain('ROUTED_HEADER')
     expect(header).not.toContain('OLD_HEADER')
+    const originalSection = parser.parse(source)['w:document']['w:body']['w:sectPr']
+    const originalReference = [originalSection['w:headerReference']]
+      .flat()
+      .find((ref) => ref['w:type'] === 'default')
+    const originalRels = parser.parse(
+      await fixture.file('word/_rels/document.xml.rels')!.async('string'),
+    )
+    const originalRelationship = [originalRels.Relationships.Relationship]
+      .flat()
+      .find((rel) => rel.Id === originalReference['r:id'])
+    const originalTarget = originalRelationship.Target
+    const originalPart = posix.normalize(
+      originalTarget.startsWith('/') ? originalTarget.slice(1) : `word/${originalTarget}`,
+    )
+    const originalHeader = await fixture.file(originalPart)!.async('string')
+    expect(relationship.Type).toBe(originalRelationship.Type)
+    expect(part).not.toBe(originalPart)
+    expect(await zip.file(originalPart)!.async('string')).toBe(originalHeader)
+    const geometry = (xml: string) =>
+      [...xml.matchAll(/<(wp:anchor|wp:inline|v:shape)\b[\s\S]*?<\/\1>/g)].map(([container]) =>
+        createHash('sha256')
+          .update(
+            container.replace(
+              /<w:txbxContent\b[^>]*>[\s\S]*?<\/w:txbxContent>/g,
+              '<w:txbxContent/>',
+            ),
+          )
+          .digest('hex'),
+      )
+    const originalGeometry = geometry(originalHeader)
+    expect(originalGeometry).toHaveLength(2)
+    expect(geometry(header)).toEqual(originalGeometry)
+    const boxes = [...header.matchAll(/<w:txbxContent\b[^>]*>([\s\S]*?)<\/w:txbxContent>/g)]
+    expect(boxes).toHaveLength(2)
+    for (const [, contents] of boxes) {
+      expect(contents).toContain('ROUTED_HEADER')
+      expect(contents).toMatch(/<w:instrText\b[^>]*>\s*PAGE\b/)
+      expect(contents).toMatch(/<w:instrText\b[^>]*>\s*NUMPAGES\b/)
+      for (const kind of ['begin', 'separate', 'end'])
+        expect(
+          contents.match(new RegExp(`<w:fldChar\\b[^>]*w:fldCharType="${kind}"`, 'g')),
+        ).toHaveLength(2)
+    }
+    expect(header.match(/<mc:Choice\b/g)).toHaveLength(1)
+    expect(header.match(/<mc:Fallback\b/g)).toHaveLength(1)
 
     const reopened = await page.evaluate(async () => {
       const { editor } = window as unknown as FixtureWindow
