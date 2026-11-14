@@ -26,6 +26,7 @@ const hasDelMark = (node: ProseMirrorNode) => node.marks.some((m) => m.type.name
  */
 const INHERITED_PARA_ATTRS = [
   'docxIndex',
+  'sectionBoundary',
   'styleId',
   'align',
   'lineSpacing',
@@ -112,7 +113,7 @@ export function inheritFrom(
 ): PmNode {
   const attrs: Record<string, unknown> = {}
   for (const key of INHERITED_PARA_ATTRS) {
-    if (key === 'docxIndex' && !opts.anchor) continue
+    if ((key === 'docxIndex' || key === 'sectionBoundary') && !opts.anchor) continue
     if (key === 'pageBreakBefore' && !opts.first) continue
     // false is a real value here (snapToGrid / spacing auto / contextualSpacing
     // off override the style chain); only unset attrs are skipped
