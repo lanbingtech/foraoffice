@@ -100,7 +100,17 @@ export class DocumentDraft {
   ) {
     this.original = editor.state.doc
     this.originallyBlank = isBlankDocument(editor)
-    this.landing = new DraftLanding(editor, numIds, position)
+    this.landing = new DraftLanding(
+      editor,
+      numIds,
+      position,
+      () =>
+        this.valid() &&
+        !editor.isDestroyed &&
+        editor.isEditable &&
+        !(this.requiresSource && this.sourceChanged) &&
+        (!this.authority || this.authority.isCurrent()),
+    )
     editor.on('transaction', this.observeSource)
   }
 

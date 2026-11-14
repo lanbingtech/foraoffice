@@ -60,6 +60,7 @@ export class DraftLanding {
     private readonly editor: Editor,
     private readonly numIds: NumIds,
     position: WritePosition,
+    private readonly canPreview: () => boolean = () => !editor.isDestroyed && editor.isEditable,
   ) {
     this.from =
       position.kind === 'after' && position.index >= 0
@@ -146,7 +147,7 @@ export class DraftLanding {
 
   private flush(): void {
     this.timer = null
-    if (this.closed || this.conflicted || this.pending === null || this.editor.isDestroyed) return
+    if (this.closed || this.conflicted || this.pending === null || !this.canPreview()) return
     const { html, nodes } = this.pending
     this.pending = null
     let next: ProseMirrorNode[]
@@ -162,12 +163,13 @@ export class DraftLanding {
       this.conflicted = true
       return
     }
-    this.rendered = html
     let keep = 0
     while (keep < live.length && keep < next.length && live[keep]!.node.eq(next[keep]!)) keep++
     if (keep === live.length && keep === next.length) return
     const at = keep > 0 ? live[keep - 1]!.end : this.from
     const wasVisible = this.follow && this.endVisible()
+    if (!this.canPreview()) return
+    this.rendered = html
     this.editor.view.dispatch(this.draftTr().replaceWith(at, this.to, next.slice(keep)))
     this.to = at + next.slice(keep).reduce((size, n) => size + n.nodeSize, 0)
     this.ownedNodes = new Set(this.liveNodes().map(({ node }) => node))

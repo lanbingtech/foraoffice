@@ -223,7 +223,10 @@ it('refuses finalization after the captured document-side source changes without
     },
   })
   version++
+  await vi.advanceTimersByTimeAsync(400)
   const before = client.context()
+  expect(before.text).not.toContain('PREVIEW')
+  expect(before.revision).toBe(start.revision + 1)
   expect(
     await client.execute({
       id: 'finish',
@@ -245,6 +248,38 @@ it('refuses finalization after the captured document-side source changes without
       input: { draftId, decision: 'discard' },
     }),
   ).toMatchObject({ committed: false })
+})
+
+it('does not publish a pending reference preview after its document binding is replaced', async () => {
+  vi.useFakeTimers()
+  const { editor } = open()
+  let identity = {}
+  const runtime = createDocsRuntime({
+    current: () => ({ editor, identity, numIds: { bullet: null, ordered: null } }),
+  })
+  cleanup.push(() => runtime.dispose())
+  const client = runtime.connect({ id: 'old-draft' })
+  const context = client.context()
+  const start = await client.execute({
+    id: 'start',
+    name: 'start_document_draft',
+    input: { afterBlockIndex: 0 },
+  })
+  const { draftId } = JSON.parse(start.output)
+  await client.execute({
+    id: 'update',
+    name: 'update_document_draft',
+    input: {
+      draftId,
+      sequence: 1,
+      html: `<p>STALE PREVIEW<img src="media:${context.documentId}:${context.revision}:0.0"></p>`,
+    },
+  })
+  identity = {}
+  await vi.advanceTimersByTimeAsync(400)
+  const next = runtime.connect({ id: 'replacement' }).context()
+  expect(next.text).toContain('KEEP')
+  expect(next.text).not.toContain('STALE PREVIEW')
 })
 
 it('refuses stale reference finalization after native body edits without removing or republishing its preview', async () => {

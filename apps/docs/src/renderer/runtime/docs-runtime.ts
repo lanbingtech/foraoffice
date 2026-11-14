@@ -291,6 +291,7 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
           documentId: boundState.documentId,
           revision: boundState.revision,
           isCurrent: () =>
+            !closed &&
             !disposed &&
             bindings.current()?.identity === boundIdentity &&
             stateVersionOf(bindings.current()) === sourceState,
