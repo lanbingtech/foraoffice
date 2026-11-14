@@ -1,5 +1,5 @@
 // Modified for ForaOffice: verify safe edits through real mounted SDK hosts and hosted bytes.
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import { createServer } from 'node:http'
 import { readFile, writeFile } from 'node:fs/promises'
 import { extname, posix, resolve, sep } from 'node:path'
@@ -15,11 +15,7 @@ type FixtureWindow = Window & {
   fixture: { saved: number[]; saves: number }
 }
 
-test('mounted SDK validates queried edits and saves body and header effects in their original containers', async () => {
-  test.setTimeout(120_000)
-  const original = await readFile(
-    resolve(__dirname, '../apps/docs/tests/fixtures/foraoffice-header-textbox.docx'),
-  )
+async function withHostedDocument(original: Buffer, run: (page: Page) => Promise<void>) {
   const root = resolve(__dirname, '../apps/docs/out/embedded')
   const server = createServer(async (request, response) => {
     const path = new URL(request.url ?? '/', 'http://localhost').pathname
@@ -84,6 +80,20 @@ test('mounted SDK validates queried edits and saves body and header effects in t
     page.on('pageerror', (error) => errors.push(error.message))
     await page.goto(`http://127.0.0.1:${address.port}/`)
     await page.waitForFunction(() => (window as unknown as FixtureWindow).ready)
+    await run(page)
+    expect(errors).toEqual([])
+  } finally {
+    await browser?.close()
+    await new Promise<void>((done) => server.close(() => done()))
+  }
+}
+
+test('mounted SDK validates queried edits and saves body and header effects in their original containers', async () => {
+  test.setTimeout(120_000)
+  const original = await readFile(
+    resolve(__dirname, '../apps/docs/tests/fixtures/foraoffice-header-textbox.docx'),
+  )
+  await withHostedDocument(original, async (page) => {
     const result = await page.evaluate(async () => {
       const { editor, fixture } = window as unknown as FixtureWindow
       const caller = editor.runtime.connect({ id: 'safe-editing-acceptance' })
@@ -303,9 +313,185 @@ test('mounted SDK validates queried edits and saves body and header effects in t
     expect(reopened.body).not.toContain('HEADER FIXTURE')
     expect(reopened.body).not.toContain('STALE_EDIT_MUST_NOT_APPEAR')
     expect(reopened.body).not.toContain('INVALID_IMAGE_MUST_NOT_APPEAR')
-    expect(errors).toEqual([])
-  } finally {
-    await browser?.close()
-    await new Promise<void>((done) => server.close(() => done()))
-  }
+  })
+})
+
+test('explicit section deletion updates live routing, undo and saved section ownership', async () => {
+  test.setTimeout(120_000)
+  const fixture = await JSZip.loadAsync(
+    await readFile(
+      resolve(__dirname, '../apps/docs/tests/fixtures/foraoffice-header-textbox.docx'),
+    ),
+  )
+  const originalHeader = await fixture.file('word/header1.xml')!.async('string')
+  const source = await fixture.file('word/document.xml')!.async('string')
+  fixture.file(
+    'word/document.xml',
+    source.replace(
+      '<w:body>',
+      '<w:body><w:p><w:pPr><w:mirrorIndents/><w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="10000" w:h="15000"/></w:sectPr></w:pPr><w:r><w:t>SECTION END</w:t></w:r></w:p>',
+    ),
+  )
+  await withHostedDocument(await fixture.generateAsync({ type: 'nodebuffer' }), async (page) => {
+    const result = await page.evaluate(async () => {
+      const { editor, fixture } = window as unknown as FixtureWindow
+      const caller = editor.runtime.connect({ id: 'section-deletion-acceptance' })
+      const query = async (id: string, input: Record<string, string | number>) => {
+        const result = await caller.execute({ id, name: 'query_document', input })
+        if (result.isError) throw new Error(result.output)
+        return JSON.parse(result.output) as DocsQueryResult
+      }
+      try {
+        const before = caller.context()
+        const sectionsBefore = await query('sections-before', { domain: 'sections' })
+        const headersBefore = await query('headers-before', {
+          domain: 'headers',
+          type: 'textbox',
+          containsText: 'OLD_HEADER',
+        })
+        const body = await query('section-target', {
+          domain: 'body',
+          containsText: 'SECTION END',
+        })
+        if (body.items.length !== 1) throw new Error('Expected one section-ending paragraph')
+        const item = body.items[0]
+        if (!item.structuresComplete) throw new Error('Expected the complete structure inventory')
+        const boundaries = item.structures?.filter((structure) => structure.kind === 'section')
+        if (boundaries?.length !== 1) throw new Error('Expected one section boundary')
+        const input = {
+          startBlockIndex: item.blockIndex,
+          endBlockIndex: item.blockIndex,
+          html: '<p>SECTION REMOVED</p>',
+        }
+        const refused = await caller.execute({
+          id: 'ordinary-section-edit',
+          name: 'replace_blocks',
+          input,
+        })
+        const afterRefusal = caller.context()
+        const removed = await caller.execute({
+          id: 'explicit-section-edit',
+          name: 'replace_blocks',
+          input: { ...input, deleteStructures: [boundaries[0].id] },
+        })
+        const sectionsAfter = await query('sections-after', { domain: 'sections' })
+        const headersAfter = await query('headers-after', {
+          domain: 'headers',
+          type: 'textbox',
+          containsText: 'OLD_HEADER',
+        })
+        caller.context()
+        const undo = await caller.execute({
+          id: 'undo-section-delete',
+          name: 'document_history',
+          input: { action: 'undo' },
+        })
+        const sectionsUndone = await query('sections-undone', { domain: 'sections' })
+        const headersUndone = await query('headers-undone', {
+          domain: 'headers',
+          type: 'textbox',
+          containsText: 'OLD_HEADER',
+        })
+        caller.context()
+        const redo = await caller.execute({
+          id: 'redo-section-delete',
+          name: 'document_history',
+          input: { action: 'redo' },
+        })
+        const sectionsRedone = await query('sections-redone', { domain: 'sections' })
+        const saved = await editor.documents.save()
+        return {
+          before,
+          sectionsBefore,
+          headersBefore,
+          refused,
+          afterRefusal,
+          removed,
+          sectionsAfter,
+          headersAfter,
+          undo,
+          sectionsUndone,
+          headersUndone,
+          redo,
+          sectionsRedone,
+          saved,
+          bytes: fixture.saved,
+        }
+      } finally {
+        caller.close()
+      }
+    })
+    expect(result.sectionsBefore.items).toHaveLength(2)
+    expect(result.headersBefore.items).toHaveLength(1)
+    expect(result.headersBefore.items[0].target.address?.section).toBe(1)
+    expect(result.refused).toMatchObject({ isError: true, committed: false, mutated: false })
+    expect(result.afterRefusal).toEqual(result.before)
+    expect(result.removed.isError).not.toBe(true)
+    expect(result.removed).toMatchObject({ committed: true, mutated: true })
+    expect(result.sectionsAfter.items).toHaveLength(1)
+    expect(result.sectionsAfter.page.complete).toBe(true)
+    expect(result.headersAfter.items).toHaveLength(1)
+    expect(result.headersAfter.items[0].target.address?.section).toBe(0)
+    expect(result.undo.isError).not.toBe(true)
+    expect(result.sectionsUndone.items).toHaveLength(2)
+    expect(result.headersUndone.items).toHaveLength(1)
+    expect(result.headersUndone.items[0].target.address?.section).toBe(1)
+    expect(result.redo.isError).not.toBe(true)
+    expect(result.sectionsRedone.items).toHaveLength(1)
+    expect(result.saved).toBe(true)
+
+    const saved = Uint8Array.from(result.bytes)
+    await writeFile(test.info().outputPath('hosted-section-delete.docx'), saved)
+    const zip = await JSZip.loadAsync(saved)
+    const xml = await zip.file('word/document.xml')!.async('string')
+    expect(xml.match(/<w:sectPr\b/g)).toHaveLength(1)
+    expect(xml).not.toContain('w:w="10000"')
+    const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '' })
+    const body = parser.parse(xml)['w:document']['w:body']
+    const first = [body['w:p']].flat()[0]
+    expect(first['w:pPr']).toHaveProperty('w:mirrorIndents')
+    expect(first['w:pPr']).not.toHaveProperty('w:sectPr')
+    expect(first['w:r']['w:t']).toBe('SECTION REMOVED')
+    const section = body['w:sectPr']
+    expect(section['w:pgSz']['w:w']).toBe('11906')
+    const reference = [section['w:headerReference']]
+      .flat()
+      .find((ref) => ref['w:type'] === 'default')
+    const rels = parser.parse(await zip.file('word/_rels/document.xml.rels')!.async('string'))
+    const target = [rels.Relationships.Relationship]
+      .flat()
+      .find((rel) => rel.Id === reference['r:id']).Target
+    const part = posix.normalize(target.startsWith('/') ? target.slice(1) : `word/${target}`)
+    expect(await zip.file(part)!.async('string')).toBe(originalHeader)
+
+    const reopened = await page.evaluate(async () => {
+      const { editor } = window as unknown as FixtureWindow
+      const opened = await editor.documents.open()
+      const caller = editor.runtime.connect({ id: 'section-deletion-reopened' })
+      try {
+        const sections = await caller.execute({
+          id: 'reopened-sections',
+          name: 'query_document',
+          input: { domain: 'sections' },
+        })
+        const headers = await caller.execute({
+          id: 'reopened-headers',
+          name: 'query_document',
+          input: { domain: 'headers', type: 'textbox', containsText: 'OLD_HEADER' },
+        })
+        if (sections.isError || headers.isError) throw new Error(sections.output + headers.output)
+        return {
+          opened,
+          sections: JSON.parse(sections.output) as DocsQueryResult,
+          headers: JSON.parse(headers.output) as DocsQueryResult,
+        }
+      } finally {
+        caller.close()
+      }
+    })
+    expect(reopened.opened).toBe(true)
+    expect(reopened.sections.items).toHaveLength(1)
+    expect(reopened.headers.items).toHaveLength(1)
+    expect(reopened.headers.items[0].target.address?.section).toBe(0)
+  })
 })
