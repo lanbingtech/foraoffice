@@ -806,3 +806,45 @@ Legacy `.doc`, `.odt`, `.hwp` import and HTML/MHT `altChunk` display conversion
 remain integrations supplied by the host; the Electron application retains its
 existing converters. Unconverted chunk parts remain preserved in the DOCX
 package. The SDK package does not install or modify a DIGspace application.
+
+## Document targeting and inspection
+
+These contracts are shared by the editor runtime and its standard MCP tools;
+they do not depend on a particular host, agent or report template.
+
+- `set_header_footer` accepts a zero-based `section` (default **0 for both
+  header and footer**) and `view: "default" | "first" | "even"`. Context lists
+  every section/variant, its text, owning section, inheritance and shared targets.
+  `scope: "section"` is the default: save creates an independent part and, when
+  necessary, materializes the former reference at the next inherited boundary,
+  preserving other sections and variants. `scope: "shared"` explicitly edits the
+  owning part and affects all `sharedTargets`, including other variants sharing
+  that part. Editing `first` enables that section's `titlePg`; editing `even`
+  enables the document-wide even/odd display setting. These visibility settings
+  are distinct from changing other sections' stored content. `{PAGE}` and
+  `{NUMPAGES}` remain live fields after save/reopen. Per-line styling and picture
+  relationships are preserved when cloning an existing part.
+- Context and `read_blocks` list revision-bound `mediaRef` values corresponding
+  to `doc:B.I` image ordinals. Pass `mediaRef` to `read_document_media`; results
+  use standard MCP image content without exposing resource URLs or credentials.
+  Standalone images, inline images and images in table cells use the same path.
+  The compatibility form is `blockIndex` plus `imageIndex`; an ordinal is
+  required when a block has several images. Redacted/deleted/decorative pictures
+  are excluded. Refresh context after changes: an old `mediaRef` remains stale
+  even after another read. `stale_target` means an expired reference/baseline;
+  `invalid_input` means an unsupported target or invalid/ambiguous coordinates;
+  `unavailable` means missing image bytes or an HTTP 404/410 resource;
+  `permission_denied` covers revoked/denied resource access. Other IO failures
+  remain `host_failure`.
+- `read_blocks` represents merged tables with HTML `colspan`/`rowspan` and
+  zero-based `data-row`/`data-col` grid coordinates. Covered positions are not
+  synthetic blank cells. Preserve the spans in replacement HTML; coordinates
+  describe the read location and do not override the written layout.
+- `apply_ops` batches remain atomic. `setList` accepts paragraphs/list items;
+  headings keep their role, protected objects retain the documented skip
+  behavior, and unsupported structures such as native tables are rejected with
+  a domain error. `dryRun: true` builds and validates the entire transaction
+  against the current document, including target types, ranges and schema
+  validity, then discards it. It changes neither content, undo history nor the
+  runtime revision. It is a preview, not a reservation: subsequent edits can
+  invalidate the plan. Any failed batch leaves the whole document unchanged.

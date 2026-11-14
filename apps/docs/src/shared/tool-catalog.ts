@@ -1,3 +1,4 @@
+// Modified for ForaOffice: reliable document targeting and portable inspection.
 import type { AgentToolDef } from '@genoffice/agent-core'
 import { MIND_MAP_TOOL } from '@genoffice/agent-core/mind-map'
 import { PAGE_SETUP_TOOL, SECTION_BREAK_TOOL } from './page-tool-schema'
@@ -135,7 +136,8 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
           },
           dryRun: {
             type: 'boolean',
-            description: 'validate and return the plan without changing the document',
+            description:
+              'Check parameters, current target types/ranges and schema executability by building the whole transaction, then discard it. No document, history or revision changes; later edits can invalidate this preview.',
           },
         },
         required: ['ops'],
@@ -464,11 +466,22 @@ export function docsToolCatalog(operationNames: readonly string[] = []): AgentTo
       name: 'set_header_footer',
       description:
         'Set the page header or footer text (the current contents are listed in the message context). Plain text; \\n separates lines; the tokens {PAGE} and {NUMPAGES} become live page-number fields; an empty string clears the text. ' +
-        'Per-line alignment/styling of the existing header/footer is preserved; images in it are untouched. view "first"/"even" writes the different-first-page / even-page variant (enabling that setting if needed).',
+        'Per-line alignment/styling and images are preserved. section is zero-based, default 0 for BOTH kinds. scope=section (default) isolates the target and preserves other sections, including inherited/shared parts; scope=shared edits the owning part and affects the sharedWith sections listed in context. view first enables titlePg for that section; even enables document-wide even/odd display.',
       inputSchema: {
         type: 'object',
         properties: {
           kind: { type: 'string', enum: ['header', 'footer'] },
+          section: {
+            type: 'integer',
+            minimum: 0,
+            description: 'Zero-based section index from context; default 0.',
+          },
+          scope: {
+            type: 'string',
+            enum: ['section', 'shared'],
+            description:
+              'Default section preserves non-target sections; shared edits the shared/inherited owning part.',
+          },
           text: {
             type: 'string',
             description: 'new text; \\n between lines; may contain {PAGE} / {NUMPAGES}; "" clears',
