@@ -1,5 +1,6 @@
 // Modified for ForaOffice: reliable document targeting and portable inspection.
 import type { Editor } from '@tiptap/core'
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import type { ToolExecution } from '@genoffice/agent-core'
 import type {
   DocsOperationResult,
@@ -20,7 +21,7 @@ const refused = (output: string, errorCode: DocsErrorCode): MediaResult => ({
 
 /** Public HTML writes require the same document/revision identity as media reads. */
 export function prepareDocumentImageWrite(
-  editor: Editor,
+  editor: Editor | ProseMirrorNode,
   html: string,
   documentId: string,
   revision: number,
@@ -28,6 +29,7 @@ export function prepareDocumentImageWrite(
   const parsed = new DOMParser().parseFromString(html, 'text/html')
   const images = [...parsed.querySelectorAll('img')]
   const errors: DocsImageReferenceIssue[] = []
+  const doc = 'state' in editor ? editor.state.doc : editor
   for (const image of images) {
     const reference = image.getAttribute('src') ?? ''
     const ref = /^media:([^:]+):(\d+):(\d+)\.(\d+)$/.exec(reference)
@@ -50,7 +52,7 @@ export function prepareDocumentImageWrite(
       errors.push({ reference, reason: 'expired' })
       continue
     }
-    const block = editor.state.doc.maybeChild(Number(ref[3]))
+    const block = doc.maybeChild(Number(ref[3]))
     const picture = block && documentImagesOf(block)[Number(ref[4])]
     if (
       !picture ||

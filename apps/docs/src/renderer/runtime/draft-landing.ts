@@ -31,7 +31,7 @@ export class DraftLanding {
   private to: number
   /** the text of the last tick that parsed and rendered */
   private rendered: string | null = null
-  private pending: string | null = null
+  private pending: { html: string; nodes?: ReturnType<typeof parseHtmlFragment> } | null = null
   private timer: ReturnType<typeof setTimeout> | null = null
   private closed = false
   private follow = true
@@ -71,9 +71,9 @@ export class DraftLanding {
   }
 
   /** latest cumulative fragment; rendered on the next tick */
-  update(html: string): void {
+  update(html: string, nodes?: ReturnType<typeof parseHtmlFragment>): void {
     if (this.closed) return
-    this.pending = html
+    this.pending = { html, nodes }
     if (this.timer === null) this.timer = setTimeout(() => this.flush(), DRAFT_TICK_MS)
   }
 
@@ -87,6 +87,13 @@ export class DraftLanding {
       i++
     })
     return index
+  }
+
+  /** Freeze the visible preview without publishing a pending stale update. */
+  pause(): void {
+    if (this.timer !== null) clearTimeout(this.timer)
+    this.timer = null
+    this.pending = null
   }
 
   /**
@@ -140,11 +147,11 @@ export class DraftLanding {
   private flush(): void {
     this.timer = null
     if (this.closed || this.conflicted || this.pending === null || this.editor.isDestroyed) return
-    const html = this.pending
+    const { html, nodes } = this.pending
     this.pending = null
     let next: ProseMirrorNode[]
     try {
-      next = parseHtmlFragment(html, this.numIds).map((n) =>
+      next = (nodes ?? parseHtmlFragment(html, this.numIds)).map((n) =>
         this.editor.schema.nodeFromJSON({ ...n, attrs: { ...n.attrs, aiChanged: false } }),
       )
     } catch {

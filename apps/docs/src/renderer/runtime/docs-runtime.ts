@@ -33,7 +33,7 @@ import type { WritePosition } from './draft-landing'
 import { z } from 'zod'
 import { docsToolCatalog, DOCS_READ_TOOLS } from '../../shared/tool-catalog'
 import { DOCS_DRAFT_CONTROLS, DOCS_RUNTIME_TOOLS } from '../../shared/runtime-tools'
-import { DocumentDraft, draftPosition } from './document-draft'
+import { DocumentDraft, DraftInputError, draftPosition } from './document-draft'
 import { DRAFT_META, hasActiveDocumentDraft } from './draft-landing'
 import { toolUnavailable } from './capabilities'
 import type {
@@ -280,12 +280,21 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
     const createOwnedDraft = (doc: RuntimeDocument, position: WritePosition) => {
       if (hasActiveDocumentDraft(doc.editor)) throw new Error('A document draft is already active')
       const draftId = crypto.randomUUID()
+      const sourceState = stateVersionOf(bindings.current())
       const draft = new DocumentDraft(
         doc.editor,
         doc.numIds,
         position,
         () => !doc.editor.isDestroyed && bindings.current()?.identity === boundIdentity,
         () => bindings.current()?.track,
+        {
+          documentId: boundState.documentId,
+          revision: boundState.revision,
+          isCurrent: () =>
+            !disposed &&
+            bindings.current()?.identity === boundIdentity &&
+            stateVersionOf(bindings.current()) === sourceState,
+        },
       )
       drafts.set(draftId, draft)
       pendingDrafts.add(draft)
@@ -306,7 +315,11 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
         if (!draft) return failure('The draft does not belong to this caller')
         let mutated = false
         if (call.name === 'update_document_draft')
-          draft.update(Number(call.input.sequence), String(call.input.html))
+          draft.update(
+            Number(call.input.sequence),
+            String(call.input.html),
+            call.input.deleteStructures,
+          )
         if (call.name === 'stop_document_draft') draft.stop()
         if (call.name === 'finish_document_draft') {
           if (call.input.decision === 'discard') draft.discard()
@@ -324,6 +337,13 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
           mutated,
         }
       } catch (error) {
+        if (error instanceof DraftInputError)
+          return {
+            ...failure(error.message, error.errorCode),
+            ...(error.imageReferenceErrors
+              ? { imageReferenceErrors: error.imageReferenceErrors }
+              : {}),
+          }
         return failure(error instanceof Error ? error.message : String(error))
       }
     }
@@ -401,17 +421,27 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
         let operationChanged = false
         const ownApply = <T>(operation: () => T): T => {
           const before = bindings.current()
-          const body = before?.editor.state.doc
+          let bodyChanged = false
+          const observe = ({ transaction }: { transaction: Transaction }) => {
+            if (
+              !transaction.getMeta(DRAFT_META) &&
+              transaction.docChanged &&
+              !transaction.before.eq(transaction.doc)
+            )
+              bodyChanged = true
+          }
+          before?.editor.on('transaction', observe)
           const state = stateVersionOf(before)
           try {
             return apply(operation)
           } finally {
+            before?.editor.off('transaction', observe)
             const after = bindings.current()
             if (
               before &&
               after &&
               before.identity === after.identity &&
-              ((body && !body.eq(after.editor.state.doc)) || state !== stateVersionOf(after))
+              (bodyChanged || state !== stateVersionOf(after))
             )
               operationChanged = true
           }
@@ -500,7 +530,7 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
             })
           }
           try {
-            if (call.input.deleteStructures !== undefined)
+            if (call.input.deleteStructures !== undefined && call.name !== 'update_document_draft')
               call = {
                 ...call,
                 input: {
@@ -827,7 +857,7 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
             'delete_comment',
             'edit_note',
           ].includes(call.name)
-          let changesHistory = !DOCS_READ_TOOLS.has(call.name) && !storeOnly
+          let changesHistory = !DOCS_READ_TOOLS.has(call.name) && !storeOnly && !isDraftTool
           if (call.name === 'apply_ops') {
             const preview = executeOps(doc.editor, call.input.ops, {
               numIds: doc.numIds,

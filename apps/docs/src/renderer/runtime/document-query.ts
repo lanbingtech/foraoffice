@@ -5,6 +5,17 @@ import { bindDocumentImageHtml } from './document-media'
 import { TableMap } from '@tiptap/pm/tables'
 import type { RuntimeDocument } from './docs-runtime'
 import { inventoryStructures } from '../ai/structure-inventory'
+import { hasDeletionRevision } from '../ai/doc-utils'
+
+/** Serializer coordinates remain source-grid coordinates when deleted rows are omitted. */
+function cellHtml(table: HTMLTableElement | null, row: number, col: number): string | undefined {
+  return [...(table?.querySelectorAll('td[data-row],th[data-row]') ?? [])].find(
+    (cell) =>
+      cell.closest('table') === table &&
+      cell.getAttribute('data-row') === String(row) &&
+      cell.getAttribute('data-col') === String(col),
+  )?.outerHTML
+}
 
 export interface QueryWindow {
   /** Internal continuation window; initial public requests start at zero. */
@@ -42,8 +53,10 @@ export function projectedTargetHtml(editor: Editor, target: DocsEngineTarget): s
     if (node.type.name !== 'docTable') return
     const map = TableMap.get(node)
     const table = new DOMParser().parseFromString(html, 'text/html').querySelector('table')
-    node.forEach((row, rowOffset, rowIndex) =>
-      row.forEach((_cell, cellOffset, physicalIndex) => {
+    node.forEach((row, rowOffset) => {
+      if (hasDeletionRevision(row)) return
+      row.forEach((cell, cellOffset) => {
+        if (hasDeletionRevision(cell)) return
         const rect = map.findCell(rowOffset + 1 + cellOffset)
         if (
           target.cell &&
@@ -52,9 +65,9 @@ export function projectedTargetHtml(editor: Editor, target: DocsEngineTarget): s
           target.cell.col >= rect.left &&
           target.cell.col < rect.right
         )
-          result = table?.rows[rowIndex]?.cells[physicalIndex]?.outerHTML
-      }),
-    )
+          result = cellHtml(table, rect.top, rect.left)
+      })
+    })
   })
   return result
 }
@@ -272,8 +285,10 @@ export function queryDocument(
       if (node.type.name !== 'docTable') return
       const map = TableMap.get(node)
       const table = parsed.querySelector('table')
-      node.forEach((row, rowOffset, rowIndex) =>
-        row.forEach((_cell, cellOffset, physicalIndex) => {
+      node.forEach((row, rowOffset) => {
+        if (hasDeletionRevision(row)) return
+        row.forEach((cell, cellOffset) => {
+          if (hasDeletionRevision(cell)) return
           const rect = map.findCell(rowOffset + 1 + cellOffset)
           add({
             target: {
@@ -286,12 +301,12 @@ export function queryDocument(
             },
             type: 'docTableCell',
             blockIndex: index,
-            html: table?.rows[rowIndex]?.cells[physicalIndex]?.outerHTML ?? '',
+            html: cellHtml(table, rect.top, rect.left) ?? '',
             complete: true,
             supportedOperations: ['setTableCellText'],
           })
-        }),
-      )
+        })
+      })
       return
     }
     if (query.domain === 'images') {

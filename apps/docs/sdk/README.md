@@ -1035,6 +1035,13 @@ They validate type/extent and optionally exact `expectedHtml`. Original targets
 are mapped through preceding operations in the same atomic batch; a removed
 target refuses the batch. Positions are scoped addresses, not permanent IDs.
 Cell and image targets cannot be widened implicitly into table/block deletion.
+An explicit cell range must resolve exclusively to the queried physical owner;
+covered coordinates in that same merged owner remain valid. Earlier row/column
+insertion maps the owner's document position and derives its new grid address,
+rather than reusing stale row/column numbers. Deleted rows/cells are excluded
+from cell queries; their presence does not shift emitted live-cell addresses.
+A removed owner or a replacement whose identity cannot be proven refuses the
+whole atomic batch; an adjacent cell never inherits that target.
 An engine-target operation following `moveBlocks` is currently refused before
 the batch commits: that operation rebuilds the whole body and has no retained
 position mapping. Perform the move, query fresh targets, then edit.
@@ -1096,3 +1103,47 @@ the host epoch and otherwise refuse before mutation. This intentionally removes
 the former inference that any accepted write-named request changed the document.
 Existing positional targets and legacy range reads remain available; automation
 should migrate to revision-bound targets and inspect completeness and receipts.
+
+### Draft reference and deletion safety
+
+Read source context and references before `start_document_draft`. Its output and
+`inspect_document_draft` expose a runtime-owned `referenceSnapshot` containing
+the source `documentId` and `revision`. A draft is an unaccepted preview; its
+position flag `replaceDocument` grants no structural deletion permission.
+
+Every cumulative `update_document_draft` validates complete image tags and
+exact `deleteStructures` against that captured source before publishing preview
+content. Bare `doc:B.I`, missing, wrong-document, unsupported, expired and mixed
+invalid references reject the update without accepting its sequence. Whole
+replacement must declare exactly the removed field/object/table/section IDs;
+preserved referenced images and compatible inherited table geometry are excluded.
+Insertion drafts cannot declare deletion. Replays must preserve both HTML and
+deletion intent. New images continue to use `insert_picture`.
+
+Preview rendering changes live positions/revisions. Draft source references are
+an explicit scoped lifetime: the captured bound references remain usable only
+inside that runtime-owned draft while its authored source is unchanged. This
+does not revive them for other writes, refresh a caller baseline, or reserve a
+version. Any authored body change invalidates reference/deletion drafts; any
+authored-side change invalidates the captured store baseline. Finalization then
+refuses before committing; discard, read fresh context, and start a new draft.
+Reference-free insertion/initially blank drafts retain their existing mapped
+insertion behavior and preserve unrelated user typing.
+
+An unfinished image token buffers without publishing it; complete preceding
+image tags still undergo the same checks and an identifiable source prefix must
+belong to an authorized source image. `DocsDraftInspection` distinguishes the
+received `sequence`/`characters` from `validatedSequence`/`validatedCharacters`
+and reports `buffering`. A later complete cumulative update can validate normally.
+`finalize` refuses an incomplete tail. Explicit `retain_partial` may commit the
+last validated snapshot and reports `omittedTail`, `validatedSequence`, and
+`validatedCharacters`, rather than treating the unfinished image as an omitted
+object in a successful full write. A rejected complete invalid update never
+becomes an accepted prefix. Native tool-less writing retains its safe
+last-validated mid-formula fallback and reports the actual retained character count.
+
+Draft start/update/discard controls do not split body typing history. Preview
+transactions do not count as authored effects in operation receipts. Only a
+validated final landing opens the body undo group; saving remains unavailable
+until the draft is settled. These tightened rules apply equally to runtime,
+SDK and standard MCP draft operations.

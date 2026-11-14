@@ -626,6 +626,179 @@ it('discovers standalone images as readable media without exposing asset URLs or
   expect(refused).toMatchObject({ isError: true, committed: false, revision: result.revision })
 })
 
+it('refuses contradictory and bulk-widened ranges on a queried cell target', async () => {
+  const { client } = open('<table><tr><td><p>Left</p></td><td><p>Right</p></td></tr></table>')
+  const q = await client.execute({
+    id: 'q',
+    name: 'query_document',
+    input: { domain: 'cells', containsText: 'Left' },
+  })
+  const target = JSON.parse(q.output).items[0].target
+  for (const range of [
+    { row: 0, col: 1 },
+    { row: 0, col: 0, colEnd: 1 },
+  ]) {
+    expect(
+      await client.execute({
+        id: 'wrong',
+        name: 'apply_ops',
+        input: {
+          ops: [
+            {
+              op: 'setTableCellText',
+              target: { engine: target },
+              range,
+              match: 'all',
+              text: 'WRONG',
+            },
+          ],
+        },
+      }),
+    ).toMatchObject({ isError: true, committed: false, revision: q.revision })
+  }
+  expect(client.context().text).toContain('Left')
+  expect(client.context().text).toContain('Right')
+})
+
+it.each(['column', 'row'])(
+  'keeps a queried physical cell when a preceding %s insertion shifts its grid coordinates',
+  async (axis) => {
+    const { client } = open('<table><tr><td><p>Left</p></td><td><p>Right</p></td></tr></table>')
+    const q = await client.execute({
+      id: 'q',
+      name: 'query_document',
+      input: { domain: 'cells', containsText: 'Right' },
+    })
+    const target = JSON.parse(q.output).items[0].target
+    const result = await client.execute({
+      id: 'shift',
+      name: 'apply_ops',
+      input: {
+        ops: [
+          {
+            op: axis === 'column' ? 'insertTableColumn' : 'insertTableRow',
+            target: { blockIndexes: [0] },
+            ...(axis === 'column' ? { col: 0 } : { row: 0 }),
+            position: 'before',
+          },
+          { op: 'setTableCellText', target: { engine: target }, text: 'Updated' },
+        ],
+      },
+    })
+    expect(result.isError, result.output).not.toBe(true)
+    const read = await client.execute({
+      id: 'read',
+      name: 'query_document',
+      input: { domain: 'cells' },
+    })
+    expect(JSON.parse(read.output).items.map((item: { html: string }) => item.html)).toEqual([
+      ...(axis === 'row' ? [expect.not.stringContaining('Updated')] : []),
+      expect.not.stringContaining('Updated'),
+      expect.stringContaining('Left'),
+      expect.stringContaining('Updated'),
+    ])
+  },
+)
+
+it('projects live cell coordinates after deleted rows and writes the live merged owner', async () => {
+  const { editor, client } = open()
+  editor.commands.setContent({
+    type: 'doc',
+    content: [
+      {
+        type: 'docTable',
+        content: [
+          {
+            type: 'docTableRow',
+            attrs: { rowRevision: { kind: 'del', author: 'test' } },
+            content: [
+              {
+                type: 'docTableCell',
+                attrs: { colspan: 2 },
+                content: [{ type: 'docParagraph', content: [{ type: 'text', text: 'DELETED' }] }],
+              },
+            ],
+          },
+          {
+            type: 'docTableRow',
+            content: [
+              {
+                type: 'docTableCell',
+                attrs: { colspan: 2 },
+                content: [{ type: 'docParagraph', content: [{ type: 'text', text: 'LIVE' }] }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  })
+  client.context()
+  const q = await client.execute({
+    id: 'q',
+    name: 'query_document',
+    input: { domain: 'cells', containsText: 'LIVE' },
+  })
+  const item = JSON.parse(q.output).items[0]
+  expect(item.target.cell).toEqual({ row: 1, col: 0 })
+  item.target.expectedHtml = item.html
+  expect(
+    await client.execute({
+      id: 'write',
+      name: 'apply_ops',
+      input: {
+        ops: [
+          {
+            op: 'setTableCellText',
+            target: { engine: item.target },
+            range: { row: 1, col: 1 },
+            text: 'Updated',
+          },
+        ],
+      },
+    }),
+  ).toMatchObject({ committed: true })
+  expect(editor.state.doc.textContent).toBe('DELETEDUpdated')
+})
+
+it('rejects an atomic batch when a preceding column deletion removes the queried owner', async () => {
+  const { client } = open(
+    '<table><tr><td><p>Left</p></td><td><p>Middle</p></td><td><p>Right</p></td></tr></table>',
+  )
+  const query = await client.execute({
+    id: 'q',
+    name: 'query_document',
+    input: { domain: 'cells', containsText: 'Middle' },
+  })
+  const target = JSON.parse(query.output).items[0].target
+  const result = await client.execute({
+    id: 'removed',
+    name: 'apply_ops',
+    input: {
+      ops: [
+        { op: 'deleteTableColumn', target: { blockIndexes: [0] }, col: 1 },
+        { op: 'setTableCellText', target: { engine: target }, text: 'WRONG' },
+      ],
+    },
+  })
+  expect(result).toMatchObject({
+    isError: true,
+    committed: false,
+    mutated: false,
+    revision: query.revision,
+  })
+  const after = await client.execute({
+    id: 'after',
+    name: 'query_document',
+    input: { domain: 'cells' },
+  })
+  expect(JSON.parse(after.output).items.map((item: { html: string }) => item.html)).toEqual([
+    expect.stringContaining('Left'),
+    expect.stringContaining('Middle'),
+    expect.stringContaining('Right'),
+  ])
+})
+
 it('publishes a completed-save receipt and reopens the exact query-targeted effect', async () => {
   const parsed = await parseDocx(
     await buildDocx({
