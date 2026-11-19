@@ -124,6 +124,22 @@ it('allows only the documented Qt paper-size deviation without widening source-r
   )
 })
 
+it('accepts the measured browser paper rounding without moving source regions', () => {
+  const browser = structuredClone(pages)
+  browser[0].width += 0.6203
+  browser[0].height += 0.0225
+  expect(() => verifyPositionedPdf(expected, snapshot, browser, 'browser')).not.toThrow()
+
+  browser[0].items[1].rect.x -= 10.5
+  expect(() => verifyPositionedPdf(expected, snapshot, browser, 'browser')).toThrow(
+    'Printed text has no source geometry',
+  )
+  browser[0].width = snapshot.pages[0].width + 0.76
+  expect(() => verifyPositionedPdf(expected, snapshot, browser, 'browser')).toThrow(
+    'PDF page size differs',
+  )
+})
+
 it('requires a configured visible repeated header even when its entire PDF text disappears', () => {
   const repeated = structuredClone(snapshot)
   repeated.regions.push(
