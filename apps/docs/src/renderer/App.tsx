@@ -11,6 +11,7 @@ import { submitDocsEditorAction } from './runtime/editor-actions'
 import { scriptFontHtml } from './editor/script-fonts'
 import { carryDocSeen } from './ai/tools'
 import { DOC_CSS_COMMITTED_EVENT, WRAP_WIDTHS_COMMITTED_EVENT } from './editor/cjk-punct-shrink'
+import { trackPaginationActivity } from './pagination-activity'
 import { justifyShrinkPluginKey } from './editor/justify-shrink'
 import { tabReflowMeta } from './editor/decoration-extensions'
 import {
@@ -4131,6 +4132,7 @@ export function App({
     const contentH = twipsToPx(section.pageHeight) - effTopSingle - effBottomSingle
     let slices: PageSlice[] = []
     let timer: number | null = null
+    const activity = trackPaginationActivity()
     let rowFillSig = ''
     // passes a pass schedules for itself (widths / suppression applied late);
     // a document whose column widths never settle must not paginate forever
@@ -4376,6 +4378,7 @@ export function App({
     const remeasure = () => {
       if (disposed) return
       timer = null
+      activity.update({ pending: false, active: true })
       lastPassAt = performance.now()
       const edited = fastEdits
       fastEdits = new Set()
@@ -4435,7 +4438,11 @@ export function App({
           if (dbg) dbg.fastPasses = fastPasses
         }
         locate()
+      } catch (error) {
+        activity.update({ error: String(error) })
+        throw error
       } finally {
+        activity.update({ active: false })
         lastPassMs = performance.now() - lastPassAt
         // a pass that threw between the add and the pre-setPageGaps remove
         // must not leave the gap widgets hidden
@@ -5867,6 +5874,7 @@ export function App({
         )
         const delay = Math.max(300, gap - (performance.now() - lastPassAt))
         timer = window.setTimeout(remeasure, delay)
+        activity.update({ pending: true })
         return
       }
       if (timer) window.clearTimeout(timer)
@@ -5880,6 +5888,7 @@ export function App({
           ? FOLLOW_UP_PASS_DELAY_MS
           : Math.min(EDIT_PASS_DEBOUNCE_MAX_MS, Math.max(300, lastPassMs * EDIT_PASS_DUTY)),
       )
+      activity.update({ pending: true })
     }
     // while a phased open streams its tail, this effect re-runs as the section
     // state fills in: a synchronous whole-document pass per run made a long
@@ -5912,7 +5921,11 @@ export function App({
       if (reprobeHf) {
         bumpHfProbeFontEpoch()
         if (hfTimer) window.clearTimeout(hfTimer)
-        hfTimer = window.setTimeout(() => setHfMeasureEpoch((e) => e + 1), 300)
+        activity.update({ fontProbe: true })
+        hfTimer = window.setTimeout(() => {
+          activity.update({ fontProbe: false })
+          setHfMeasureEpoch((e) => e + 1)
+        }, 300)
       }
       onUpdate()
     }
@@ -5963,6 +5976,7 @@ export function App({
     editor?.on('transaction', onShrinkTr)
     return () => {
       disposed = true
+      activity.dispose()
       flushPaginationRef.current = () => {}
       if (timer) window.clearTimeout(timer)
       if (hfTimer) window.clearTimeout(hfTimer)
