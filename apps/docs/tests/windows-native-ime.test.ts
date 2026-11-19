@@ -1,6 +1,14 @@
 // @vitest-environment node
 import { expect, it } from 'vitest'
-import { parseWindowsNativeImeEvidence, runWindowsNativeIme } from '../../../e2e/windows-native-ime'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import {
+  evaluateNativeCandidateCapture,
+  parseWindowsNativeImeEvidence,
+  runWindowsNativeIme,
+} from '../../../e2e/windows-native-ime'
 
 const ownedWindow = {
   targetProcessId: 41,
@@ -183,6 +191,197 @@ it('rejects empty helper output rather than accepting native input completion', 
   expect(() =>
     parseWindowsNativeImeEvidence({ action: 'inspect', targetProcessId: 41 }, '{}'),
   ).toThrow('Invalid native IME evidence')
+})
+
+it('keeps unavailable candidate process metadata explicit without treating UIA names as visual proof', () => {
+  const snapshot = completedInput().before
+  const output = {
+    action: 'inspect',
+    channel: 'win32-window-inspection',
+    before: snapshot,
+    loadedProfiles: [snapshot.profile],
+    candidateInspection: {
+      evidenceKind: 'uia-metadata-only',
+      processes: [
+        {
+          processId: 42,
+          processName: 'ChsIME',
+          image: null,
+          status: 'unavailable',
+          error: 'Access is denied',
+          win32Error: 5,
+        },
+      ],
+      windows: [
+        {
+          processId: 42,
+          image: null,
+          windowHandle: '99',
+          windowClass: 'fixture',
+          left: 0,
+          top: 0,
+          right: 20,
+          bottom: 20,
+          names: ['测试'],
+          truncated: false,
+        },
+      ],
+      errors: [],
+    },
+  }
+  const evidence = parseWindowsNativeImeEvidence(
+    { action: 'inspect', targetProcessId: 41, includeCandidates: true },
+    JSON.stringify(output),
+  )
+  expect(evidence.candidateInspection?.processes[0]).toMatchObject({
+    image: null,
+    status: 'unavailable',
+    win32Error: 5,
+  })
+  expect(evidence.candidateInspection?.evidenceKind).toBe('uia-metadata-only')
+})
+
+it('does not accept a candidate screenshot file alone as native candidate proof', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'docs-native-candidate-test-'))
+  try {
+    const imagePath = join(directory, 'candidate.png')
+    await writeFile(imagePath, 'not a native capture')
+    expect(await evaluateNativeCandidateCapture(ownedWindow, { imagePath })).toMatchObject({
+      status: 'incomplete',
+    })
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+it('requires a matching separate visual review to confirm a hash-bound native desktop capture', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'docs-native-candidate-test-'))
+  try {
+    // Fixed 1x1 PNG is a test fixture, not candidate or application evidence.
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2ioAAAAASUVORK5CYII=',
+      'base64',
+    )
+    const imagePath = join(directory, 'candidate.png')
+    await writeFile(imagePath, png)
+    const imageSha256 = createHash('sha256').update(png).digest('hex')
+    const capture = {
+      source: 'win32-desktop-copy-from-screen',
+      coordinateSource: 'uia-physical-screen',
+      owner: ownedWindow,
+      foregroundBefore: ownedWindow,
+      foregroundAfter: ownedWindow,
+      startedUtc: '2026-11-19T01:00:00.001Z',
+      completedUtc: '2026-11-19T01:00:00.002Z',
+      window: {
+        processId: 42,
+        windowHandle: '99',
+        windowClass: 'fixture',
+        left: 0,
+        top: 0,
+        right: 1,
+        bottom: 1,
+      },
+      imagePath,
+      imageSha256,
+    }
+    expect(await evaluateNativeCandidateCapture(ownedWindow, capture)).toMatchObject({
+      status: 'pending-visual-review',
+      imageSha256,
+    })
+    const review = {
+      source: 'manual-native-pixel-review',
+      owner: ownedWindow,
+      imageSha256,
+      reviewedUtc: '2026-11-19T01:00:01.000Z',
+      reviewer: 'fixture-reviewer',
+      preedit: 'ceshi',
+      selectedCandidate: '测试',
+    }
+    expect(await evaluateNativeCandidateCapture(ownedWindow, capture, review)).toMatchObject({
+      status: 'confirmed',
+      imageSha256,
+      selectedCandidate: '测试',
+    })
+    for (const invalid of [
+      { ...capture, source: 'cdp-page-screenshot' },
+      { ...capture, coordinateSource: 'css-pixels' },
+      { ...capture, foregroundAfter: { ...ownedWindow, targetProcessId: 99 } },
+      { ...capture, imagePath: join(directory, 'missing.png') },
+      { ...capture, imageSha256: '0'.repeat(64) },
+      { ...capture, window: { ...capture.window, right: 2 } },
+    ])
+      expect(await evaluateNativeCandidateCapture(ownedWindow, invalid, review)).toMatchObject({
+        status: 'incomplete',
+      })
+    for (const invalidReview of [
+      null,
+      { candidateConfirmed: true },
+      { ...review, imageSha256: '0'.repeat(64) },
+      { ...review, owner: { ...ownedWindow, windowHandle: '100' } },
+      { ...review, reviewedUtc: '2026-11-18T01:00:01.000Z' },
+      { ...review, selectedCandidate: '' },
+    ])
+      expect(
+        await evaluateNativeCandidateCapture(ownedWindow, capture, invalidReview),
+      ).toMatchObject({ status: 'incomplete' })
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+it('retains unavailable candidate process metadata without treating window names as visual proof', () => {
+  const input = completedInput()
+  const inspection = {
+    evidenceKind: 'uia-metadata-only',
+    processes: [
+      {
+        processId: 45680,
+        processName: 'ChsIME',
+        image: null,
+        status: 'unavailable',
+        error: 'Access is denied',
+        win32Error: 5,
+      },
+    ],
+    windows: [
+      {
+        processId: 45680,
+        image: null,
+        windowHandle: '66800',
+        windowClass: 'fixture',
+        left: 0,
+        top: 0,
+        right: 2560,
+        bottom: 1440,
+        names: [],
+        truncated: false,
+        uiaError: 'UIA unavailable',
+      },
+    ],
+    errors: [],
+  }
+  const output = {
+    action: 'inspect',
+    channel: 'win32-window-inspection',
+    before: input.before,
+    loadedProfiles: [input.before.profile],
+    candidateInspection: inspection,
+  }
+  const evidence = parseWindowsNativeImeEvidence(
+    { action: 'inspect', targetProcessId: 41, includeCandidates: true },
+    JSON.stringify(output),
+  )
+  expect(evidence.candidateInspection).toEqual(inspection)
+  expect(() =>
+    parseWindowsNativeImeEvidence(
+      { action: 'inspect', targetProcessId: 41, includeCandidates: true },
+      JSON.stringify({
+        ...output,
+        candidateInspection: { ...inspection, evidenceKind: 'candidate-confirmed' },
+      }),
+    ),
+  ).toThrow('candidate metadata source')
 })
 
 it('rejects native completion from a different owned process', () => {
