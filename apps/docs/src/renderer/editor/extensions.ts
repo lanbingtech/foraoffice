@@ -19,7 +19,7 @@ import { drawingLineSize } from './drawing-line'
 import { StreamingTailGuardExtension } from './streaming-tail-guard'
 import { wrapGroupCss, type WrapPicture } from './wrap-group'
 import type { ChainedCommands, RawCommands } from '@tiptap/core'
-import { Gapcursor, UndoRedo } from '@tiptap/extensions'
+import { Gapcursor } from '@tiptap/extensions'
 import { DOMSerializer } from '@tiptap/pm/model'
 import type { DOMOutputSpec, Node as PmNode } from '@tiptap/pm/model'
 import {
@@ -252,6 +252,7 @@ import { CheckboxToggleExtension } from './checkbox-toggle'
 import { DoubleClickWordExtension } from './dblclick-word'
 import { OutlineViewExtension } from './outline-view'
 import { PageGapNavExtension } from './page-gap-nav'
+import { DocumentUndoRedo } from './undo-redo'
 import { TrailingTableExitExtension } from './trailing-table-exit'
 import { moveBlocks } from './move-block'
 import { tablePositionCss, tableWidthCss, type TableWidthInput } from './table-geometry'
@@ -7335,7 +7336,7 @@ export const textboxSubExtensions = [
   InsMark,
   DelMark,
   TextboxListRenumber,
-  UndoRedo,
+  DocumentUndoRedo,
 ]
 
 // ---- find & replace highlighting ----
@@ -7431,7 +7432,7 @@ export const editorExtensions = [
   CommentMark,
   InsMark,
   DelMark,
-  UndoRedo,
+  DocumentUndoRedo,
   CommentEndpointsExtension,
   MultiSelect,
   SearchHighlightExtension,
