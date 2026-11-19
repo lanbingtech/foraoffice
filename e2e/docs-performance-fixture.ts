@@ -13,6 +13,11 @@ export async function buildPerformanceFixture(scale = 1): Promise<Uint8Array> {
     resolve(__dirname, '../packages/docx-engine/tests/fixtures/mathtype-axb.wmf'),
   )
   const body: string[] = []
+  const sections = [
+    '<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="11906" w:h="16838" w:orient="portrait"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr>',
+    '<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/><w:pgMar w:top="1080" w:bottom="1080" w:left="720" w:right="2160"/></w:sectPr>',
+    '<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="12240" w:h="15840" w:orient="portrait"/><w:pgMar w:top="1800" w:bottom="1080" w:left="1800" w:right="1080"/></w:sectPr>',
+  ]
   const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`
   for (let group = 0; group < 17 * scale; group++) {
     for (let p = 0; p < 13; p++)
@@ -49,10 +54,13 @@ export async function buildPerformanceFixture(scale = 1): Promise<Uint8Array> {
         '<w:p><w:r><w:pict><v:shape style="width:144pt;height:36pt">' +
           '<v:imagedata r:id="rId50"/></v:shape></w:pict></w:r></w:p>',
       )
+    if (group % 6 === 5 && group + 1 < 17 * scale)
+      body.push(`<w:p><w:pPr>${sections[Math.floor(group / 6) % sections.length]}</w:pPr></w:p>`)
   }
   body.push(paragraph(PERFORMANCE_END))
   return buildDocx({
     bodyXml: body.join(''),
+    sectPrXml: sections[Math.floor((17 * scale - 1) / 6) % sections.length],
     docRootExtraAttrs: 'xmlns:v="urn:schemas-microsoft-com:vml"',
     extraRels:
       '<Relationship Id="rId50" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/equation.wmf"/>',

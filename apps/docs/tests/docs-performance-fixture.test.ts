@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { expect, it, vi } from 'vitest'
 import JSZip from 'jszip'
+import { XMLParser } from 'fast-xml-parser'
 import { buildPerformanceFixture, documentTail } from '../../../e2e/docs-performance-fixture'
 
 it('generates identical public fixture bytes on different run dates', async () => {
@@ -17,6 +18,29 @@ it('generates identical public fixture bytes on different run dates', async () =
     expect((await zip.file('word/media/equation.wmf')!.async('uint8array')).length).toBeGreaterThan(
       0,
     )
+    const xml = new XMLParser({ ignoreAttributes: false }).parse(
+      await zip.file('word/document.xml')!.async('string'),
+    )
+    const body = xml['w:document']['w:body']
+    const sections = [
+      ...body['w:p'].flatMap((p: Record<string, Record<string, unknown>>) =>
+        p['w:pPr']?.['w:sectPr'] ? [p['w:pPr']['w:sectPr']] : [],
+      ),
+      body['w:sectPr'],
+    ]
+    expect(
+      sections.map((section) => [
+        section['w:pgSz']['@_w:w'],
+        section['w:pgSz']['@_w:h'],
+        section['w:pgSz']['@_w:orient'],
+        section['w:pgMar']['@_w:left'],
+        section['w:pgMar']['@_w:right'],
+      ]),
+    ).toEqual([
+      ['11906', '16838', 'portrait', '1440', '1440'],
+      ['16838', '11906', 'landscape', '720', '2160'],
+      ['12240', '15840', 'portrait', '1800', '1080'],
+    ])
   } finally {
     vi.useRealTimers()
   }

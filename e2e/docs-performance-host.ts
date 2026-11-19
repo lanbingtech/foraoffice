@@ -78,8 +78,10 @@ async function nativeSaveDialog(pid: number, file: string): Promise<void> {
       '-SaveFile',
       '-TargetFilePath',
       file,
+      '-TimeoutMs',
+      '180000',
     ],
-    { timeout: 30_000, windowsHide: true },
+    { timeout: 190_000, windowsHide: true },
   )
 }
 
@@ -182,6 +184,8 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
             await browser?.close()
           } finally {
             clearTimeout(timer)
+            const process = app.process()
+            if (process.exitCode === null && process.signalCode === null) process.kill()
             if (child.exitCode === null) child.kill()
           }
         },
@@ -259,8 +263,16 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
       const timer = setTimeout(() => app.process().kill(), 10_000)
       try {
         await app.close()
+      } catch (cleanup) {
+        throw new AggregateError(
+          [error, cleanup],
+          `Electron startup failed: ${String(error)}; cleanup failed: ${String(cleanup)}`,
+          { cause: error },
+        )
       } finally {
         clearTimeout(timer)
+        const process = app.process()
+        if (process.exitCode === null && process.signalCode === null) process.kill()
       }
       throw error
     }

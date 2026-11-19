@@ -35,6 +35,37 @@ it('closes the browser when creating its first page fails before returning a ses
   }
 })
 
+it('kills its live Electron process when close rejects and preserves the startup failure', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'docs-perf-host-'))
+  try {
+    await mkdir(join(workspace, 'node_modules/electron'), { recursive: true })
+    await writeFile(join(workspace, 'package.json'), '{}')
+    await writeFile(
+      join(workspace, 'node_modules/electron/index.js'),
+      'module.exports=process.execPath',
+    )
+    const kill = vi.fn()
+    launches.electron.mockResolvedValue({
+      firstWindow: vi.fn().mockRejectedValue(new Error('startup failed')),
+      close: vi.fn().mockRejectedValue(new Error('cleanup failed')),
+      process: () => ({ exitCode: null, signalCode: null, kill }),
+    })
+    await expect(
+      launchPerformanceHost({
+        kind: 'electron',
+        workspace,
+        document: '',
+        sdk: '',
+        electronApp: workspace,
+        qtExecutable: '',
+      }),
+    ).rejects.toThrow('startup failed')
+    expect(kill).toHaveBeenCalledTimes(1)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
 it('closes Electron when window acquisition or bootstrap fails after launching it', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'docs-perf-host-'))
   try {

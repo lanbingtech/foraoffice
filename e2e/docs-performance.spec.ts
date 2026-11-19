@@ -8,6 +8,7 @@ import { createRequire } from 'node:module'
 import JSZip from 'jszip'
 import { PDFDocument } from 'pdf-lib'
 import { buildPerformanceFixture, documentOracle } from './docs-performance-fixture'
+import { collectPlatformFonts } from './docs-performance-fonts'
 import {
   documentZoom,
   expectedInsertion,
@@ -433,6 +434,7 @@ test('production document performance and correctness evidence', async () => {
       'File → PDF; entire document; default original paper/section geometry; visible UI total must equal output page count; all original body text plus intended edit must occur in order',
   }
   let condition: Record<string, unknown> | undefined
+  let platformFonts: Awaited<ReturnType<typeof collectPlatformFonts>> | undefined
   let correctness: Record<string, unknown> | undefined
   let currentScenario = 'process-start-to-layout-verified-observation'
   let session: PerformanceSession | undefined
@@ -478,6 +480,7 @@ test('production document performance and correctness evidence', async () => {
           aggregateIncludesScreenshotAndVerification: true,
         },
       })
+      if (launch === 0) platformFonts = await collectPlatformFonts(session.page)
       condition = {
         host,
         fixture: metadata.fixture,
@@ -487,6 +490,7 @@ test('production document performance and correctness evidence', async () => {
         diagnostics: metadata.diagnostics,
         compositionMethod: metadata.compositionMethod,
         fonts: state.fonts,
+        platformFonts,
         environment: state.environment,
         engine: session.evidence,
       }
