@@ -184,8 +184,6 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
             await browser?.close()
           } finally {
             clearTimeout(timer)
-            const process = app.process()
-            if (process.exitCode === null && process.signalCode === null) process.kill()
             if (child.exitCode === null) child.kill()
           }
         },
@@ -256,6 +254,8 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
             await app.close()
           } finally {
             clearTimeout(timer)
+            const process = app.process()
+            if (process.exitCode === null && process.signalCode === null) process.kill()
           }
         },
       }
@@ -267,7 +267,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
         throw new AggregateError(
           [error, cleanup],
           `Electron startup failed: ${String(error)}; cleanup failed: ${String(cleanup)}`,
-          { cause: error },
+          { cause: cleanup },
         )
       } finally {
         clearTimeout(timer)
