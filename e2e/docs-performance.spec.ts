@@ -1117,6 +1117,7 @@ test('production document performance and correctness evidence', async () => {
     currentScenario = 'save-print'
     const pageStatus = live.page.locator('.status-page')
     const reopenedStatus = await pageStatus.innerText()
+    const visiblePages = Number(reopenedStatus.match(/\d+/g)?.at(-1))
     await writeFile(
       join(root, 'reopened-page-count.json'),
       JSON.stringify({ status: reopenedStatus, layoutSlices: reopened.pages }, null, 2),
@@ -1187,8 +1188,9 @@ test('production document performance and correctness evidence', async () => {
     await writeFile(join(root, 'print-budget.json'), JSON.stringify(budget, null, 2))
     const pdf = await withDeadline(live.exportPdf(budget.timeoutMs), budget.timeoutMs, 'PDF export')
     const printed = await waitForPdf(pdf)
+    // Capture the post-print status for diagnostics. Media emulation can leave
+    // the editor behind the preview mid-layout, so the gate uses the settled reopen.
     const statusAfterPrint = await pageStatus.innerText()
-    const visiblePages = Number(statusAfterPrint.match(/\d+/g)?.at(-1))
     const positioned = await readPositionedPdf(await readFile(pdf))
     const projected = projectPrintedTextboxes(printChains, printSource.textboxClips)
     const toc = projectPrintedTocLeaders(savedXml, projected.chains, printSource.tocLeaders)
