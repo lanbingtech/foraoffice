@@ -2,6 +2,13 @@ import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 export type PerformanceObservation = { ok: true; durationMs: number } | { ok: false; error: string }
 
+/** Every untouched open must use the same observed conditions, including intermediate launches. */
+export function retainRunCondition<T>(first: T | undefined, current: T): T {
+  if (first !== undefined && JSON.stringify(first) !== JSON.stringify(current))
+    throw new Error('Performance within-run conditions differ')
+  return first ?? structuredClone(current)
+}
+
 export async function withDeadline<T>(
   work: Promise<T>,
   milliseconds: number,

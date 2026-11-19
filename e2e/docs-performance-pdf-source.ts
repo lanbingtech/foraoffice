@@ -1,5 +1,5 @@
 import { XMLBuilder, XMLParser } from 'fast-xml-parser'
-import { mainStoryOracle } from './docs-performance-stories'
+import { mainStoryOracle, expectedTextboxStories } from './docs-performance-stories'
 
 type Xml = Array<Record<string, unknown>>
 interface SourceElement {
@@ -60,7 +60,7 @@ const wmlAttribute = (element: SourceElement, local: string) =>
 export function sourcePrintChains(
   documentXml: string,
   tables: SourceTable[],
-  bindings: Array<{ docxIndex: number | null; originalXml: string | null }>,
+  bindings: Array<{ docxIndex: number | null; originalXml: string | null; textboxes?: unknown[] }>,
 ): Record<string, string> {
   const parsed = parse(documentXml)
   const body = (nodes: Xml, scope: Record<string, string>): SourceElement | undefined => {
@@ -194,6 +194,11 @@ export function sourcePrintChains(
     remaining = remaining.replace(xml, '')
   }
   expected.body = mainStoryOracle(remaining).textRuns.join('')
+  for (const story of expectedTextboxStories(
+    documentXml,
+    bindings.filter((block) => block.textboxes?.length),
+  ))
+    expected[`box:${story.docxIndex}:${story.txbxIndex}`] = story.text
   return expected
 }
 
@@ -303,9 +308,17 @@ export function sourceHeaderFooterChains(
           element.local === 'AlternateContent'
         ) {
           if (field) throw new Error('Unsupported field crossing alternate content')
-          const alternatives = elements(element.children, element.scope).map((branch) =>
-            project(branch.children, branch.scope),
+          const branches = elements(element.children, element.scope)
+          if (
+            branches.some(
+              (branch) =>
+                branch.namespace !== element.namespace ||
+                !['Choice', 'Fallback'].includes(branch.local),
+            )
           )
+            throw new Error('Unrecognized header/footer alternate-content branch')
+          const alternatives = branches.map((branch) => project(branch.children, branch.scope))
+          if (!branches.some((branch) => branch.local === 'Fallback')) alternatives.push([])
           if (
             !alternatives.length ||
             alternatives.some(

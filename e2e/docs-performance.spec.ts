@@ -39,6 +39,7 @@ import {
   comparePerformanceReports,
   summarizeScenario,
   withDeadline,
+  retainRunCondition,
   type PerformanceObservation,
 } from './docs-performance-result'
 
@@ -389,6 +390,7 @@ test('production document performance and correctness evidence', async () => {
     'fresh-process-primed-sample-open-to-layout-verified-observation': 5,
     'fresh-process-primed-sample-open-to-first-diagnostic-idle-observation': 5,
     'hot-open-to-layout-verified-observation': 10,
+    'hot-open-to-visible-observation': 10,
     'hot-open-to-first-diagnostic-idle-observation': 10,
     'wheel-visible-observation': 30,
     ...Object.fromEntries(
@@ -465,7 +467,7 @@ test('production document performance and correctness evidence', async () => {
     compositionMethod:
       'CDP Input.imeSetComposition followed by Input.insertText; composition events recorded; not an OS IME benchmark',
     printConditions:
-      'File → PDF; entire document; default original paper/section geometry; visible UI total must equal output page count; all original body text plus intended edit must occur in order',
+      'product preview and real PDF export; entire document; default original paper/section geometry; source-cell/body/textbox/HF baseline+full-advance chains and exact page count; semantic proof with separate paint evidence; print emulation removed before export',
   }
   let condition: Record<string, unknown> | undefined
   let platformFonts: Awaited<ReturnType<typeof collectPlatformFonts>> | undefined
@@ -474,6 +476,41 @@ test('production document performance and correctness evidence', async () => {
   let session: PerformanceSession | undefined
   let focus: ReturnType<typeof createPerformanceFocusGuard> | undefined
   let document = ''
+  const recordCondition = async (
+    page: Page,
+    state: Awaited<ReturnType<typeof waitForLayout>>,
+    engine: Record<string, unknown>,
+    phase: string,
+  ) => {
+    platformFonts = await collectPlatformFonts(page)
+    const observed = {
+      host,
+      headless: metadata.headless,
+      fixture: metadata.fixture,
+      machine: metadata.machine,
+      cachePolicy: metadata.cachePolicy,
+      timingBoundary: metadata.timingBoundary,
+      focusPolicy: metadata.focusPolicy,
+      editFingerprintMethod: metadata.editFingerprintMethod,
+      diagnostics: metadata.diagnostics,
+      sourceStoryMethod: metadata.sourceStoryMethod,
+      compositionMethod: metadata.compositionMethod,
+      printConditions: metadata.printConditions,
+      conditionPolicy:
+        'reject stable environment/actual font identity drift after every unchanged fresh/hot open; font query outside measured intervals',
+      fontReadiness: state.fonts?.status,
+      platformFonts: { provenance: platformFonts.provenance, identities: platformFonts.identities },
+      environment: state.environment,
+      engine,
+    }
+    details.push({
+      operation: 'comparison-condition',
+      phase,
+      ...observed,
+      actualFontQueryParents: platformFonts.queriedParents,
+    })
+    condition = retainRunCondition(condition, observed)
+  }
   try {
     for (let launch = 0; launch < launches; launch++) {
       const workspace = join(root, `launch-${launch}`)
@@ -560,24 +597,7 @@ test('production document performance and correctness evidence', async () => {
           aggregateIncludesScreenshotAndVerification: true,
         },
       })
-      if (launch === 0) platformFonts = await collectPlatformFonts(session.page)
-      condition = {
-        host,
-        headless: metadata.headless,
-        fixture: metadata.fixture,
-        machine: metadata.machine,
-        cachePolicy: metadata.cachePolicy,
-        timingBoundary: metadata.timingBoundary,
-        focusPolicy: metadata.focusPolicy,
-        editFingerprintMethod: metadata.editFingerprintMethod,
-        diagnostics: metadata.diagnostics,
-        sourceStoryMethod: metadata.sourceStoryMethod,
-        compositionMethod: metadata.compositionMethod,
-        fonts: state.fonts,
-        platformFonts,
-        environment: state.environment,
-        engine: session.evidence,
-      }
+      await recordCondition(session.page, state, session.evidence, `launch-${launch}`)
       if (launch + 1 < launches) {
         await session.close()
         session = undefined
@@ -595,6 +615,14 @@ test('production document performance and correctness evidence', async () => {
       const opened = await withDeadline(live.open(), 180_000, 'document open')
       const apiReturnMs = now() - started
       if (opened === false) throw new Error('Document open returned false')
+      const first = await firstVisibleContent(
+        live.page,
+        mainStory.paragraphs.find((p) => p.text)!.text.slice(0, 32),
+        generation,
+      )
+      const screenshot = { path: join(root, `hot-open-${i}-first-visible.jpg`), image: first.image }
+      pendingScreenshots.push(screenshot)
+      push('hot-open-to-visible-observation', now() - started)
       const firstIdleMs = await firstDiagnosticIdle(live.page, started, generation)
       push('hot-open-to-first-diagnostic-idle-observation', firstIdleMs)
       const state = await waitForLayout(
@@ -612,14 +640,21 @@ test('production document performance and correctness evidence', async () => {
         sourceXml,
         join(root, `hot-open-${i}-stories.json`),
       )
+      const writeStarted = now()
+      await writeFile(screenshot.path, screenshot.image)
+      pendingScreenshots.splice(pendingScreenshots.indexOf(screenshot), 1)
       details.push({
         operation: 'hot-open',
         index: i,
         apiReturnMs: opened === null ? null : apiReturnMs,
         firstIdleMs,
+        firstVisibleSource: first.visibility,
+        screenshotMs: first.screenshotMs,
+        screenshotWriteMs: now() - writeStarted,
         state,
         stories,
       })
+      await recordCondition(live.page, state, live.evidence, `hot-open-${i}`)
     }
     await focus!.end()
     for (const scenario of edits) {
@@ -891,8 +926,6 @@ test('production document performance and correctness evidence', async () => {
       printSource.source.tables,
       printSource.bindings.blocks,
     )
-    for (const story of expectedTextboxStories(savedXml, printSource.bindings.blocks))
-      printChains[`box:${story.docxIndex}:${story.txbxIndex}`] = story.text
     const storyParts = Object.fromEntries(
       await Promise.all(
         preservedStoryParts.map(

@@ -119,6 +119,30 @@ it('keeps an empty uncovered merge-continuation gap distinct from an authored ed
   })
 })
 
+it('accepts identical ordinary table XML without inventing textbox source bindings', () => {
+  const raw = '<w:tbl><w:tr>' + cell('Duplicate ordinary table') + '</w:tr></w:tbl>'
+  const model = ['T', 'U'].map((table, index) => ({
+    docxIndex: index + 1,
+    sourceTable: table,
+    rows: [{ rowIndex: 0, cells: [{ gridGap: false, sourceCell: { table, row: 0, cell: 0 } }] }],
+  }))
+  expect(
+    sourcePrintChains(
+      xml(raw + raw),
+      model,
+      model.map((table) => ({
+        docxIndex: table.docxIndex,
+        originalXml: raw,
+        textboxes: [],
+      })),
+    ),
+  ).toEqual({
+    body: 'BeforeTail',
+    'T:0:0': 'Duplicateordinarytable',
+    'U:0:0': 'Duplicateordinarytable',
+  })
+})
+
 it('derives default inherited header/footer stories and decimal PAGE from raw section/relationship XML', () => {
   const relNs = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
   const partNs = 'http://schemas.openxmlformats.org/package/2006/relationships'
@@ -178,6 +202,17 @@ it('requires equivalent alternate HF stories and rejects unsupported fields, ext
   expect(sourceHeaderFooterChains(doc, '', relationships, parts, [0])).toEqual({
     'hf:0:header': 'Page1',
   })
+  expect(() =>
+    sourceHeaderFooterChains(
+      doc,
+      '',
+      relationships,
+      {
+        'word/header1.xml': header.replace(`<mc:Fallback>${value}</mc:Fallback>`, ''),
+      },
+      [0],
+    ),
+  ).toThrow('alternate text requires a consumer profile')
   expect(() =>
     sourceHeaderFooterChains(
       doc,
