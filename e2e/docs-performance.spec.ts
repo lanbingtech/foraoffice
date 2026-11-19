@@ -116,6 +116,7 @@ async function waitForLayout(
 ) {
   const deadline = Date.now() + timeout
   const milestonesMs: Record<string, number> = {}
+  let lastProbe: unknown
   let previous = ''
   let unchangedSince = 0
   while (Date.now() < deadline) {
@@ -133,9 +134,13 @@ async function waitForLayout(
             !!pm && pm.getBoundingClientRect().width > 0 && pm.getBoundingClientRect().height > 0
           const normalized = texts.replace(/\s+/g, '')
           let position = 0
-          const orderedTextPresent = textRuns.every((run) => {
+          let missingRunIndex: number | null = null
+          const orderedTextPresent = textRuns.every((run, index) => {
             const found = normalized.indexOf(run, position)
-            if (found < 0) return false
+            if (found < 0) {
+              missingRunIndex = index
+              return false
+            }
             position = found + run.length
             return true
           })
@@ -152,8 +157,18 @@ async function waitForLayout(
               : null,
             visible,
             complete,
+            oracle: {
+              tailPresent: !!end && texts.includes(end.replace(/\s+/g, ' ')),
+              orderedTextPresent,
+              missingRunIndex,
+            },
             imagesReady: images.every((image) => image.complete && image.naturalWidth > 0),
             images: images.length,
+            brokenImages: images.flatMap((image, index) =>
+              image.complete && image.naturalWidth > 0
+                ? []
+                : [{ index, complete: image.complete, naturalWidth: image.naturalWidth }],
+            ),
             pages: win.__pageDebug?.slices?.length,
             signature: JSON.stringify([
               activity?.generation,
@@ -194,6 +209,7 @@ async function waitForLayout(
       a.pending === 0 &&
       a.active === 0 &&
       a.fontProbes === 0
+    lastProbe = { ...state, diagnosticIdle: idle }
     if (a && a.generation > newerThan) {
       if (state.complete && !a.contentPending)
         milestonesMs['complete-content-observed'] ??= now() - measurementStart
@@ -222,7 +238,10 @@ async function waitForLayout(
     }
     await page.waitForTimeout(50)
   }
-  throw new Error('Document completeness, pending layout, fonts/images and geometry did not settle')
+  throw Object.assign(
+    new Error('Document completeness, pending layout, fonts/images and geometry did not settle'),
+    { lastProbe },
+  )
 }
 
 async function firstDiagnosticIdle(page: Page, started: number, newerThan = -1) {
@@ -383,6 +402,7 @@ test('production document performance and correctness evidence', async () => {
   const details: Array<Record<string, unknown>> = []
   const errors: string[] = []
   const blockingTasks: number[] = []
+  const pendingScreenshots: Array<{ path: string; image: Buffer }> = []
   const push = (name: string, value: number) =>
     (runs[name] ??= []).push({ ok: true, durationMs: value })
   const electronApp = resolve(
@@ -460,6 +480,8 @@ test('production document performance and correctness evidence', async () => {
       errors.push(...(await session.page.pageErrors()).map((error) => error.message))
       await installProbe(session.page)
       const first = await firstVisibleContent(session.page)
+      const screenshot = { path: join(workspace, 'first-visible.jpg'), image: first.image }
+      pendingScreenshots.push(screenshot)
       push('process-start-to-visible-observation', now() - started)
       const firstIdleMs = await firstDiagnosticIdle(session.page, started)
       push('process-start-to-first-diagnostic-idle-observation', firstIdleMs)
@@ -468,7 +490,8 @@ test('production document performance and correctness evidence', async () => {
       push('process-start-to-layout-verified-observation', now() - started)
       const verificationMs = now() - verificationStarted
       const writeStarted = now()
-      await writeFile(join(workspace, 'first-visible.jpg'), first.image)
+      await writeFile(screenshot.path, screenshot.image)
+      pendingScreenshots.splice(pendingScreenshots.indexOf(screenshot), 1)
       details.push({
         launch,
         engine: session.evidence,
@@ -784,22 +807,63 @@ test('production document performance and correctness evidence', async () => {
                 disabled: item.getAttribute('aria-disabled'),
               })),
               activity: (window as ProbeWindow).__docsLayoutActivity?.snapshot(),
+              documentText: window.document.querySelector('.ProseMirror')?.textContent,
             })),
           ]),
           5_000,
           'failure context',
         )
         await writeFile(join(root, 'failure.png'), screenshot)
+        if (state.documentText !== undefined)
+          await writeFile(join(root, 'failure-document-text.txt'), state.documentText ?? '')
         await writeFile(
           join(root, 'failure-state.json'),
-          JSON.stringify({ scenario: currentScenario, ...state }, null, 2),
+          JSON.stringify(
+            {
+              scenario: currentScenario,
+              ...state,
+              documentText: undefined,
+              lastProbe:
+                typeof error === 'object' && error !== null && 'lastProbe' in error
+                  ? error.lastProbe
+                  : undefined,
+            },
+            null,
+            2,
+          ),
         )
+        if (!platformFonts) {
+          try {
+            const fonts = await withDeadline(
+              collectPlatformFonts(session.page),
+              30_000,
+              'post-failure platform fonts',
+            )
+            await writeFile(
+              join(root, 'failure-platform-fonts.json'),
+              JSON.stringify(
+                { phase: 'diagnostic only; complete-document gate failed', ...fonts },
+                null,
+                2,
+              ),
+            )
+          } catch (fontError) {
+            errors.push(`Post-failure platform-font evidence unavailable: ${String(fontError)}`)
+          }
+        }
       } catch (diagnostic) {
         errors.push(`Failure context unavailable: ${String(diagnostic)}`)
       }
     }
     throw error
   } finally {
+    for (const screenshot of pendingScreenshots) {
+      try {
+        await writeFile(screenshot.path, screenshot.image)
+      } catch (error) {
+        errors.push(`First-visible evidence persistence failed: ${String(error)}`)
+      }
+    }
     try {
       await session?.close()
     } catch (error) {
