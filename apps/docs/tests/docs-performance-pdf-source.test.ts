@@ -265,3 +265,175 @@ it('requires equivalent alternate HF stories and rejects unsupported fields, ext
     'target is missing',
   )
 })
+
+it('counts archive decimal labels across body and cell owners while retaining exact ordinary text', () => {
+  const numbered = (value: string) =>
+    `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="7"/></w:numPr></w:pPr><w:r><w:t>${value}</w:t></w:r></w:p>`
+  const raw = `<w:tbl><w:tr><w:tc>${numbered('Cell one')}</w:tc><w:tc>${numbered('Cell two')}</w:tc></w:tr></w:tbl>`
+  const document = xml(raw)
+    .replace(p('Before'), numbered('Before'))
+    .replace(p('Tail'), numbered('Tail'))
+  const numberingXml =
+    '<n:numbering xmlns:n="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><n:abstractNum n:abstractNumId="9"><n:lvl n:ilvl="0"><n:start n:val="3"/><n:numFmt n:val="decimal"/><n:lvlText n:val="(%1)"/></n:lvl></n:abstractNum><n:num n:numId="7"><n:abstractNumId n:val="9"/></n:num></n:numbering>'
+  expect(
+    sourcePrintChains(
+      document,
+      [
+        {
+          docxIndex: 1,
+          sourceTable: 'T',
+          rows: [{ rowIndex: 0, cells: [source(0, 0), source(0, 1)] }],
+        },
+      ],
+      [{ docxIndex: 1, originalXml: raw }],
+      { numberingXml },
+    ),
+  ).toEqual({ body: '(3)Before(6)Tail', 'T:0:0': '(4)Cellone', 'T:0:1': '(5)Celltwo' })
+})
+
+it('inserts a measured legacy EQ overlay at its exact field position without weakening neighbouring source text', () => {
+  const equation =
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> EQ \\o</w:instrText></w:r><w:r><w:instrText>\\ac(X,Y) </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+  const document = xml('').replace(
+    p('Before'),
+    `<w:p><w:r><w:t>A</w:t></w:r>${equation}<w:r><w:t>Z</w:t></w:r></w:p>`,
+  )
+  expect(sourcePrintChains(document, [], [], { numberingXml: '' })).toEqual({ body: 'AXYZTail' })
+})
+
+const generatedNumbering = (
+  level = '<w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1、"/>',
+  instance = '',
+) =>
+  '<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="3"><w:lvl w:ilvl="0">' +
+  level +
+  '</w:lvl></w:abstractNum><w:num w:numId="5"><w:abstractNumId w:val="3"/>' +
+  instance +
+  '</w:num></w:numbering>'
+const generatedParagraph = (text: string, id = '5', level = '0') =>
+  `<w:p><w:pPr><w:numPr><w:ilvl w:val="${level}"/><w:numId w:val="${id}"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`
+
+it('retains repeated archived table identities and list occurrences while counting each original paragraph once', () => {
+  const raw = `<w:tbl><w:tr><w:tc>${generatedParagraph('Same')}</w:tc></w:tr></w:tbl>`
+  const models = ['First', 'Second'].map((id, index) => ({
+    docxIndex: index + 1,
+    sourceTable: id,
+    rows: [
+      { rowIndex: 0, cells: [{ sourceCell: { table: id, row: 0, cell: 0 }, gridGap: false }] },
+    ],
+  }))
+  expect(
+    sourcePrintChains(
+      xml(raw + raw),
+      models,
+      [
+        { docxIndex: 1, originalXml: raw },
+        { docxIndex: 2, originalXml: raw },
+      ],
+      { numberingXml: generatedNumbering() },
+    ),
+  ).toEqual({ body: 'BeforeTail', 'First:0:0': '1、Same', 'Second:0:0': '2、Same' })
+})
+
+it('uses independent numId counters, the decimal/start defaults, and the explicit numbering removal contract', () => {
+  const document = xml('').replace(
+    p('Before'),
+    generatedParagraph('Zero') +
+      generatedParagraph('None', '0') +
+      generatedParagraph('Other', '6') +
+      generatedParagraph('One'),
+  )
+  const numberingXml = generatedNumbering('<w:lvlText w:val="[%1]"/>').replace(
+    '</w:numbering>',
+    '<w:num w:numId="6"><w:abstractNumId w:val="3"/></w:num></w:numbering>',
+  )
+  expect(sourcePrintChains(document, [], [], { numberingXml })).toEqual({
+    body: '[0]ZeroNone[0]Other[1]OneTail',
+  })
+  expect(sourcePrintChains(xml(), tables, bindings, { numberingXml: '' })).toEqual(
+    sourcePrintChains(xml(), tables, bindings),
+  )
+})
+
+it('rejects unresolved or unsupported archive numbering rather than silently omitting labels', () => {
+  const document = xml('').replace(p('Before'), generatedParagraph('Keep this source'))
+  const rejects = [
+    '',
+    generatedNumbering().replace('numId="5"', 'numId="6"'),
+    generatedNumbering('<w:numFmt w:val="upperRoman"/><w:lvlText w:val="%1"/>'),
+    generatedNumbering('<w:start w:val="-1"/><w:lvlText w:val="%1"/>'),
+    generatedNumbering('<w:lvlText w:val="%2"/>'),
+    generatedNumbering(
+      undefined,
+      '<w:lvlOverride w:ilvl="0"><w:startOverride w:val="4"/></w:lvlOverride>',
+    ),
+  ]
+  for (const numberingXml of rejects)
+    expect(() => sourcePrintChains(document, [], [], { numberingXml })).toThrow()
+  expect(() =>
+    sourcePrintChains(document.replace('w:ilvl w:val="0"', 'w:ilvl w:val="1"'), [], [], {
+      numberingXml: generatedNumbering(),
+    }),
+  ).toThrow('Unsupported multilevel')
+})
+
+it('rejects unsupported, cached, nested and unclosed EQ fields without dropping their original text', () => {
+  const field = (
+    instruction: string,
+    cached = '',
+    ending = '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+  ) =>
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>' +
+    instruction +
+    '</w:instrText></w:r>' +
+    cached +
+    ending
+  for (const equation of [
+    field('EQ \\f(A,B)'),
+    field('EQ \\o\\ac(A,B)', '<w:r><w:t>Original cached result</w:t></w:r>'),
+    field(
+      'EQ \\o\\ac(A,B)',
+      '<w:r><w:fldChar w:fldCharType="begin"/><w:fldChar w:fldCharType="end"/></w:r>',
+    ),
+    field('EQ \\o\\ac(A,B)', '', ''),
+  ])
+    expect(() =>
+      sourcePrintChains(xml('').replace(p('Before'), `<w:p>${equation}</w:p>`), [], [], {
+        numberingXml: '',
+      }),
+    ).toThrow(/EQ/)
+})
+
+it('keeps archive source positions exact across CRLF line normalization when inserting derived text', () => {
+  const document = xml('')
+    .replace(p('Before'), generatedParagraph('Before'))
+    .replace('<w:body>', '<w:body>\r\n')
+    .replace(p('Tail'), '\r\n' + p('Tail'))
+  expect(sourcePrintChains(document, [], [], { numberingXml: generatedNumbering() })).toEqual({
+    body: '1、BeforeTail',
+  })
+})
+
+it('finds the exact EQ ending tag after an archive CRLF declaration', () => {
+  const equation =
+    '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>EQ \\o\\ac(A,B)</w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+  const document = '<?xml version="1.0"?>\r\n' + xml('').replace(p('Before'), equation)
+  expect(sourcePrintChains(document, [], [], { numberingXml: '' })).toEqual({ body: 'ABTail' })
+})
+
+it('rejects malformed EQ separators, instruction-after-result and unknown active markers', () => {
+  const begin = '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+  const instruction = '<w:r><w:instrText>EQ \\o\\ac(A,B)</w:instrText></w:r>'
+  const separate = '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+  const end = '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+  for (const content of [
+    begin + instruction + separate + separate + end,
+    begin + separate + instruction + end,
+    begin + instruction + '<w:r><w:fldChar w:fldCharType="unknown"/></w:r>' + end,
+  ])
+    expect(() =>
+      sourcePrintChains(xml('').replace(p('Before'), `<w:p>${content}</w:p>`), [], [], {
+        numberingXml: '',
+      }),
+    ).toThrow('Unsupported EQ overlay')
+})
