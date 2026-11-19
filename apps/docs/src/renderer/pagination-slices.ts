@@ -472,7 +472,7 @@ export function computeSectionedSlicesF2(
       ? 0
       : firstSection
 
-  type ColEntry = { y: number; repeatHeader?: { top: number; height: number } }
+  type ColEntry = { y: number; repeatHeader?: PageSlice['repeatHeader'] }
   type Region = { top: number; height: number; section: number; cols: number; entries: ColEntry[] }
   const pages: Array<{ section: number; regions: Region[]; continued?: true }> = []
   // flow Y where a section began below the top of a page it does not own: its
@@ -591,7 +591,7 @@ export function computeSectionedSlicesF2(
     const page = pages[pages.length - 1]
     page.regions[page.regions.length - 1].entries.push({
       y,
-      ...(headerH > 0 ? { repeatHeader: { top: headerTop, height: headerH } } : {}),
+      ...(headerH > 0 ? { repeatHeader: { block: curBi, top: headerTop, height: headerH } } : {}),
     })
     usedInCol = headerH
   }

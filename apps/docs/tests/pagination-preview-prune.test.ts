@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   prunedCloneHtml,
+  repeatHeaderCloneHtml,
   shouldPruneClones,
   type CloneChild,
 } from '../src/renderer/components/PaginationPreview'
@@ -19,6 +20,36 @@ const spacerHeights = (html: string): number[] =>
 // window pad is 2000px (CLONE_PRUNE_PAD): from=10000/to=11000 keeps [8000, 13000]
 const FROM = 10000
 const TO = 11000
+
+describe('repeatHeaderCloneHtml', () => {
+  it('preserves the source table grid and paints only its contiguous header rows', () => {
+    const table = document.createElement('table')
+    table.style.marginTop = '12px'
+    table.innerHTML = `
+      <colgroup><col><col></colgroup><tbody>
+        <tr data-repeat-header="1"><td data-base-rowspan="2" rowspan="3">Heading A</td><td>One</td></tr>
+        <tr class="page-gap"><td colspan="2">Page decoration</td></tr>
+        <tr data-repeat-header="1"><td>Heading B</td></tr>
+        <tr><td colspan="2">Body row</td></tr>
+        <tr data-repeat-header="1"><td colspan="2">Too late to repeat</td></tr>
+      </tbody>`
+    const holder = document.createElement('div')
+    holder.innerHTML = repeatHeaderCloneHtml(table)
+    const clone = holder.querySelector('table')!
+    expect(clone.rows.length).toBe(4)
+    expect(clone.querySelectorAll('col').length).toBe(2)
+    expect(clone.rows[0].cells[0].rowSpan).toBe(2)
+    expect(Array.from(clone.rows, (row) => row.style.visibility)).toEqual([
+      '',
+      '',
+      'hidden',
+      'hidden',
+    ])
+    expect(clone.style.marginTop).toBe('0px')
+    expect(table.style.marginTop).toBe('12px')
+    expect(table.rows[0].cells[0].rowSpan).toBe(3)
+  })
+})
 
 describe('prunedCloneHtml', () => {
   it('keeps in-window blocks verbatim without spacers', () => {

@@ -541,13 +541,31 @@ function cloneBlockHtml(el: HTMLElement): string {
     return el.outerHTML
   }
   const tmp = el.cloneNode(true) as HTMLElement
+  stripPreviewTableWidgets(tmp)
+  return tmp.outerHTML
+}
+
+function stripPreviewTableWidgets(tmp: HTMLElement): void {
   for (const tr of Array.from(tmp.querySelectorAll('tr.page-gap, tr.page-repeat-header'))) {
     tr.remove()
   }
   for (const td of Array.from(tmp.querySelectorAll('[data-base-rowspan]'))) {
     td.setAttribute('rowspan', td.getAttribute('data-base-rowspan')!)
   }
-  return tmp.outerHTML
+}
+
+/** Repeat the source table's leading header rows at the start of the cut. */
+export function repeatHeaderCloneHtml(table: HTMLElement): string {
+  const clone = table.cloneNode(true) as HTMLElement
+  stripPreviewTableWidgets(clone)
+  clone.style.marginTop = '0px'
+  let leadingHeader = true
+  for (const row of outerTableRows(clone)) {
+    leadingHeader &&= row.dataset.repeatHeader === '1'
+    // Keep body rows in layout so autofit and rowspan retain their column geometry.
+    if (!leadingHeader) row.style.visibility = 'hidden'
+  }
+  return clone.outerHTML
 }
 
 /** pruned clone for one page window: blocks intersecting [from-pad, to+pad] verbatim, pruned runs as spacers */
@@ -1053,6 +1071,7 @@ export function PaginationPreview({
   const [html, setHtml] = useState('')
   /** non-null = pruned-clone mode (large documents): per-page windows instead of full clones */
   const [cloneKids, setCloneKids] = useState<CloneChild[] | null>(null)
+  const [repeatHtml, setRepeatHtml] = useState(() => new Map<number, string>())
   const [cellPageBoxes, setCellPageBoxes] = useState<CellPageBox[]>([])
   const [relXPictures, setRelXPictures] = useState<PageRelXPicture[]>([])
   /** Live section list: a section whose break block was deleted (unsaved) merges into the next, matching the canvas */
@@ -1443,6 +1462,17 @@ export function PaginationPreview({
       )
       setLeakCss(leadLeakCss(blocks, computed))
       setSlices(computed)
+      const repeats = new Map<number, string>()
+      for (const { repeatHeader, regions } of computed) {
+        const windows = regions?.flatMap((region) => region.columns) ?? [{ repeatHeader }]
+        for (const surface of windows) {
+          const index = surface.repeatHeader?.block
+          if (index === undefined || repeats.has(index)) continue
+          const table = blocks[index]?.el
+          if (table?.matches('table.doc-table')) repeats.set(index, repeatHeaderCloneHtml(table))
+        }
+      }
+      setRepeatHtml(repeats)
       // read-only snapshot for e2e: the cuts the sheets print and the shadow's verdict
       ;(window as unknown as Record<string, unknown>).__previewDebug = {
         sourceCells: (sourceCells = createPrintSourceDiagnostic(documentView, blocks, rowSplits)),
@@ -1896,21 +1926,12 @@ export function PaginationPreview({
                   >
                     <div
                       className="pv-offset"
-                      style={{
-                        marginTop: -(slice.repeatHeader.top - seamLift),
-                        width: wrapWOf(slice.section),
-                      }}
+                      style={{ marginTop: seamLift, width: wrapWOf(slice.section) }}
                     >
                       <div
                         className="doc-page pv-content"
                         dangerouslySetInnerHTML={{
-                          __html: cloneKids
-                            ? prunedCloneHtml(
-                                cloneKids,
-                                slice.repeatHeader.top,
-                                slice.repeatHeader.top + slice.repeatHeader.height,
-                              )
-                            : html,
+                          __html: repeatHtml.get(slice.repeatHeader.block) ?? '',
                         }}
                       />
                     </div>
@@ -1974,21 +1995,12 @@ export function PaginationPreview({
                                 >
                                   <div
                                     className="pv-offset"
-                                    style={{
-                                      marginTop: -col.repeatHeader.top,
-                                      width: wrapWOf(region.section),
-                                    }}
+                                    style={{ width: wrapWOf(region.section) }}
                                   >
                                     <div
                                       className="doc-page pv-content"
                                       dangerouslySetInnerHTML={{
-                                        __html: cloneKids
-                                          ? prunedCloneHtml(
-                                              cloneKids,
-                                              col.repeatHeader.top,
-                                              col.repeatHeader.top + col.repeatHeader.height,
-                                            )
-                                          : html,
+                                        __html: repeatHtml.get(col.repeatHeader.block) ?? '',
                                       }}
                                     />
                                   </div>

@@ -2363,7 +2363,7 @@ describe('computeSectionedSlicesF2 — table row-level page breaks', () => {
     const slices = computeSectionedSlicesF2([b], [{ contentHeight: 200, forceBreak: false }], 340)
     expect(slices.length).toBeGreaterThan(1)
     for (const s of slices.slice(1)) {
-      expect(s.repeatHeader).toEqual({ top: 0, height: 40 })
+      expect(s.repeatHeader).toEqual({ block: 0, top: 0, height: 40 })
     }
     // From page 2 the header takes 40px: rows per page = (200-40)/50 = 3
     expect(slices[1].end - slices[1].start).toBeLessThanOrEqual(160)
@@ -2376,7 +2376,8 @@ describe('computeSectionedSlicesF2 — table row-level page breaks', () => {
     ]
     const b = makeTableBlock(0, rows)
     const slices = computeSectionedSlicesF2([b], [{ contentHeight: 200, forceBreak: false }], 350)
-    for (const s of slices.slice(1)) expect(s.repeatHeader).toEqual({ top: 0, height: 150 })
+    for (const s of slices.slice(1))
+      expect(s.repeatHeader).toEqual({ block: 0, top: 0, height: 150 })
   })
 
   it('tblHeader: header block taller than a full page is not repeated', () => {
@@ -5941,7 +5942,7 @@ describe('computeSectionedSlicesF2 — multi-cell rows split per cell (Word row 
       [0, 200],
       [200, 300],
     ])
-    expect(legacy.slices[1].repeatHeader).toEqual({ top: 130, height: 20 })
+    expect(legacy.slices[1].repeatHeader).toEqual({ block: 1, top: 130, height: 20 })
     // a first row whose cells all break legally splits under the header in modern mode too
     const legal = run(
       [
@@ -5959,7 +5960,7 @@ describe('computeSectionedSlicesF2 — multi-cell rows split per cell (Word row 
       [0, 200],
       [200, 300],
     ])
-    expect(legal.slices[1].repeatHeader).toEqual({ top: 130, height: 20 })
+    expect(legal.slices[1].repeatHeader).toEqual({ block: 1, top: 130, height: 20 })
     // the header is only retracted when the first body row turns the page: a
     // cantSplit first row does the same, a later row leaves the header in place
     const cant = run(
@@ -5972,7 +5973,7 @@ describe('computeSectionedSlicesF2 — multi-cell rows split per cell (Word row 
       true,
     )
     expect(later.slices[0].end).toBe(170)
-    expect(later.slices[1].repeatHeader).toEqual({ top: 130, height: 20 })
+    expect(later.slices[1].repeatHeader).toEqual({ block: 1, top: 130, height: 20 })
   })
 
   it('a cell whose only line (a picture) cannot fit moves the whole row instead of staying empty on the first page', () => {
@@ -6618,7 +6619,7 @@ describe('page-bottom fit: the last line needs only its single-spacing extent (l
   it('applyLeadSpills measures a repeated-header page from the header-shortened bottom', () => {
     const para = block(0, 190, { lineLeadPx: 10 })
     const slices: PageSlice[] = [
-      { start: 0, end: 190, section: 0, repeatHeader: { top: 500, height: 20 } },
+      { start: 0, end: 190, section: 0, repeatHeader: { block: 0, top: 500, height: 20 } },
     ]
     applyLeadSpills(slices, [para], geoms1)
     // the flow bottom is 200 - 20 = 180: the 190 text bottom spills 10
