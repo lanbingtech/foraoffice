@@ -158,6 +158,16 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
           }, options.document),
         async save() {
           await editorPage.keyboard.press('Control+s')
+          await editorPage.waitForFunction(
+            () =>
+              (
+                window as unknown as {
+                  docsEditor?: { documents: { state(): { dirty: boolean } | null } }
+                }
+              ).docsEditor?.documents.state()?.dirty === false,
+            undefined,
+            { timeout: 180_000 },
+          )
         },
         async exportPdf() {
           const invoked = triggerPdf(editorPage)
@@ -167,14 +177,19 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
         },
         async close() {
           await writeFile(join(options.workspace, 'qt-stderr.log'), stderr)
-          await browser?.close().catch(() => {})
-          if (child.exitCode === null) child.kill()
+          const timer = setTimeout(() => child.kill(), 5_000)
+          try {
+            await browser?.close()
+          } finally {
+            clearTimeout(timer)
+            if (child.exitCode === null) child.kill()
+          }
         },
       }
     } catch (error) {
       await writeFile(join(options.workspace, 'qt-stderr.log'), stderr)
-      await browser?.close().catch(() => {})
       if (child.exitCode === null) child.kill()
+      await browser?.close().catch(() => {})
       throw error
     }
   }
@@ -189,55 +204,65 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
         GENOFFICE_LANG: 'en',
       },
     })
-    const page = await app.firstWindow()
-    await app.evaluate(
-      ({ dialog, shell }, targets) => {
-        dialog.showOpenDialog = (async () => ({
-          canceled: false,
-          filePaths: [targets.document],
-        })) as typeof dialog.showOpenDialog
-        dialog.showSaveDialog = (async () => ({
-          canceled: false,
-          filePath: targets.pdf,
-        })) as typeof dialog.showSaveDialog
-        shell.openPath = async () => ''
-      },
-      { document: options.document, pdf },
-    )
-    return {
-      page,
-      evidence: {
-        kind: 'electron',
-        rendering: 'standalone-product',
-        versions: await app.evaluate(() => process.versions),
-      },
-      async open() {
-        await page.keyboard.press('Control+o')
-        return null
-      },
-      async save() {
-        await page.keyboard.press('Control+s')
-      },
-      async exportPdf() {
-        await triggerPdf(page)
-        return pdf
-      },
-      async close() {
-        await app
-          .evaluate(({ dialog }) => {
-            dialog.showMessageBox = (async () => ({
-              response: 1,
-              checkboxChecked: false,
-            })) as typeof dialog.showMessageBox
-          })
-          .catch(() => {})
-        const timer = setTimeout(() => app.process().kill(), 10_000)
-        try {
-          await app.close()
-        } finally {
-          clearTimeout(timer)
-        }
-      },
+    try {
+      const page = await app.firstWindow()
+      await app.evaluate(
+        ({ dialog, shell }, targets) => {
+          dialog.showOpenDialog = (async () => ({
+            canceled: false,
+            filePaths: [targets.document],
+          })) as typeof dialog.showOpenDialog
+          dialog.showSaveDialog = (async () => ({
+            canceled: false,
+            filePath: targets.pdf,
+          })) as typeof dialog.showSaveDialog
+          shell.openPath = async () => ''
+        },
+        { document: options.document, pdf },
+      )
+      return {
+        page,
+        evidence: {
+          kind: 'electron',
+          rendering: 'standalone-product',
+          versions: await app.evaluate(() => process.versions),
+        },
+        async open() {
+          await page.keyboard.press('Control+o')
+          return null
+        },
+        async save() {
+          await page.keyboard.press('Control+s')
+        },
+        async exportPdf() {
+          await triggerPdf(page)
+          return pdf
+        },
+        async close() {
+          await app
+            .evaluate(({ dialog }) => {
+              dialog.showMessageBox = (async () => ({
+                response: 1,
+                checkboxChecked: false,
+              })) as typeof dialog.showMessageBox
+            })
+            .catch(() => {})
+          const timer = setTimeout(() => app.process().kill(), 10_000)
+          try {
+            await app.close()
+          } finally {
+            clearTimeout(timer)
+          }
+        },
+      }
+    } catch (error) {
+      const timer = setTimeout(() => app.process().kill(), 10_000)
+      try {
+        await app.close()
+      } finally {
+        clearTimeout(timer)
+      }
+      throw error
     }
   }
   const browser = await chromium.launch({
@@ -246,7 +271,13 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
       process.env.FORAOFFICE_BROWSER_CHANNEL ??
       (process.platform === 'win32' ? 'chrome' : undefined),
   })
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
+  let page: Page
+  try {
+    page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
+  } catch (error) {
+    await browser.close()
+    throw error
+  }
   const print = async (width: number, height: number, scale = 1) =>
     page.pdf({
       width: `${width / 1440}in`,
@@ -362,11 +393,12 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
         ).performanceEditor.documents.open(),
       ),
     async save() {
-      await page.evaluate(() =>
+      const saved = await page.evaluate(() =>
         (
           window as unknown as { performanceEditor: { documents: { save(): Promise<boolean> } } }
         ).performanceEditor.documents.save(),
       )
+      if (!saved) throw new Error('Browser public save returned false')
     },
     async exportPdf() {
       await triggerPdf(page)

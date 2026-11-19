@@ -9,6 +9,12 @@ import JSZip from 'jszip'
 import { PDFDocument } from 'pdf-lib'
 import { buildPerformanceFixture, documentOracle } from './docs-performance-fixture'
 import {
+  documentZoom,
+  expectedInsertion,
+  verifySavedContent,
+  verifyPrintedContent,
+} from './docs-performance-oracle'
+import {
   launchPerformanceHost,
   type PerformanceHost,
   type PerformanceSession,
@@ -17,6 +23,7 @@ import {
   assertExternalArtifacts,
   comparePerformanceReports,
   summarizeScenario,
+  withDeadline,
   type PerformanceObservation,
 } from './docs-performance-result'
 
@@ -111,60 +118,66 @@ async function waitForLayout(
   let previous = ''
   let unchangedSince = 0
   while (Date.now() < deadline) {
-    const state = await page.evaluate(
-      ({ end, textRuns }) => {
-        const win = window as ProbeWindow
-        const activity = win.__docsLayoutActivity?.snapshot()
-        const pm = document.querySelector<HTMLElement>('.ProseMirror')
-        const images = pm ? [...pm.querySelectorAll('img')] : []
-        const texts = pm?.textContent?.replace(/\s+/g, ' ') ?? ''
-        const fonts = document.fonts
-        const visible =
-          !!pm && pm.getBoundingClientRect().width > 0 && pm.getBoundingClientRect().height > 0
-        const normalized = texts.replace(/\s+/g, '')
-        let position = 0
-        const orderedTextPresent = textRuns.every((run) => {
-          const found = normalized.indexOf(run, position)
-          if (found < 0) return false
-          position = found + run.length
-          return true
-        })
-        const complete = !!end && texts.includes(end.replace(/\s+/g, ' ')) && orderedTextPresent
-        const last = pm?.lastElementChild?.getBoundingClientRect()
-        return {
-          activity,
-          fonts: fonts
-            ? {
-                status: fonts.status,
-                count: fonts.size,
-                faces: [...fonts].map((font) => ({ family: font.family, status: font.status })),
-              }
-            : null,
-          visible,
-          complete,
-          imagesReady: images.every((image) => image.complete && image.naturalWidth > 0),
-          images: images.length,
-          pages: win.__pageDebug?.slices?.length,
-          signature: JSON.stringify([
-            activity?.generation,
-            pm?.children.length,
-            pm?.scrollHeight,
-            last?.top,
-            last?.bottom,
-            win.__pageDebug?.slices?.length,
-          ]),
-          characters: texts.length,
-          domElements: pm?.querySelectorAll('*').length,
-          environment: {
-            viewport: [innerWidth, innerHeight],
-            devicePixelRatio,
-            theme: document.documentElement.dataset.theme,
-            zoom: getComputedStyle(pm ?? document.body).zoom,
-            spellcheck: pm?.spellcheck,
-          },
-        }
-      },
-      { end: tail, textRuns },
+    const state = await withDeadline(
+      page.evaluate(
+        ({ end, textRuns }) => {
+          const probeStarted = performance.now()
+          const win = window as ProbeWindow
+          const activity = win.__docsLayoutActivity?.snapshot()
+          const pm = document.querySelector<HTMLElement>('.ProseMirror')
+          const images = pm ? [...pm.querySelectorAll('img')] : []
+          const texts = pm?.textContent?.replace(/\s+/g, ' ') ?? ''
+          const fonts = document.fonts
+          const visible =
+            !!pm && pm.getBoundingClientRect().width > 0 && pm.getBoundingClientRect().height > 0
+          const normalized = texts.replace(/\s+/g, '')
+          let position = 0
+          const orderedTextPresent = textRuns.every((run) => {
+            const found = normalized.indexOf(run, position)
+            if (found < 0) return false
+            position = found + run.length
+            return true
+          })
+          const complete = !!end && texts.includes(end.replace(/\s+/g, ' ')) && orderedTextPresent
+          const last = pm?.lastElementChild?.getBoundingClientRect()
+          return {
+            activity,
+            fonts: fonts
+              ? {
+                  status: fonts.status,
+                  count: fonts.size,
+                  faces: [...fonts].map((font) => ({ family: font.family, status: font.status })),
+                }
+              : null,
+            visible,
+            complete,
+            imagesReady: images.every((image) => image.complete && image.naturalWidth > 0),
+            images: images.length,
+            pages: win.__pageDebug?.slices?.length,
+            signature: JSON.stringify([
+              activity?.generation,
+              pm?.children.length,
+              pm?.scrollHeight,
+              last?.top,
+              last?.bottom,
+              win.__pageDebug?.slices?.length,
+            ]),
+            characters: texts.length,
+            domElements: pm?.querySelectorAll('*').length,
+            environment: {
+              viewport: [innerWidth, innerHeight],
+              devicePixelRatio,
+              theme: document.documentElement.dataset.theme,
+              zoom: '',
+              spellcheck: pm?.spellcheck,
+            },
+            validationProbeMs: performance.now() - probeStarted,
+          }
+        },
+        { end: tail, textRuns },
+      ),
+      Math.max(1, deadline - Date.now()),
+      'layout probe',
     )
     if (state.activity?.errors.length)
       throw new Error(`Pagination failed: ${state.activity.errors.join('; ')}`)
@@ -196,7 +209,10 @@ async function waitForLayout(
       state.fonts.count > 0 &&
       (state.pages ?? 0) > 0
     if (valid && state.signature === previous) {
-      if (Date.now() - unchangedSince >= 250) return { ...state, milestonesMs }
+      if (Date.now() - unchangedSince >= 250) {
+        state.environment.zoom = await page.locator('.ProseMirror').first().evaluate(documentZoom)
+        return { ...state, milestonesMs }
+      }
     } else {
       previous = state.signature
       unchangedSince = Date.now()
@@ -204,6 +220,31 @@ async function waitForLayout(
     await page.waitForTimeout(50)
   }
   throw new Error('Document completeness, pending layout, fonts/images and geometry did not settle')
+}
+
+async function firstDiagnosticIdle(page: Page, started: number, newerThan = -1) {
+  const deadline = Date.now() + 180_000
+  while (Date.now() < deadline) {
+    const activity = await withDeadline(
+      page.evaluate(() => (window as ProbeWindow).__docsLayoutActivity?.snapshot()),
+      Math.max(1, deadline - Date.now()),
+      'pending-work observation',
+    )
+    if (!activity || activity.version !== 1)
+      throw new Error('Current layout activity diagnostics are missing')
+    if (activity.errors.length) throw new Error(activity.errors.join('; '))
+    if (
+      activity.generation > newerThan &&
+      activity.owners > 0 &&
+      !activity.contentPending &&
+      activity.pending === 0 &&
+      activity.active === 0 &&
+      activity.fontProbes === 0
+    )
+      return now() - started
+    await page.waitForTimeout(25)
+  }
+  throw new Error('Pending layout work did not become idle')
 }
 
 async function firstVisibleContent(page: Page) {
@@ -217,7 +258,9 @@ async function firstVisibleContent(page: Page) {
     undefined,
     { timeout: 180_000 },
   )
-  return page.screenshot({ type: 'jpeg', quality: 60 })
+  const started = now()
+  const image = await page.screenshot({ type: 'jpeg', quality: 60 })
+  return { image, screenshotMs: now() - started }
 }
 
 async function chooseText(page: Page, kind: 'paragraph' | 'table', fraction: number) {
@@ -244,7 +287,14 @@ async function chooseText(page: Page, kind: 'paragraph' | 'table', fraction: num
       selection?.removeAllRanges()
       selection?.addRange(range)
       pm.focus()
-      return { text: pm.textContent ?? '', paragraphs: pm.querySelectorAll(':scope > p').length }
+      return {
+        text: pm.textContent ?? '',
+        paragraphs: pm.querySelectorAll(':scope > p').length,
+        targetText: target.textContent ?? '',
+        insertOffset: node.textContent
+          .slice(0, Math.min(2, node.textContent.length))
+          .replace(/\s+/g, '').length,
+      }
     },
     { kind, fraction },
   )
@@ -311,13 +361,16 @@ test('production document performance and correctness evidence', async () => {
   ] as const
   const requirements: Record<string, number> = {
     'process-start-to-visible-observation': 5,
-    'process-start-to-settled': 5,
-    'hot-open-to-settled': 10,
+    'process-start-to-layout-verified-observation': 5,
+    'process-start-to-first-diagnostic-idle-observation': 5,
+    'hot-open-to-layout-verified-observation': 10,
+    'hot-open-to-first-diagnostic-idle-observation': 10,
     'wheel-visible-observation': 30,
     ...Object.fromEntries(
       edits.flatMap((name) => [
         [`${name}-visible-observation`, 30],
-        [`${name}-layout-settled`, 30],
+        [`${name}-layout-verified-observation`, 30],
+        [`${name}-first-diagnostic-idle-observation`, 30],
       ]),
     ),
   }
@@ -376,10 +429,12 @@ test('production document performance and correctness evidence', async () => {
       'internal pagination activity v1; pending timers, active passes, HF font probes and streaming; same product instrumentation required on both sides',
     compositionMethod:
       'CDP Input.imeSetComposition followed by Input.insertText; composition events recorded; not an OS IME benchmark',
+    printConditions:
+      'File → PDF; entire document; default original paper/section geometry; visible UI total must equal output page count; all original body text plus intended edit must occur in order',
   }
   let condition: Record<string, unknown> | undefined
   let correctness: Record<string, unknown> | undefined
-  let currentScenario = 'process-start-to-settled'
+  let currentScenario = 'process-start-to-layout-verified-observation'
   let session: PerformanceSession | undefined
   let document = ''
   try {
@@ -402,14 +457,26 @@ test('production document performance and correctness evidence', async () => {
       await installProbe(session.page)
       const first = await firstVisibleContent(session.page)
       push('process-start-to-visible-observation', now() - started)
-      await writeFile(join(workspace, 'first-visible.jpg'), first)
+      const firstIdleMs = await firstDiagnosticIdle(session.page, started)
+      push('process-start-to-first-diagnostic-idle-observation', firstIdleMs)
+      const verificationStarted = now()
       const state = await waitForLayout(session.page, tail, 180_000, -1, started, oracle.textRuns)
-      push('process-start-to-settled', now() - started)
+      push('process-start-to-layout-verified-observation', now() - started)
+      const verificationMs = now() - verificationStarted
+      const writeStarted = now()
+      await writeFile(join(workspace, 'first-visible.jpg'), first.image)
       details.push({
         launch,
         engine: session.evidence,
         state,
         initialOpenApiReturn: 'not observed during process startup',
+        components: {
+          firstIdleMs,
+          screenshotMs: first.screenshotMs,
+          verificationMs,
+          fileWriteMs: now() - writeStarted,
+          aggregateIncludesScreenshotAndVerification: true,
+        },
       })
       condition = {
         host,
@@ -429,15 +496,17 @@ test('production document performance and correctness evidence', async () => {
       }
     }
     const live = session!
-    currentScenario = 'hot-open-to-settled'
+    currentScenario = 'hot-open-to-layout-verified-observation'
     for (let i = 0; i < opens; i++) {
       const generation = await live.page.evaluate(
         () => (window as ProbeWindow).__docsLayoutActivity!.snapshot().generation,
       )
       const started = now()
-      const opened = await live.open()
+      const opened = await withDeadline(live.open(), 180_000, 'document open')
       const apiReturnMs = now() - started
       if (opened === false) throw new Error('Document open returned false')
+      const firstIdleMs = await firstDiagnosticIdle(live.page, started, generation)
+      push('hot-open-to-first-diagnostic-idle-observation', firstIdleMs)
       const state = await waitForLayout(
         live.page,
         tail,
@@ -446,17 +515,18 @@ test('production document performance and correctness evidence', async () => {
         started,
         oracle.textRuns,
       )
-      push('hot-open-to-settled', now() - started)
+      push('hot-open-to-layout-verified-observation', now() - started)
       details.push({
         operation: 'hot-open',
         index: i,
         apiReturnMs: opened === null ? null : apiReturnMs,
+        firstIdleMs,
         state,
       })
     }
     for (const scenario of edits) {
       for (let i = 0; i < samples; i++) {
-        currentScenario = `${scenario}-layout-settled`
+        currentScenario = `${scenario}-layout-verified-observation`
         const fraction =
           scenario === 'paragraph-start' ? 0 : scenario === 'paragraph-end' ? 0.99 : 0.5
         const before = await chooseText(
@@ -501,10 +571,17 @@ test('production document performance and correctness evidence', async () => {
           await expect
             .poll(() => live.page.locator('.ProseMirror').first().textContent())
             .not.toBe(before.text)
-        const screenshot = await live.page.screenshot({ type: 'jpeg', quality: 60 })
-        push(`${scenario}-visible-observation`, now() - started)
-        const state = await waitForLayout(live.page, tail, 180_000, -1, started)
-        push(`${scenario}-layout-settled`, now() - started)
+        const screenshotStarted = now()
+        let screenshotMs = 0
+        const [firstIdleMs, screenshot] = await Promise.all([
+          firstDiagnosticIdle(live.page, started),
+          live.page.screenshot({ type: 'jpeg', quality: 60 }).then((image) => {
+            screenshotMs = now() - screenshotStarted
+            push(`${scenario}-visible-observation`, now() - started)
+            return image
+          }),
+        ])
+        push(`${scenario}-first-diagnostic-idle-observation`, firstIdleMs)
         const probe = await live.page.evaluate((index) => {
           const probe = (window as ProbeWindow).performanceProbe!
           probe.activity = false
@@ -514,6 +591,9 @@ test('production document performance and correctness evidence', async () => {
             longTasks: probe.longTasks.splice(0),
           }
         }, inputIndex)
+        const verificationStarted = now()
+        const state = await waitForLayout(live.page, tail, 180_000, -1, started)
+        push(`${scenario}-layout-verified-observation`, now() - started)
         if (!probe.input.length)
           throw new Error(`No current input/keydown attribution for ${scenario}`)
         if (scenario === 'enter' && !probe.input.some((event) => event.type === 'Enter keydown'))
@@ -523,7 +603,19 @@ test('production document performance and correctness evidence', async () => {
           !probe.input.some((event) => event.type === 'insertCompositionText')
         )
           throw new Error('Current composition update was not observed')
-        details.push({ scenario, index: i, screenshotSha256: sha(screenshot), state, probe })
+        details.push({
+          scenario,
+          index: i,
+          screenshotSha256: sha(screenshot),
+          state,
+          probe,
+          components: {
+            firstIdleMs,
+            screenshotMs,
+            verificationMs: now() - verificationStarted,
+            aggregateIncludesScreenshotAndVerification: true,
+          },
+        })
         blockingTasks.push(...probe.longTasks.map((entry) => entry.duration))
         await live.page.keyboard.press('Control+z')
         await expect
@@ -559,21 +651,28 @@ test('production document performance and correctness evidence', async () => {
       await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).not.toBe(before)
       await live.page.screenshot({ type: 'jpeg', quality: 60 })
       push('wheel-visible-observation', now() - started)
-      await waitForLayout(live.page, tail)
+      await firstDiagnosticIdle(live.page, started)
       const probe = await live.page.evaluate(() => {
         const probe = (window as ProbeWindow).performanceProbe!
         probe.activity = false
         return { frames: probe.frames.splice(0), longTasks: probe.longTasks.splice(0) }
       })
+      await waitForLayout(live.page, tail)
       details.push({ scenario: 'wheel', index: i, probe })
       blockingTasks.push(...probe.longTasks.map((entry) => entry.duration))
     }
     currentScenario = 'save-print'
     const saveMarker = 'PERFORMANCE-SAVE-CHECK'
-    await chooseText(live.page, 'paragraph', 0)
+    const saveTarget = await chooseText(live.page, 'paragraph', 0)
+    const expected = expectedInsertion(
+      oracle,
+      saveTarget.targetText,
+      saveTarget.insertOffset,
+      saveMarker,
+    )
     await live.page.keyboard.insertText(saveMarker)
     await waitForLayout(live.page, tail)
-    await live.save()
+    await withDeadline(live.save(), 180_000, 'document save acknowledgement')
     await expect
       .poll(
         async () => {
@@ -596,22 +695,27 @@ test('production document performance and correctness evidence', async () => {
       )
         throw new Error(`Saved original resource differs: ${name}`)
     }
+    const savedOracle = await documentOracle(await readFile(document))
+    verifySavedContent(expected, savedOracle)
     const generation = await live.page.evaluate(
       () => (window as ProbeWindow).__docsLayoutActivity!.snapshot().generation,
     )
-    if ((await live.open()) === false) throw new Error('Saved document reopen returned false')
-    const savedOracle = await documentOracle(await readFile(document))
+    if ((await withDeadline(live.open(), 180_000, 'saved document reopen')) === false)
+      throw new Error('Saved document reopen returned false')
     const reopened = await waitForLayout(
       live.page,
-      savedOracle.tail,
+      expected.tail,
       180_000,
       generation,
       now(),
-      savedOracle.textRuns,
+      expected.textRuns,
     )
     expect(await live.page.locator('.ProseMirror').first().textContent()).toContain(saveMarker)
-    const pdf = await live.exportPdf()
+    const pdf = await withDeadline(live.exportPdf(), 180_000, 'PDF export')
     const printed = await waitForPdf(pdf)
+    const visiblePages = Number(
+      (await live.page.locator('.status-page').innerText()).match(/\d+/g)?.at(-1),
+    )
     const require = createRequire(join(sdk, 'package.json'))
     const backend = require(
       join(sdk, 'services/services.cjs'),
@@ -623,8 +727,21 @@ test('production document performance and correctness evidence', async () => {
     })
     try {
       await reader.setAttachments([pdf])
-      const extracted = await reader.readAttachment(pdf, 0, 24_000)
-      expect(extracted.text?.replace(/\s+/g, '')).toContain(saveMarker)
+      let text = ''
+      let total = 1
+      while (text.length < total) {
+        const extracted = await reader.readAttachment(pdf, text.length, 24_000)
+        if (
+          !extracted.ok ||
+          !extracted.text ||
+          typeof extracted.totalChars !== 'number' ||
+          extracted.totalChars < text.length
+        )
+          throw new Error('PDF full-text extraction did not progress')
+        total = extracted.totalChars
+        text += extracted.text
+      }
+      verifyPrintedContent(expected, text, printed.getPageCount(), visiblePages)
     } finally {
       reader.dispose()
     }
@@ -635,6 +752,8 @@ test('production document performance and correctness evidence', async () => {
       printedEdit: true,
       pdfPages: printed.getPageCount(),
       layoutPages: reopened.pages,
+      visiblePages,
+      pageSizesPoints: printed.getPages().map((page) => page.getSize()),
     }
     details.push({
       operation: 'save-print',
@@ -663,8 +782,15 @@ test('production document performance and correctness evidence', async () => {
       metadata,
       condition,
       correctness,
+      acceptance: {
+        scope:
+          'automated scenario sampling only; ticket acceptance requires the reviewed three-host A/A evidence',
+        nativeOsIme: 'not executed; synthetic CDP composition is diagnostic only',
+        nativeOfficeComparison: 'not measured',
+      },
       mainThreadBlocking: {
-        scope: 'edit and wheel intervals; PerformanceObserver longtask entries',
+        scope:
+          'interaction intervals including automation, screenshots and lightweight pending-work polling; full structural validation excluded; no product-only attribution',
         maxMs: blockingTasks.length ? Math.max(...blockingTasks) : 0,
         over50ms: blockingTasks.filter((value) => value > 50).length,
         nativeReference: 'not measured',

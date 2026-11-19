@@ -1,14 +1,30 @@
 // @vitest-environment node
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   assertExternalArtifacts,
   summarizeScenario,
   comparePerformanceReports,
+  withDeadline,
 } from '../../../e2e/docs-performance-result'
 
 describe('Docs performance evidence', () => {
+  it('fails a stalled operation at its deadline and preserves a real operation error', async () => {
+    vi.useFakeTimers()
+    try {
+      const waiting = expect(
+        withDeadline(new Promise(() => {}), 100, 'saved reopen'),
+      ).rejects.toThrow('saved reopen timed out')
+      await vi.advanceTimersByTimeAsync(100)
+      await waiting
+      await expect(
+        withDeadline(Promise.reject(new Error('host failure')), 100, 'open'),
+      ).rejects.toThrow('host failure')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
   it('keeps failures visible and refuses to treat missing or invalid observations as a passing baseline', () => {
     const result = summarizeScenario(
       [

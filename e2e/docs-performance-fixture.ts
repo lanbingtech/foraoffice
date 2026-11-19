@@ -68,9 +68,15 @@ export async function buildPerformanceFixture(scale = 1): Promise<Uint8Array> {
 }
 
 /** Independent OOXML tail oracle, used alongside pending-work and layout checks. */
-export async function documentOracle(
-  bytes: Uint8Array,
-): Promise<{ tail: string; textRuns: string[]; sections: string }> {
+export interface DocumentOracle {
+  tail: string
+  textRuns: string[]
+  paragraphs: Array<{ text: string; start: number }>
+  tables: string
+  sections: string
+}
+
+export async function documentOracle(bytes: Uint8Array): Promise<DocumentOracle> {
   const archive = await JSZip.loadAsync(bytes)
   const xml = await archive.file('word/document.xml')?.async('string')
   if (!xml) throw new Error('Input has no document XML')
@@ -79,6 +85,7 @@ export async function documentOracle(
     removeNSPrefix: true,
     trimValues: false,
     parseTagValue: false,
+    ignoreAttributes: false,
   }).parse(xml)
   type Xml = Array<Record<string, unknown>>
   const document = (parsed as Xml).find((entry) => entry.document)?.document as Xml | undefined
@@ -106,20 +113,53 @@ export async function documentOracle(
     throw new Error('Input requires a nonempty final body paragraph as completeness oracle')
   const textRuns: string[] = []
   const sectionSpecs: unknown[] = []
+  const paragraphs: DocumentOracle['paragraphs'] = []
+  const tables: unknown[] = []
+  let position = 0
+  const properties = (nodes: Xml, names: string[]) =>
+    nodes.filter((node) => names.some((name) => name in node))
   const visit = (nodes: Xml) => {
     for (const entry of nodes)
       for (const [key, value] of Object.entries(entry)) {
         if (key === 't') {
           const run = text(value as Xml).replace(/\s+/g, '')
-          if (run) textRuns.push(run)
+          if (run) {
+            textRuns.push(run)
+            position += run.length
+          }
         } else {
+          if (key === 'p')
+            paragraphs.push({ text: text(value as Xml).replace(/\s+/g, ''), start: position })
+          if (key === 'tbl') {
+            const table = value as Xml
+            tables.push({
+              properties: properties(table, ['tblPr', 'tblGrid']),
+              rows: table
+                .filter((row) => row.tr)
+                .map((row) => {
+                  const children = row.tr as Xml
+                  return {
+                    properties: properties(children, ['trPr']),
+                    cells: children
+                      .filter((cell) => cell.tc)
+                      .map((cell) => properties(cell.tc as Xml, ['tcPr'])),
+                  }
+                }),
+            })
+          }
           if (key === 'sectPr') sectionSpecs.push(value)
           if (Array.isArray(value)) visit(value as Xml)
         }
       }
   }
   visit(body ?? [])
-  return { tail, textRuns, sections: JSON.stringify(sectionSpecs) }
+  return {
+    tail,
+    textRuns,
+    paragraphs,
+    tables: JSON.stringify(tables),
+    sections: JSON.stringify(sectionSpecs),
+  }
 }
 
 export async function documentTail(bytes: Uint8Array): Promise<string> {

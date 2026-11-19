@@ -2,6 +2,24 @@ import { isAbsolute, relative, resolve, sep } from 'node:path'
 
 export type PerformanceObservation = { ok: true; durationMs: number } | { ok: false; error: string }
 
+export async function withDeadline<T>(
+  work: Promise<T>,
+  milliseconds: number,
+  operation: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${operation} timed out`)), milliseconds)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export function summarizeScenario(observations: PerformanceObservation[], required: number) {
   if (!Number.isInteger(required) || required < 1) throw new Error('Invalid sample requirement')
   const values: number[] = []
