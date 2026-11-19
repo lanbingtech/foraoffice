@@ -4,6 +4,7 @@ import {
   verifySavedContent,
   verifyPrintedContent,
   documentZoom,
+  verifyKeyboardTextEdit,
 } from '../../../e2e/docs-performance-oracle'
 import { documentOracle } from '../../../e2e/docs-performance-fixture'
 import { buildDocx } from '../../../packages/docx-engine/tests/helpers/build-docx'
@@ -21,6 +22,17 @@ const original = {
   opaqueXml: [],
   relationships: [],
 }
+
+it('requires the exact requested authored edit, independently of generated pagination fields', () => {
+  expect(() => verifyKeyboardTextEdit('Chapter text', 'Chap测ter text', '测')).not.toThrow()
+  expect(() => verifyKeyboardTextEdit('Chapter text', 'Chaper text', null, 't')).not.toThrow()
+  expect(() => verifyKeyboardTextEdit('Chapter text', 'Chapwrongter text', '测')).toThrow(
+    'Authored insertion differs',
+  )
+  expect(() => verifyKeyboardTextEdit('Chapter text', 'Chap text', null, 't')).toThrow(
+    'Authored deletion differs',
+  )
+})
 
 it('rejects losing an unselected opaque fallback even when all ordinary text and the intended edit survive', async () => {
   const initial = '<w:p><w:r><w:t>Editable public paragraph</w:t></w:r></w:p>'

@@ -2,6 +2,25 @@ import type { DocumentOracle } from './docs-performance-fixture'
 
 const normalize = (text: string) => text.replace(/\s+/g, '')
 
+export function verifyKeyboardTextEdit(
+  before: string,
+  after: string,
+  inserted: string | null,
+  deleted?: string,
+) {
+  let at = 0
+  while (at < before.length && at < after.length && before[at] === after[at]) at++
+  if (inserted !== null) {
+    if (after !== before.slice(0, at) + inserted + before.slice(at))
+      throw new Error('Authored insertion differs from the requested text')
+  } else if (
+    !deleted ||
+    before.slice(at, at + deleted.length) !== deleted ||
+    after !== before.slice(0, at) + before.slice(at + deleted.length)
+  )
+    throw new Error('Authored deletion differs from the selected preceding character')
+}
+
 export function expectedInsertion(
   original: DocumentOracle,
   paragraph: string,

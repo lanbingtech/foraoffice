@@ -19,11 +19,14 @@ import {
 import type { createDocumentStoryDiagnostic } from '../apps/docs/src/renderer/document-story-diagnostic'
 import { createPerformanceFocusGuard } from './docs-performance-focus'
 import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
+import { readEditFingerprint } from './docs-performance-edit-fingerprint'
+import { observeFirstVisibleSource } from './docs-performance-first-visible'
 import {
   documentZoom,
   expectedInsertion,
   verifySavedContent,
   verifyPrintedContent,
+  verifyKeyboardTextEdit,
 } from './docs-performance-oracle'
 import {
   launchPerformanceHost,
@@ -201,26 +204,16 @@ async function firstDiagnosticIdle(page: Page, started: number, newerThan = -1) 
 }
 
 async function firstVisibleContent(page: Page, head: string, newerThan: number) {
-  await page.waitForFunction(
-    ({ head, newerThan }) => {
-      const pm = document.querySelector<HTMLElement>('.ProseMirror')
-      const activity = (window as ProbeWindow).__docsLayoutActivity?.snapshot()
-      if (
-        !pm ||
-        !pm.textContent?.replace(/\s+/g, '').includes(head) ||
-        !activity ||
-        activity.generation <= newerThan
-      )
-        return false
-      const rect = pm.getBoundingClientRect()
-      return rect.width > 0 && rect.height > 0
-    },
+  const observed = await page.waitForFunction(
+    observeFirstVisibleSource,
     { head, newerThan },
     { timeout: 180_000, polling: 50 },
   )
+  const visibility = await observed.jsonValue()
+  await observed.dispose()
   const started = now()
   const image = await page.screenshot({ type: 'jpeg', quality: 60 })
-  return { image, screenshotMs: now() - started }
+  return { image, screenshotMs: now() - started, visibility }
 }
 
 async function verifyRenderedStories(page: Page, documentXml: string, artifact: string) {
@@ -286,9 +279,12 @@ async function chooseText(page: Page, kind: 'paragraph' | 'table', fraction: num
     ({ kind, fraction }) => {
       const pm = document.querySelector<HTMLElement>('.ProseMirror')
       if (!pm?.isContentEditable) throw new Error('Current document is not editable')
-      const candidates = [
-        ...pm.querySelectorAll<HTMLElement>(kind === 'table' ? 'td p, th p' : ':scope > p'),
-      ].filter(
+      const targetSelector =
+        kind === 'table'
+          ? 'td p:not(.page-gap *):not(.page-repeat-header *),th p:not(.page-gap *):not(.page-repeat-header *)'
+          : ':scope > p'
+      const allCandidates = [...pm.querySelectorAll<HTMLElement>(targetSelector)]
+      const candidates = allCandidates.filter(
         (p) => (p.textContent?.trim().length ?? 0) >= 12 && !p.closest('[contenteditable="false"]'),
       )
       const target =
@@ -306,12 +302,15 @@ async function chooseText(page: Page, kind: 'paragraph' | 'table', fraction: num
       selection?.addRange(range)
       pm.focus()
       return {
-        text: pm.textContent ?? '',
-        paragraphs: pm.querySelectorAll(':scope > p').length,
         targetText: target.textContent ?? '',
+        targetSelector,
+        targetIndex: allCandidates.indexOf(target),
         insertOffset: node.textContent
           .slice(0, Math.min(2, node.textContent.length))
           .replace(/\s+/g, '').length,
+        precedingCharacter: Array.from(
+          node.textContent.slice(0, Math.min(2, node.textContent.length)),
+        ).at(-1),
       }
     },
     { kind, fraction },
@@ -452,7 +451,9 @@ test('production document performance and correctness evidence', async () => {
     cachePolicy:
       'fresh application profile per process; OS cache uncontrolled; hot opens reuse one process',
     timingBoundary:
-      'fresh process loads a tiny primer, then verified foreground before measured sample open; process-start metrics include primer/activation; separate sample-open metrics; visible source-prefix predicate polls50ms then JPEG; observation upper bounds, not INP or complete cold-start latency',
+      'fresh process loads a tiny primer, then verified foreground before measured sample open; process-start metrics include primer/activation; separate sample-open metrics; matching source-block geometry must intersect pane and viewport (scroll/rect recorded), polls50ms then JPEG; observation upper bounds, not INP or complete cold-start latency',
+    editFingerprintMethod:
+      'authored DOM text and root paragraph count; exclude only page-gap/repeat widgets and doc-toc-line generated doc-toc-page; localized target check during input, full exact authored edit/undo checks outside active rAF/longtask recording',
     focusPolicy:
       'Qt/Electron exact native HWND/start identity and foreground/focus verified at grouped phase endpoints; continuously armed DOM blur/visibility records and lightweight checks before/after each sample reject the whole phase on loss; headless browser native foreground not applicable; activation/native inspection excluded from sample-input timing',
     diagnostics:
@@ -546,6 +547,7 @@ test('production document performance and correctness evidence', async () => {
         engine: session.evidence,
         state,
         stories,
+        firstVisibleSource: first.visibility,
         sampleOpenApiReturnMs: opened === null ? null : apiReturnMs,
         primerPreparationMs: sampleStarted - started,
         components: {
@@ -565,6 +567,7 @@ test('production document performance and correctness evidence', async () => {
         cachePolicy: metadata.cachePolicy,
         timingBoundary: metadata.timingBoundary,
         focusPolicy: metadata.focusPolicy,
+        editFingerprintMethod: metadata.editFingerprintMethod,
         diagnostics: metadata.diagnostics,
         sourceStoryMethod: metadata.sourceStoryMethod,
         compositionMethod: metadata.compositionMethod,
@@ -629,6 +632,10 @@ test('production document performance and correctness evidence', async () => {
           fraction,
         )
         await waitForLayout(live.page, tail)
+        const mainEditor = live.page.locator('.ProseMirror.doc-page').first()
+        const beforeEdit = await mainEditor.evaluate(readEditFingerprint)
+        const editTarget = mainEditor.locator(before.targetSelector).nth(before.targetIndex)
+        const beforeTarget = await editTarget.evaluate(readEditFingerprint)
         await focus!.check()
         const inputIndex = await live.page.evaluate(() => {
           const probe = (window as ProbeWindow).performanceProbe!
@@ -661,11 +668,11 @@ test('production document performance and correctness evidence', async () => {
                 .first()
                 .evaluate((pm) => pm.querySelectorAll(':scope > p').length),
             )
-            .toBe(before.paragraphs + 1)
+            .toBe(beforeEdit.paragraphs + 1)
         else
           await expect
-            .poll(() => live.page.locator('.ProseMirror').first().textContent())
-            .not.toBe(before.text)
+            .poll(() => editTarget.evaluate(readEditFingerprint))
+            .not.toEqual(beforeTarget)
         const screenshotStarted = now()
         let screenshotMs = 0
         const [firstIdleMs, screenshot] = await Promise.all([
@@ -689,6 +696,17 @@ test('production document performance and correctness evidence', async () => {
         const verificationStarted = now()
         const state = await waitForLayout(live.page, tail, 180_000, -1, started)
         push(`${scenario}-layout-verified-observation`, now() - started)
+        const afterEdit = await mainEditor.evaluate(readEditFingerprint)
+        if (scenario === 'enter') expect(afterEdit.text).toBe(beforeEdit.text)
+        else {
+          expect(afterEdit.paragraphs).toBe(beforeEdit.paragraphs)
+          verifyKeyboardTextEdit(
+            beforeEdit.text,
+            afterEdit.text,
+            scenario === 'delete' ? null : scenario === 'composition' ? '测试' : '测',
+            before.precedingCharacter,
+          )
+        }
         await focus!.check()
         if (!probe.input.length)
           throw new Error(`No current input/keydown attribution for ${scenario}`)
@@ -714,9 +732,7 @@ test('production document performance and correctness evidence', async () => {
         })
         blockingTasks.push(...probe.longTasks.map((entry) => entry.duration))
         await live.page.keyboard.press('Control+z')
-        await expect
-          .poll(() => live.page.locator('.ProseMirror').first().textContent())
-          .toBe(before.text)
+        await expect.poll(() => mainEditor.evaluate(readEditFingerprint)).toEqual(beforeEdit)
         await expect
           .poll(() =>
             live.page
@@ -724,7 +740,7 @@ test('production document performance and correctness evidence', async () => {
               .first()
               .evaluate((pm) => pm.querySelectorAll(':scope > p').length),
           )
-          .toBe(before.paragraphs)
+          .toBe(beforeEdit.paragraphs)
         await waitForLayout(live.page, tail)
       }
       await focus!.end()
