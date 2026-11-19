@@ -353,10 +353,14 @@ it('uses independent numId counters, the decimal/start defaults, and the explici
   expect(sourcePrintChains(xml(), tables, bindings, { numberingXml: '' })).toEqual(
     sourcePrintChains(xml(), tables, bindings),
   )
+  expect(sourcePrintChains(xml(), tables, bindings, {})).toEqual(
+    sourcePrintChains(xml(), tables, bindings),
+  )
 })
 
 it('rejects unresolved or unsupported archive numbering rather than silently omitting labels', () => {
   const document = xml('').replace(p('Before'), generatedParagraph('Keep this source'))
+  expect(() => sourcePrintChains(document, [], [], {})).toThrow('archive numbering part')
   const rejects = [
     '',
     generatedNumbering().replace('numId="5"', 'numId="6"'),

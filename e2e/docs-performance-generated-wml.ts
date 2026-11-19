@@ -93,7 +93,7 @@ const escape = (text: string) =>
 /** Independent archive expectation, not an editor converter. ECMA-376-1:2016
  * §§17.3.1.19,17.9.2/.11/.17/.18/.25: an explicit level-zero decimal list.
  * Unexercised overrides, linked styles and multilevel contracts fail closed. */
-export function generatedPrintText(documentXml: string, numberingXml: string) {
+export function generatedPrintText(documentXml: string, numberingXml = '') {
   const edits: Array<{ at: number; text: string }> = []
   const counters = new Map<string, number>()
   const numbering = elements(parse(numberingXml), {}).filter(

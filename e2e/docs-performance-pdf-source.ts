@@ -62,7 +62,7 @@ export function sourcePrintChains(
   documentXml: string,
   tables: SourceTable[],
   bindings: Array<{ docxIndex: number | null; originalXml: string | null; textboxes?: unknown[] }>,
-  options?: { numberingXml: string },
+  options?: { numberingXml?: string },
 ): Record<string, string> {
   const parsed = parse(documentXml)
   const body = (nodes: Xml, scope: Record<string, string>): SourceElement | undefined => {
