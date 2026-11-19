@@ -91,6 +91,7 @@ import {
   wordArtSvgMarkup,
 } from '../editor/hf-dom'
 import { HeaderFooterArea } from './HeaderFooterArea'
+import { createPrintSourceDiagnostic } from '../print-source-diagnostic'
 
 const twipsToPx = (twips: number) => (twips / 1440) * 96
 
@@ -1435,6 +1436,7 @@ export function PaginationPreview({
       setSlices(computed)
       // read-only snapshot for e2e: the cuts the sheets print and the shadow's verdict
       ;(window as unknown as Record<string, unknown>).__previewDebug = {
+        sourceCells: createPrintSourceDiagnostic(documentView, blocks, rowSplits),
         slices: computed,
         shadowed,
         previewCutMismatch: previewCutDiag.length,
