@@ -49,6 +49,15 @@ it('captures exact cell identity through real clip styles and ignores empty prun
       { page: 0, owner: 'T:0:1', role: 'body', rect: { x: 7.5, y: 90, width: 150, height: 270 } },
     ])
     const content = document.querySelector<HTMLElement>('.pv-content')!
+    const toc = document.createElement('div')
+    toc.className = 'doc-toc-line'
+    toc.dataset.tocAnchor = 'Public'
+    toc.getBoundingClientRect = () => new DOMRect(60, 110, 200, 20)
+    toc.innerHTML = '<span class="doc-toc-dots" style="display:none">...</span>'
+    toc.firstElementChild!.getBoundingClientRect = () => new DOMRect(110, 110, 20, 20)
+    content.append(toc)
+    expect(capturePrintSourceSnapshot).toThrow('TOC leader has no visible clip geometry')
+    toc.remove()
     content.style.clipPath = 'inset(0px 30px)'
     expect(capturePrintSourceSnapshot().snapshot.regions[0].rect).toEqual({
       x: 60,

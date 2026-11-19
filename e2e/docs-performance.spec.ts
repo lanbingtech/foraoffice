@@ -22,6 +22,7 @@ import { readEditFingerprint } from './docs-performance-edit-fingerprint'
 import { observeFirstVisibleSource } from './docs-performance-first-visible'
 import { runWindowsNativeIme, type NativeImeRequest } from './windows-native-ime'
 import { capturePrintSourceSnapshot } from './docs-performance-print-snapshot'
+import { projectPrintedTocLeaders } from './docs-performance-toc'
 import {
   projectPrintedTextboxes,
   sourcePrintChains,
@@ -143,7 +144,10 @@ async function waitForLayout(
       page.evaluate(readLayoutProbe, { end: tail, textRuns }),
       Math.max(1, deadline - Date.now()),
       'layout probe',
-    )
+    ).catch((error: unknown) => {
+      if (error instanceof Error) Object.assign(error, { lastProbe })
+      throw error
+    })
     if (state.activity?.errors.length)
       throw new Error(`Pagination failed: ${state.activity.errors.join('; ')}`)
     const a = state.activity
@@ -1092,6 +1096,7 @@ test('production document performance and correctness evidence', async () => {
     verifySavedContent(expected, savedOracle)
     const savedXml = await saved.file('word/document.xml')!.async('string')
     const savedMainStory = mainStoryOracle(savedXml)
+    currentScenario = 'save-reopen'
     const generation = await live.page.evaluate(
       () => (window as ProbeWindow).__docsLayoutActivity!.snapshot().generation,
     )
@@ -1099,7 +1104,7 @@ test('production document performance and correctness evidence', async () => {
       throw new Error('Saved document reopen returned false')
     const reopened = await waitForLayout(
       live.page,
-      expected.tail,
+      savedMainStory.tail,
       180_000,
       generation,
       now(),
@@ -1109,6 +1114,7 @@ test('production document performance and correctness evidence', async () => {
     expect(await live.page.locator('.ProseMirror').first().textContent()).toContain(saveMarker)
     await focus!.end()
     if (nativeImeRequested) nativeImeAcceptance.status = 'commit-cancel-save-reopen-verified'
+    currentScenario = 'save-print'
     // Source geometry/output verification is untimed. Use the product preview,
     // the same preview used by its native PDF export, before reading exact identities.
     await withDeadline(
@@ -1179,7 +1185,8 @@ test('production document performance and correctness evidence', async () => {
     )
     const positioned = await readPositionedPdf(await readFile(pdf))
     const projected = projectPrintedTextboxes(printChains, printSource.textboxClips)
-    const printProof = verifyPositionedPdf(projected.chains, printSource.snapshot, positioned, host)
+    const toc = projectPrintedTocLeaders(savedXml, projected.chains, printSource.tocLeaders)
+    const printProof = verifyPositionedPdf(toc.chains, printSource.snapshot, positioned, host)
     if (printed.getPageCount() !== visiblePages || printed.getPageCount() !== reopened.pages)
       throw new Error('PDF pages differ from the complete reopened editor')
     await writeFile(
@@ -1189,6 +1196,7 @@ test('production document performance and correctness evidence', async () => {
           method:
             'independent source chains; exact baseline and full horizontal advance ownership; separate paint evidence required',
           clippedTextboxes: projected.clippedTextboxes,
+          authoredTocLeaders: Object.keys(toc.leaders).length,
           ...printProof,
         },
         null,

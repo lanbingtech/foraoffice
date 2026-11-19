@@ -151,21 +151,61 @@ function tocFieldResult(paragraph: Xml) {
   return { anchor, cache, page: cache['#text'] }
 }
 
+const tocBlocks = (body: Xml) =>
+  body.flatMap((node, index) => {
+    if (!Array.isArray(node['w:sdt'])) return []
+    const control = node['w:sdt'] as Xml
+    const properties = xmlChildren(control, 'w:sdtPr')[0] ?? []
+    const docPart = xmlChildren(properties, 'w:docPartObj')[0] ?? []
+    return xmlAttribute(
+      docPart.find((child) => child['w:docPartGallery']),
+      'w:val',
+    ) === 'Table of Contents'
+      ? [{ index, node, control }]
+      : []
+  })
+
+const tocParagraphs = (control: Xml) =>
+  xmlChildren(xmlChildren(control, 'w:sdtContent')[0] ?? [], 'w:p')
+
+/** ECMA-376-1 §§17.3.1.37, 17.18.85: a tab's leader fills its measured spacing. */
+export function authoredTocLeaders(xml: string) {
+  const text = (nodes: Xml): string =>
+    nodes
+      .flatMap((node) =>
+        Object.entries(node).flatMap(([name, value]) => {
+          if (!Array.isArray(value)) return []
+          return name === 'w:t'
+            ? (value as Xml).map((part) => String(part['#text'] ?? ''))
+            : [text(value as Xml)]
+        }),
+      )
+      .join('')
+      .replace(/\s+/g, '')
+  return tocBlocks(documentBody(xml, true)).flatMap(({ control }) =>
+    tocParagraphs(control).flatMap((paragraph) => {
+      const field = tocFieldResult(paragraph)
+      if (!field) return []
+      const stops = xmlChildren(xmlChildren(paragraph, 'w:pPr')[0] ?? [], 'w:tabs')[0] ?? []
+      const right = stops.filter((node) => node['w:tab'] && xmlAttribute(node, 'w:val') === 'right')
+      if (right.length !== 1 || xmlAttribute(right[0], 'w:leader') !== 'dot') return []
+      const authored = text(paragraph)
+      if (!authored.endsWith(field.page) || authored.length <= field.page.length)
+        throw new Error('Authored TOC leader has no exact text and page result')
+      return [
+        {
+          anchor: field.anchor,
+          authored,
+          prefix: authored.slice(0, -field.page.length),
+          suffix: field.page,
+        },
+      ]
+    }),
+  )
+}
+
 /** Restore a verified generated result only for the archival authored-text comparison. */
 function verifyTocPageCaches(source: Xml, saved: Xml, observed: readonly ObservedTocPage[]) {
-  const tocBlocks = (body: Xml) =>
-    body.flatMap((node, index) => {
-      if (!Array.isArray(node['w:sdt'])) return []
-      const control = node['w:sdt'] as Xml
-      const properties = xmlChildren(control, 'w:sdtPr')[0] ?? []
-      const docPart = xmlChildren(properties, 'w:docPartObj')[0] ?? []
-      return xmlAttribute(
-        docPart.find((child) => child['w:docPartGallery']),
-        'w:val',
-      ) === 'Table of Contents'
-        ? [{ index, node, control }]
-        : []
-    })
   const before = tocBlocks(source)
   const after = tocBlocks(saved)
   if (before.length !== after.length) throw new Error('Saved TOC controls differ from original')
@@ -173,10 +213,8 @@ function verifyTocPageCaches(source: Xml, saved: Xml, observed: readonly Observe
   for (const [i, original] of before.entries()) {
     const current = after[i]
     if (original.index !== current.index) throw new Error('Saved TOC control changed position')
-    const paragraphs = (control: Xml) =>
-      xmlChildren(xmlChildren(control, 'w:sdtContent')[0] ?? [], 'w:p')
-    const savedParagraphs = paragraphs(current.control)
-    for (const [index, paragraph] of paragraphs(original.control).entries()) {
+    const savedParagraphs = tocParagraphs(current.control)
+    for (const [index, paragraph] of tocParagraphs(original.control).entries()) {
       const archived = tocFieldResult(paragraph)
       const persisted = savedParagraphs[index] && tocFieldResult(savedParagraphs[index])
       if (!archived || !persisted || archived.anchor !== persisted.anchor) continue

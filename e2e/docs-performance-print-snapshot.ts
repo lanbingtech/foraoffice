@@ -28,6 +28,7 @@ export function capturePrintSourceSnapshot() {
   const snapshot: PdfSourceSnapshot = { pages: [], regions: [] }
   const pageSections: number[] = []
   const textboxClips: Array<{ owner: string; page: number; text: string; clipped: number[] }> = []
+  const tocLeaders: Array<{ anchor: string; page: number; minimum: number; maximum: number }> = []
   const intersect = (a: PdfRect, b: PdfRect): PdfRect | null => {
     const x = Math.max(a.x, b.x),
       y = Math.max(a.y, b.y)
@@ -121,7 +122,38 @@ export function capturePrintSourceSnapshot() {
     }
     for (const content of paper.querySelectorAll<HTMLElement>('.pv-content')) {
       const role = content.hasAttribute('data-pv-body') ? 'body' : 'repeat'
-      if (role === 'body') add(content, 'body', role)
+      if (role === 'body') {
+        add(content, 'body', role)
+        for (const line of content.querySelectorAll<HTMLElement>(
+          '.doc-toc-line[data-toc-anchor]',
+        )) {
+          if (!visible(line)) continue
+          const leader = line.querySelector<HTMLElement>('.doc-toc-dots')
+          const glyphs = leader?.firstChild
+          if (!leader || !glyphs?.textContent || !/^\.+$/.test(glyphs.textContent)) continue
+          const anchor = line.dataset.tocAnchor
+          if (!anchor || !/^\w+$/.test(anchor) || leader.childNodes.length !== 1)
+            throw new Error('Printed TOC leader source identity or geometry is missing')
+          add(line, `toc:${anchor}`, role)
+          const bounds = visible(leader)
+          if (!bounds) throw new Error('Printed TOC leader has no visible clip geometry')
+          let minimum = 0
+          let maximum = 0
+          const range = document.createRange()
+          for (let index = 0; index < glyphs.textContent.length; index++) {
+            range.setStart(glyphs, index)
+            range.setEnd(glyphs, index + 1)
+            const rect = range.getBoundingClientRect()
+            const overlap = intersect(rect, bounds)
+            if (overlap) {
+              maximum++
+              if (overlap.width >= rect.width * 0.999) minimum++
+            }
+          }
+          if (!maximum) throw new Error('Printed TOC leader has no measurable dot geometry')
+          tocLeaders.push({ anchor, page, minimum, maximum })
+        }
+      }
       // Prune spacers carry no source identity or text. Inspect only actual native tables.
       for (const table of content.querySelectorAll<HTMLElement>('table.doc-table[data-idx]')) {
         if (!visible(table)) continue
@@ -211,6 +243,7 @@ export function capturePrintSourceSnapshot() {
     snapshot,
     pageSections,
     textboxClips,
+    tocLeaders,
     source,
     bindings,
     conditions: { media: 'print', devicePixelRatio, cssPxToPoints: 0.75 },
