@@ -878,7 +878,8 @@ test('production document performance and correctness evidence', async () => {
         JSON.stringify(printSource, null, 2),
       )
     } finally {
-      await live.page.emulateMedia({ media: 'screen' })
+      // Remove emulation; pinning screen would also override native printToPDF.
+      await live.page.emulateMedia({ media: null })
     }
     const savedXml = await saved.file('word/document.xml')!.async('string')
     const printChains = sourcePrintChains(
