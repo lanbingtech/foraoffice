@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest'
 import {
+  verifyNativeCompositionEvents,
   expectedInsertion,
   verifySavedContent,
   verifyPrintedContent,
@@ -137,4 +138,48 @@ it('records the actual zoom owner above ProseMirror', () => {
   document.body.innerHTML =
     '<div class="doc-zoom" style="zoom:0.75"><div class="ProseMirror" style="zoom:1"></div></div>'
   expect(documentZoom(document.querySelector<HTMLElement>('.ProseMirror')!)).toBe('0.75')
+})
+
+it('keeps independent paragraph positions correct when composing native and later saved edits', () => {
+  const first = expectedInsertion(original, 'Alpha', 2, '测试')
+  const both = expectedInsertion(first, 'Beta', 2, 'MARK')
+  expect(both.textRuns.join('')).toBe('Al测试phaBeMARKta')
+  expect(both.paragraphs.map((p) => ({ text: p.text, start: p.start }))).toEqual([
+    { text: 'Al测试pha', start: 0 },
+    { text: 'BeMARKta', start: 7 },
+  ])
+})
+
+it('attributes a fresh owned native preedit/commit while recording the measured untrusted compositionend', () => {
+  const common = { trusted: true, mainEditor: true }
+  const events = [
+    { ...common, type: 'compositionstart', at: 100, data: '' },
+    { ...common, type: 'compositionupdate', at: 101, data: "ce'shi" },
+    { ...common, type: 'compositionupdate', at: 102, data: '测试', twoFrameCallbacksMs: 24 },
+    { ...common, type: 'compositionend', at: 103, data: '测试', trusted: false },
+  ]
+  expect(verifyNativeCompositionEvents(events, 99, '测试')).toMatchObject({
+    endTrusted: false,
+    lastUpdateTwoFrameCallbacksMs: 24,
+  })
+  expect(() => verifyNativeCompositionEvents(events, 101, '测试')).toThrow(
+    'Fresh owned native composition',
+  )
+  expect(() =>
+    verifyNativeCompositionEvents(
+      events.map((e) => ({ ...e, mainEditor: false })),
+      99,
+      '测试',
+    ),
+  ).toThrow('Fresh owned native composition')
+  expect(() => verifyNativeCompositionEvents(events, 99, null)).toThrow(
+    'Native composition outcome differs',
+  )
+  expect(
+    verifyNativeCompositionEvents(
+      events.map((e) => (e.at >= 102 ? { ...e, data: '' } : e)),
+      99,
+      null,
+    ),
+  ).toMatchObject({ endTrusted: false })
 })
