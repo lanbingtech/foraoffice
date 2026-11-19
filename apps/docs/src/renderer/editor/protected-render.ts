@@ -2131,6 +2131,9 @@ export function renderTextboxSpec(
   const boxAttrs: Record<string, string> = {
     class: textboxIsFilled(box) ? 'doc-textbox doc-textbox-filled' : 'doc-textbox',
   }
+  // Passive source provenance; display position is not a source segment ordinal.
+  if (box.txbxIndex !== undefined) boxAttrs['data-source-txbx-index'] = String(box.txbxIndex)
+  if (box.shapeId !== undefined) boxAttrs['data-source-shape-id'] = box.shapeId
   if (box.picture) {
     boxAttrs.class += ' doc-textbox-picture'
   }

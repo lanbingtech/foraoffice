@@ -11,7 +11,8 @@ import { submitDocsEditorAction } from './runtime/editor-actions'
 import { scriptFontHtml } from './editor/script-fonts'
 import { carryDocSeen } from './ai/tools'
 import { DOC_CSS_COMMITTED_EVENT, WRAP_WIDTHS_COMMITTED_EVENT } from './editor/cjk-punct-shrink'
-import { trackPaginationActivity } from './pagination-activity'
+import { paginationActivity, trackPaginationActivity } from './pagination-activity'
+import { createDocumentStoryDiagnostic } from './document-story-diagnostic'
 import { observePaginationFonts } from './pagination-fonts'
 import { justifyShrinkPluginKey } from './editor/justify-shrink'
 import { tabReflowMeta } from './editor/decoration-extensions'
@@ -2293,6 +2294,18 @@ export function App({
 
   /** App state bundle for the extracted file actions (file-actions.ts); refreshed every render. */
   const fileCtxRef = useRef<FileActionContext>(null as unknown as FileActionContext)
+  const storyDiagnostic = useMemo(
+    () =>
+      createDocumentStoryDiagnostic(() => {
+        const current = fileCtxRef.current.doc
+        return {
+          documentGeneration: currentDocGeneration(),
+          layoutGeneration: paginationActivity.snapshot().generation,
+          document: current ? { hash: current.hash, blocks: current.parsed.blocks } : null,
+        }
+      }),
+    [],
+  )
   // style-pane previews patch the parsed styles; a font-settle rebuild must keep them
   const liveStylesRef = useRef<{ parsed: ParsedDocFull; styles: Map<string, StyleInfo> } | null>(
     null,
@@ -5756,6 +5769,7 @@ export function App({
         )
         // for real-device verification/troubleshooting: current slices and block geometry (read-only snapshot, no functional dependency)
         ;(window as unknown as Record<string, unknown>).__pageDebug = {
+          sourceStories: storyDiagnostic.snapshot,
           slices,
           fastPasses,
           fastReject,
@@ -6027,6 +6041,7 @@ export function App({
     balloonMode,
     delSectBreaks,
     pendingWatermarkImage,
+    storyDiagnostic,
   ])
 
   // section at the cursor: the target the Layout tab acts on
