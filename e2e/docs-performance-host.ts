@@ -64,7 +64,7 @@ async function waitForDebugger(
   throw new Error('Qt debugger did not start')
 }
 
-async function nativeSaveDialog(pid: number, file: string): Promise<void> {
+async function nativeSaveDialog(pid: number, file: string, signal: AbortSignal): Promise<void> {
   await promisify(execFile)(
     'powershell.exe',
     [
@@ -81,13 +81,13 @@ async function nativeSaveDialog(pid: number, file: string): Promise<void> {
       '-TimeoutMs',
       '180000',
     ],
-    { timeout: 190_000, windowsHide: true },
+    { timeout: 190_000, windowsHide: true, signal },
   )
 }
 
 async function triggerPdf(page: Page): Promise<void> {
-  await page.getByRole('button', { name: 'File', exact: true }).click()
-  await page.getByRole('menuitem', { name: /PDF/ }).first().click()
+  await page.getByRole('button', { name: 'File', exact: true }).click({ timeout: 30_000 })
+  await page.getByRole('menuitem', { name: /PDF/ }).first().click({ timeout: 30_000 })
 }
 
 export async function launchPerformanceHost(options: HostOptions): Promise<PerformanceSession> {
@@ -172,10 +172,16 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
           )
         },
         async exportPdf() {
-          const invoked = triggerPdf(editorPage)
-          await nativeSaveDialog(child.pid!, pdf)
-          await invoked
-          return pdf
+          const controller = new AbortController()
+          try {
+            await Promise.all([
+              triggerPdf(editorPage),
+              nativeSaveDialog(child.pid!, pdf, controller.signal),
+            ])
+            return pdf
+          } finally {
+            controller.abort()
+          }
         },
         async close() {
           await writeFile(join(options.workspace, 'qt-stderr.log'), stderr)

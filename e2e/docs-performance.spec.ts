@@ -769,6 +769,33 @@ test('production document performance and correctness evidence', async () => {
   } catch (error) {
     errors.push(String(error))
     if (runs[currentScenario]) runs[currentScenario].push({ ok: false, error: String(error) })
+    if (session) {
+      try {
+        const [screenshot, state] = await withDeadline(
+          Promise.all([
+            session.page.screenshot({ type: 'png', timeout: 5_000 }),
+            session.page.evaluate(() => ({
+              status: window.document.querySelector('.status-bar')?.textContent,
+              previewPages: window.document.querySelectorAll('.pv-page').length,
+              menuItems: [...window.document.querySelectorAll('[role="menuitem"]')].map((item) => ({
+                text: item.textContent,
+                disabled: item.getAttribute('aria-disabled'),
+              })),
+              activity: (window as ProbeWindow).__docsLayoutActivity?.snapshot(),
+            })),
+          ]),
+          5_000,
+          'failure context',
+        )
+        await writeFile(join(root, 'failure.png'), screenshot)
+        await writeFile(
+          join(root, 'failure-state.json'),
+          JSON.stringify({ scenario: currentScenario, ...state }, null, 2),
+        )
+      } catch (diagnostic) {
+        errors.push(`Failure context unavailable: ${String(diagnostic)}`)
+      }
+    }
     throw error
   } finally {
     try {
