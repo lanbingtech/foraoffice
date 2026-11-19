@@ -254,6 +254,23 @@ it('rejects tray observations captured before this input command', () => {
   )
 })
 
+it('retains rejected native stdout for diagnosis while keeping the input result failed', () => {
+  const output = completedTrayInput()
+  output.before.foregroundOwned = false
+  const stdout = JSON.stringify(output)
+  let failure: unknown
+  try {
+    failure = parseWindowsNativeImeEvidence(trayRequest, stdout)
+  } catch (error) {
+    failure = error
+  }
+  expect(failure).toBeInstanceOf(Error)
+  expect(failure).toMatchObject({
+    message: 'Invalid native IME evidence: owned native input focus',
+    stdout,
+  })
+})
+
 it.each(['action', 'channel', 'error'] as const)(
   'rejects a mismatched %s in helper output',
   (field) => {

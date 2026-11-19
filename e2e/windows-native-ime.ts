@@ -243,10 +243,28 @@ function requireTrayObservation(
   )
 }
 
+export class NativeImeEvidenceError extends Error {
+  constructor(
+    readonly stdout: string,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : 'Invalid native IME evidence', { cause })
+    this.name = 'NativeImeEvidenceError'
+  }
+}
+
 export function parseWindowsNativeImeEvidence(
   request: NativeImeRequest,
   stdout: string,
 ): NativeImeEvidence {
+  try {
+    return readNativeImeEvidence(request, stdout)
+  } catch (error) {
+    throw new NativeImeEvidenceError(stdout, error)
+  }
+}
+
+function readNativeImeEvidence(request: NativeImeRequest, stdout: string): NativeImeEvidence {
   const value: unknown = JSON.parse(stdout.trim().replace(/^\uFEFF/, ''))
   requireEvidence(isRecord(value), 'result')
   requireEvidence(value.action === request.action && !('error' in value), 'action or error')
