@@ -48,6 +48,10 @@ export function verifySavedContent(expected: DocumentOracle, saved: DocumentOrac
     throw new Error('Saved text or paragraph boundaries differ from original plus intended edit')
   if (expected.tables !== saved.tables) throw new Error('Saved tables differ from original')
   if (expected.sections !== saved.sections) throw new Error('Saved sections differ from original')
+  if (JSON.stringify(expected.opaqueXml) !== JSON.stringify(saved.opaqueXml))
+    throw new Error('Saved opaque source XML differs from original')
+  if (JSON.stringify(expected.relationships) !== JSON.stringify(saved.relationships))
+    throw new Error('Saved package relationships differ from original')
 }
 
 export function verifyPrintedContent(

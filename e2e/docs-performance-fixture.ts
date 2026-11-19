@@ -1,8 +1,10 @@
 import { readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
 import JSZip from 'jszip'
 import { XMLParser } from 'fast-xml-parser'
 import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
+import { scanBody } from '../packages/docx-engine/src/scan'
 
 export const PERFORMANCE_END = 'PERFORMANCE DOCUMENT END'
 
@@ -82,6 +84,8 @@ export interface DocumentOracle {
   paragraphs: Array<{ text: string; start: number }>
   tables: string
   sections: string
+  opaqueXml: Array<{ bodyOrdinal: number; occurrence: number; sha256: string }>
+  relationships: Array<{ name: string; sha256: string }>
 }
 
 export async function documentOracle(bytes: Uint8Array): Promise<DocumentOracle> {
@@ -161,13 +165,91 @@ export async function documentOracle(bytes: Uint8Array): Promise<DocumentOracle>
       }
   }
   visit(body ?? [])
+  const opaqueXml = opaqueFingerprints(xml)
+  const relationships = await Promise.all(
+    Object.keys(archive.files)
+      .filter((name) => name.endsWith('.rels') && !archive.files[name].dir)
+      .sort()
+      .map(async (name) => ({
+        name,
+        sha256: createHash('sha256')
+          .update(await archive.files[name].async('uint8array'))
+          .digest('hex'),
+      })),
+  )
   return {
     tail,
     textRuns,
     paragraphs,
     tables: JSON.stringify(tables),
     sections: JSON.stringify(sectionSpecs),
+    opaqueXml,
+    relationships,
   }
+}
+
+/** Fingerprint outermost opaque subtrees, allowing adjacent authored text to change. */
+function opaqueFingerprints(xml: string): DocumentOracle['opaqueXml'] {
+  const kinds = new Set(['AlternateContent', 'drawing', 'pict', 'object', 'oMath', 'oMathPara'])
+  return scanBody(xml).elements.flatMap((body, bodyOrdinal) => {
+    const result: DocumentOracle['opaqueXml'] = []
+    const stack: string[] = []
+    let capture: { start: number; depth: number } | undefined
+    let cursor = body.start
+    const record = (start: number, end: number) =>
+      result.push({
+        bodyOrdinal,
+        occurrence: result.length,
+        sha256: createHash('sha256').update(xml.slice(start, end)).digest('hex'),
+      })
+    while (cursor < body.end) {
+      const start = xml.indexOf('<', cursor)
+      if (start < 0 || start >= body.end) break
+      const opaque = xml.startsWith('<!--', start)
+        ? (['-->', 4] as const)
+        : xml.startsWith('<![CDATA[', start)
+          ? ([']]>', 9] as const)
+          : xml.startsWith('<?', start)
+            ? (['?>', 2] as const)
+            : null
+      if (opaque) {
+        const end = xml.indexOf(opaque[0], start + opaque[1])
+        if (end < 0) throw new Error('Unterminated XML source fragment')
+        cursor = end + opaque[0].length
+        continue
+      }
+      let quote = ''
+      let end = start + 1
+      for (; end < body.end; end++) {
+        const character = xml[end]
+        if (quote) {
+          if (character === quote) quote = ''
+        } else if (character === '"' || character === "'") quote = character
+        else if (character === '>') {
+          end++
+          break
+        }
+      }
+      const tag = xml.slice(start, end)
+      const name = /^<\/?\s*([A-Za-z_][\w:.-]*)/.exec(tag)?.[1]
+      if (!name) throw new Error('Unrecognized XML source fragment')
+      if (tag.startsWith('</')) {
+        if (stack.pop() !== name) throw new Error('Mismatched XML source fragment')
+        if (capture && capture.depth === stack.length + 1) {
+          record(capture.start, end)
+          capture = undefined
+        }
+      } else if (tag.endsWith('/>')) {
+        if (!capture && kinds.has(name.split(':').at(-1)!)) record(start, end)
+      } else {
+        stack.push(name)
+        if (!capture && kinds.has(name.split(':').at(-1)!)) capture = { start, depth: stack.length }
+      }
+      cursor = end
+    }
+    if (stack.length || capture) throw new Error('Unclosed XML source fragment')
+    return result
+  })
 }
 
 export async function documentTail(bytes: Uint8Array): Promise<string> {
