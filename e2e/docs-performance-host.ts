@@ -26,7 +26,7 @@ export interface PerformanceSession {
   evidence: Record<string, unknown>
   open(): Promise<boolean | null>
   save(): Promise<void>
-  exportPdf(): Promise<string>
+  exportPdf(timeoutMs?: number): Promise<string>
   close(): Promise<void>
 }
 
@@ -83,7 +83,12 @@ async function waitForDebugger(
   throw new Error('Qt debugger did not start')
 }
 
-async function nativeSaveDialog(pid: number, file: string, signal: AbortSignal): Promise<void> {
+async function nativeSaveDialog(
+  pid: number,
+  file: string,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<void> {
   await promisify(execFile)(
     'powershell.exe',
     [
@@ -98,13 +103,20 @@ async function nativeSaveDialog(pid: number, file: string, signal: AbortSignal):
       '-TargetFilePath',
       file,
       '-TimeoutMs',
-      '180000',
+      String(timeoutMs),
     ],
-    { timeout: 190_000, windowsHide: true, signal },
+    { timeout: timeoutMs + 10_000, windowsHide: true, signal },
   )
 }
 
 async function triggerPdf(page: Page): Promise<void> {
+  if (await page.locator('.pagination-preview').count()) {
+    await page
+      .locator('.pv-toolbar')
+      .getByRole('button', { name: 'Export PDF', exact: true })
+      .click({ timeout: 30_000 })
+    return
+  }
   await page.getByRole('button', { name: 'File', exact: true }).click({ timeout: 30_000 })
   await page.getByRole('menuitem', { name: /PDF/ }).first().click({ timeout: 30_000 })
 }
@@ -196,7 +208,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
             { timeout: 180_000 },
           )
         },
-        async exportPdf() {
+        async exportPdf(timeoutMs = 180_000) {
           await exportWithNativePicker(
             () =>
               editorPage.evaluate(async () => {
@@ -205,7 +217,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
                 if (!exportPdf) throw new Error('Qt product PDF export callback is missing')
                 return await exportPdf()
               }),
-            (signal) => nativeSaveDialog(child.pid!, pdf, signal),
+            (signal) => nativeSaveDialog(child.pid!, pdf, signal, timeoutMs),
           )
           return pdf
         },

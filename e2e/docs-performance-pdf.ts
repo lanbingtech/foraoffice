@@ -14,6 +14,30 @@ export interface PdfSourceSnapshot {
   regions: Array<{ page: number; owner: string; role: 'body' | 'repeat'; rect: PdfRect }>
 }
 
+/** Bounded harness allowance for existing serial <=10-page jobs (file-actions.ts).
+ * Each native job retains its own60s limit; failed-job bisection gets no unlimited extension. */
+export function pdfExportBudget(pages: PdfSourceSnapshot['pages']) {
+  if (!pages.length) throw new Error('Missing authored print pages')
+  let previous = '',
+    run = 0,
+    initialJobs = 0
+  for (const page of pages) {
+    const paper = `${Math.round(page.width * 20)}/${Math.round(page.height * 20)}`
+    if (paper !== previous || run === 10) {
+      initialJobs++
+      run = 0
+    }
+    previous = paper
+    run++
+  }
+  const capMs = 600_000
+  return {
+    initialJobs,
+    timeoutMs: Math.min(capMs, Math.max(180_000, initialJobs * 60_000 + 30_000)),
+    capMs,
+  }
+}
+
 export async function readPositionedPdf(bytes: Uint8Array): Promise<PdfTextPage[]> {
   // Same installed PDF.js path as existing Docs output geometry tests.
   const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs')

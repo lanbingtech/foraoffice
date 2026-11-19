@@ -4,8 +4,7 @@ import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { readFile, writeFile, mkdir, mkdtemp, realpath, readdir } from 'node:fs/promises'
 import { cpus, platform, release, totalmem } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { createRequire } from 'node:module'
+import { join, resolve } from 'node:path'
 import JSZip from 'jszip'
 import { PDFDocument } from 'pdf-lib'
 import { buildPerformanceFixture, documentOracle } from './docs-performance-fixture'
@@ -21,11 +20,13 @@ import { createPerformanceFocusGuard } from './docs-performance-focus'
 import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
 import { readEditFingerprint } from './docs-performance-edit-fingerprint'
 import { observeFirstVisibleSource } from './docs-performance-first-visible'
+import { capturePrintSourceSnapshot } from './docs-performance-print-snapshot'
+import { sourcePrintChains } from './docs-performance-pdf-source'
+import { readPositionedPdf, verifyPositionedPdf, pdfExportBudget } from './docs-performance-pdf'
 import {
   documentZoom,
   expectedInsertion,
   verifySavedContent,
-  verifyPrintedContent,
   verifyKeyboardTextEdit,
 } from './docs-performance-oracle'
 import {
@@ -841,40 +842,75 @@ test('production document performance and correctness evidence', async () => {
     )
     expect(await live.page.locator('.ProseMirror').first().textContent()).toContain(saveMarker)
     await focus!.end()
-    const pdf = await withDeadline(live.exportPdf(), 180_000, 'PDF export')
+    // Source geometry/output verification is untimed. Use the product preview,
+    // the same preview used by its native PDF export, before reading exact identities.
+    await withDeadline(
+      live.page.evaluate(() => {
+        const open = (window as unknown as { __openPagePreview?: () => void }).__openPagePreview
+        if (!open) throw new Error('Product page-preview callback is missing')
+        open()
+      }),
+      10_000,
+      'product page preview',
+    )
+    await live.page.waitForFunction(
+      () => {
+        const diagnostic = (
+          window as unknown as {
+            __previewDebug?: { sourceCells?: () => { modelCurrent: boolean } }
+          }
+        ).__previewDebug?.sourceCells?.()
+        return !!window.document.querySelector('.pv-page') && diagnostic?.modelCurrent === true
+      },
+      undefined,
+      { polling: 50, timeout: 180_000 },
+    )
+    let printSource: ReturnType<typeof capturePrintSourceSnapshot>
+    try {
+      await live.page.emulateMedia({ media: 'print' })
+      printSource = await withDeadline(
+        live.page.evaluate(capturePrintSourceSnapshot),
+        60_000,
+        'print source snapshot',
+      )
+      await writeFile(
+        join(root, 'print-source-snapshot.json'),
+        JSON.stringify(printSource, null, 2),
+      )
+    } finally {
+      await live.page.emulateMedia({ media: 'screen' })
+    }
+    const savedXml = await saved.file('word/document.xml')!.async('string')
+    const printChains = sourcePrintChains(
+      savedXml,
+      printSource.source.tables,
+      printSource.bindings.blocks,
+    )
+    for (const story of expectedTextboxStories(savedXml, printSource.bindings.blocks))
+      printChains[`box:${story.docxIndex}:${story.txbxIndex}`] = story.text
+    const budget = pdfExportBudget(printSource.snapshot.pages)
+    await writeFile(join(root, 'print-budget.json'), JSON.stringify(budget, null, 2))
+    const pdf = await withDeadline(live.exportPdf(budget.timeoutMs), budget.timeoutMs, 'PDF export')
     const printed = await waitForPdf(pdf)
     const visiblePages = Number(
       (await live.page.locator('.status-page').innerText()).match(/\d+/g)?.at(-1),
     )
-    const require = createRequire(join(sdk, 'package.json'))
-    const backend = require(
-      join(sdk, 'services/services.cjs'),
-    ) as typeof import('../apps/docs/src/services')
-    const reader = await backend.createDocsResourceServices({
-      stateDirectory: join(root, 'pdf-check'),
-      readRoots: [dirname(pdf)],
-      writeRoots: [],
-    })
-    try {
-      await reader.setAttachments([pdf])
-      let text = ''
-      let total = 1
-      while (text.length < total) {
-        const extracted = await reader.readAttachment(pdf, text.length, 24_000)
-        if (
-          !extracted.ok ||
-          !extracted.text ||
-          typeof extracted.totalChars !== 'number' ||
-          extracted.totalChars < text.length
-        )
-          throw new Error('PDF full-text extraction did not progress')
-        total = extracted.totalChars
-        text += extracted.text
-      }
-      verifyPrintedContent(expected, text, printed.getPageCount(), visiblePages)
-    } finally {
-      reader.dispose()
-    }
+    const positioned = await readPositionedPdf(await readFile(pdf))
+    const printProof = verifyPositionedPdf(printChains, printSource.snapshot, positioned, host)
+    if (printed.getPageCount() !== visiblePages || printed.getPageCount() !== reopened.pages)
+      throw new Error('PDF pages differ from the complete reopened editor')
+    await writeFile(
+      join(root, 'positioned-pdf-proof.json'),
+      JSON.stringify(
+        {
+          method:
+            'independent source chains; exact baseline and full horizontal advance ownership; separate paint evidence required',
+          ...printProof,
+        },
+        null,
+        2,
+      ),
+    )
     correctness = {
       savedEdit: true,
       reopenedEdit: true,
@@ -884,6 +920,7 @@ test('production document performance and correctness evidence', async () => {
       layoutPages: reopened.pages,
       visiblePages,
       pageSizesPoints: printed.getPages().map((page) => page.getSize()),
+      printSourceChains: printProof.sourceChains,
     }
     details.push({
       operation: 'save-print',

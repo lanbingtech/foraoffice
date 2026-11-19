@@ -4,6 +4,7 @@ import {
   verifyPositionedPdf,
   readPositionedPdf,
   type PdfSourceSnapshot,
+  pdfExportBudget,
 } from '../../../e2e/docs-performance-pdf'
 import { PDFDocument, degrees } from 'pdf-lib'
 
@@ -185,4 +186,22 @@ it('uses measured PDF baselines and the full horizontal span when an em box cros
   expect(() => verifyPositionedPdf(expected, snapshot, output)).toThrow(
     'Printed text has no source geometry',
   )
+})
+
+it('bounds sequential native output using authored contiguous paper groups and the existing ten-page chunks', () => {
+  const portrait = { width: 595.3, height: 841.9 }
+  const landscape = { width: 841.9, height: 595.3 }
+  expect(
+    pdfExportBudget([
+      ...Array.from({ length: 12 }, () => portrait),
+      ...Array.from({ length: 2 }, () => landscape),
+      ...Array.from({ length: 32 }, () => portrait),
+    ]),
+  ).toEqual({ initialJobs: 7, timeoutMs: 450_000, capMs: 600_000 })
+  expect(pdfExportBudget(Array.from({ length: 200 }, () => portrait))).toEqual({
+    initialJobs: 20,
+    timeoutMs: 600_000,
+    capMs: 600_000,
+  })
+  expect(() => pdfExportBudget([])).toThrow('Missing authored print pages')
 })
