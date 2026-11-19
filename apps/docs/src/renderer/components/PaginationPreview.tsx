@@ -517,13 +517,11 @@ export interface CloneChild {
  */
 const CLONE_PRUNE_BUDGET = 150_000
 /**
- * Blocks under-count a document whose blocks are individually huge (page-long
- * tables, heavily run-split paragraphs): a 112-page report of 869 blocks but
- * 87k elements stayed under the block budget, so the preview carried 9.7 M
- * nodes and each chunked printToPDF took minutes. Elements are what Blink
- * pays for, so they get their own budget.
+ * Blocks under-count documents with densely nested content such as tables.
+ * In a 39-page Qt print probe (227,214 estimated cloned elements), pruning
+ * reduced the preview DOM from 343,496 to 65,849 elements.
  */
-const CLONE_PRUNE_ELEMENT_BUDGET = 2_000_000
+const CLONE_PRUNE_ELEMENT_BUDGET = 200_000
 /** window slack around a page (px): keeps neighbours whose floats/overflow bleed into the page */
 const CLONE_PRUNE_PAD = 2000
 
