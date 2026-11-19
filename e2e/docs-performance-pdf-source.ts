@@ -1,5 +1,6 @@
 import { XMLBuilder, XMLParser } from 'fast-xml-parser'
 import { mainStoryOracle, expectedTextboxStories } from './docs-performance-stories'
+import { generatedPrintText } from './docs-performance-generated-wml'
 
 type Xml = Array<Record<string, unknown>>
 interface SourceElement {
@@ -61,6 +62,7 @@ export function sourcePrintChains(
   documentXml: string,
   tables: SourceTable[],
   bindings: Array<{ docxIndex: number | null; originalXml: string | null; textboxes?: unknown[] }>,
+  options?: { numberingXml: string },
 ): Record<string, string> {
   const parsed = parse(documentXml)
   const body = (nodes: Xml, scope: Record<string, string>): SourceElement | undefined => {
@@ -117,7 +119,9 @@ export function sourcePrintChains(
     return value !== 'restart'
   }
   const expected: Record<string, string> = {}
-  let remaining = documentXml
+  const generated = options && generatedPrintText(documentXml, options.numberingXml)
+  let remaining = generated?.documentXml ?? documentXml
+  let tableCursor = 0
   const seen = new Set<number>()
   for (const table of tables) {
     const binding = bindings.find((candidate) => candidate.docxIndex === table.docxIndex)
@@ -127,7 +131,11 @@ export function sourcePrintChains(
     if (table.docxIndex === null || !table.sourceTable || seen.has(table.docxIndex))
       throw new Error('Printed table source identity is missing or duplicated')
     seen.add(table.docxIndex)
-    const roots = elements(parse(xml), context.scope)
+    const tableAt = documentXml.indexOf(xml, generated ? tableCursor : 0)
+    if (tableAt < 0) throw new Error('Printed source table order differs')
+    tableCursor = tableAt + xml.length
+    const projectedXml = generated?.fragment(xml, tableAt) ?? xml
+    const roots = elements(parse(projectedXml), context.scope)
     if (roots.length !== 1 || !wml.has(roots[0].namespace) || roots[0].local !== 'tbl')
       throw new Error('Unsupported wrapped table source mapping')
     const rows = children(roots[0], 'tr')
@@ -191,7 +199,7 @@ export function sourcePrintChains(
           throw new Error('Nonempty hidden source cell requires explicit story policy')
       })
     })
-    remaining = remaining.replace(xml, '')
+    remaining = remaining.replace(projectedXml, '')
   }
   expected.body = mainStoryOracle(remaining).textRuns.join('')
   for (const story of expectedTextboxStories(
