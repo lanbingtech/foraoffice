@@ -468,6 +468,24 @@ function computeLineSampleSig(el: HTMLElement, textH: number): string {
   // costs one re-sample, so quantization errs toward invalidating.
   const w = el.getBoundingClientRect().width
   const nodes = el.getElementsByTagName('*').length
+  let spans = 0
+  if (el.tagName === 'TABLE') {
+    let row = 0
+    for (const tr of el.querySelectorAll('tr')) {
+      let column = 0
+      for (const cell of tr.children) {
+        if (cell.hasAttribute('rowspan')) {
+          const span =
+            Number(cell.getAttribute('data-base-rowspan')) ||
+            (cell as HTMLTableCellElement).rowSpan ||
+            1
+          spans = (spans * 33 + span + column * 31 + row * 997) | 0
+        }
+        column++
+      }
+      row++
+    }
+  }
   // justify-shrink decorations move wrap points without changing text, height
   // or (when a decoration migrates between lines) the descendant count (r177)
   let js = 0
@@ -475,7 +493,7 @@ function computeLineSampleSig(el: HTMLElement, textH: number): string {
     const per = Math.round((parseFloat(sp.style.wordSpacing) || 0) * -100)
     js = (js * 33 + per + (sp.textContent?.length ?? 0)) | 0
   }
-  return `${lineSampleFontEpoch}:${Math.round(textH * 4)}:${Math.round(w * 4)}:${nodes}:${h}:${js}`
+  return `${lineSampleFontEpoch}:${Math.round(textH * 4)}:${Math.round(w * 4)}:${nodes}:${h}:${js}:${spans}`
 }
 
 export function fillLineBoxes(
@@ -830,9 +848,25 @@ function domTableRows(el: HTMLElement, blockHeight: number, zoomFactor: number):
     const trTop = tr.getBoundingClientRect().top
     return (trTop - elTop - gapAbove(trTop)) / zoomFactor
   })
+  let active: Array<{ until: number; bands: Array<[number, number]>; next: number }> = []
   return indexedRowBoxes(tops, blockHeight).map((b, i) => {
     if (!trs[i]) return { height: b.height }
-    const { cuts, contentBottom, cells, forcedCuts } = rowCutYs(
+    active = active.filter((span) => span.until > i)
+    const precedingSpanInk: Array<[number, number]> = []
+    for (const span of active) {
+      while (span.next < span.bands.length && span.bands[span.next][1] <= b.offsetInBlock)
+        span.next++
+      for (
+        let k = span.next;
+        k < span.bands.length && span.bands[k][0] < b.offsetInBlock + b.height;
+        k++
+      )
+        precedingSpanInk.push([
+          span.bands[k][0] - b.offsetInBlock,
+          span.bands[k][1] - b.offsetInBlock,
+        ])
+    }
+    const { cuts, contentBottom, cells, forcedCuts, spans } = rowCutYs(
       trs[i],
       b.offsetInBlock,
       b.height,
@@ -840,10 +874,13 @@ function domTableRows(el: HTMLElement, blockHeight: number, zoomFactor: number):
       gapAbove,
       zoomFactor,
     )
+    for (const span of spans)
+      active.push({ until: Math.min(trs.length, i + span.rows), bands: span.bands, next: 0 })
     const splitExtra = parseFloat(trs[i].dataset.splitExtra ?? '')
     return {
       height: b.height,
       contentBottom,
+      ...(precedingSpanInk.length ? { precedingSpanInk } : {}),
       ...(trs[i].hasAttribute('data-repeat-header')
         ? { isHeader: trs[i].getAttribute('data-repeat-header') === '1' }
         : {}),
@@ -894,12 +931,19 @@ function rowCutYs(
   elTop: number,
   gapAbove: (top: number) => number,
   zoomFactor: number,
-): { cuts: number[]; contentBottom: number; cells?: RowCellBox[]; forcedCuts?: number[] } {
+): {
+  cuts: number[]
+  contentBottom: number
+  cells?: RowCellBox[]
+  forcedCuts?: number[]
+  spans: Array<{ rows: number; bands: Array<[number, number]> }>
+} {
   const cells = Array.from(tr.children).filter((c) => c.tagName === 'TD' || c.tagName === 'TH')
   const range = rowRange()
   const cellBands: Array<Array<[number, number]>> = []
   const paraBands: Array<Array<[number, number]>> = []
   const cellBoxes: RowCellBox[] = []
+  const spans: Array<{ rows: number; bands: Array<[number, number]> }> = []
   // Explicit page breaks the author typed inside this row. Measured, not
   // inferred: br.doc-page-br is what DocHardBreak renders, and an author who
   // pressed the break expects a page to turn even mid-line.
@@ -1007,6 +1051,19 @@ function rowCutYs(
       addEntry(band, para, para)
     }
     if (bands.length > 0) cellBands.push(bands)
+    const span =
+      Number(cell.getAttribute('data-base-rowspan')) || (cell as HTMLTableCellElement).rowSpan || 1
+    if (span > 1 && bands.length) {
+      // Union overlapping ink once; monotonically advancing active cursors never
+      // rescan old/future lines for every covered row or measure an owner again.
+      const merged: Array<[number, number]> = []
+      for (const [top, bottom] of [...bands].sort((a, b) => a[0] - b[0])) {
+        const last = merged.at(-1)
+        if (last && top + rowTop < last[1]) last[1] = Math.max(last[1], bottom + rowTop)
+        else merged.push([top + rowTop, bottom + rowTop])
+      }
+      spans.push({ rows: span, bands: merged })
+    }
     for (const list of byPara.values()) paraBands.push(list)
     if (cellsOk) cellBoxes.push(cellBoxOf(cell as HTMLElement, entries, zoomFactor, toBand))
   }
@@ -1024,6 +1081,7 @@ function rowCutYs(
     cuts: cellCutYs(cellBands, rowHeight, paraBands, hasCells ? [] : forcedCuts),
     ...(forcedCuts.length > 0 ? { forcedCuts } : {}),
     contentBottom,
+    spans,
     ...(hasCells ? { cells: cellBoxes } : {}),
   }
 }

@@ -2251,6 +2251,23 @@ function _placeTable(
     }
 
     if (!fits(row.height + notes) || (row.forcedCuts?.length ?? 0) > 0) {
+      // A predecessor's vertically merged cell is absent from this tr's own
+      // split plan. If its ink crosses capacity, keep this otherwise page-sized
+      // row whole; do not add split fill that would recenter/grow the rowspan.
+      // Tall rows and an unsafe row-top retain the existing bounded split path.
+      const available = remain() - notes
+      if (
+        !pageEmpty() &&
+        !row.forcedCuts?.length &&
+        row.height + notes <= contentH - repeatH + 0.01 &&
+        row.precedingSpanInk?.some(([top, bottom]) => top < available && bottom > available) &&
+        !row.precedingSpanInk.some(([top, bottom]) => top < 0 && bottom > 0)
+      ) {
+        if (turnBeforeRow(ri, repeatH)) {
+          ri = -1
+          continue
+        }
+      }
       const contentEnd =
         row.contentBottom !== undefined ? Math.min(row.contentBottom, row.height) : row.height
       // in-row page break (Word default): without cantSplit and with safe cut points,

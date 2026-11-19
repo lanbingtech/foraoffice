@@ -76,6 +76,113 @@ const block = (top: number, height: number, extra?: Partial<BlockBox>): BlockBox
   ...extra,
 })
 
+it('keeps a predecessor rowspan line whole when a later row can fit a fresh page without row-height growth', () => {
+  document.body.innerHTML =
+    '<div><table data-rect="0,180"><tbody>' +
+    '<tr data-rect="0,40"><td rowspan="3" style="vertical-align:middle" data-rect="0,180"><p id="span-label" data-rect="95,14" data-ink="95,14">Merged label</p></td><td data-rect="0,40"><p data-rect="5,14" data-ink="5,14">Opening</p></td></tr>' +
+    '<tr data-rect="40,100"><td data-rect="40,100"><p data-rect="40,100" data-ink="40,20;60,20;80,20;100,20;120,20">Later row left</p></td><td data-rect="40,100"><p data-rect="40,100" data-ink="40,20;60,20;80,20;100,20;120,20">Later row right</p></td></tr>' +
+    '<tr data-rect="140,40"><td data-rect="140,40"><p data-rect="145,14" data-ink="145,14">Tail left</p></td><td data-rect="140,40"><p data-rect="145,14" data-ink="145,14">Tail right</p></td></tr>' +
+    '</tbody></table></div>'
+  for (const element of document.querySelectorAll<HTMLElement>('[data-rect]')) {
+    const [y, h] = element.dataset.rect!.split(',').map(Number)
+    element.getBoundingClientRect = () => new DOMRect(0, y, 100, h)
+  }
+  const originalRects = Range.prototype.getClientRects
+  let labelMeasurements = 0
+  Range.prototype.getClientRects = function (this: Range) {
+    const paragraph = this.startContainer.parentElement
+    if (paragraph?.id === 'span-label') labelMeasurements++
+    return (paragraph?.dataset.ink?.split(';').map((pair) => {
+      const [y, h] = pair.split(',').map(Number)
+      return new DOMRect(0, y, 70, h)
+    }) ?? []) as unknown as DOMRectList
+  }
+  try {
+    const table = document.querySelector<HTMLElement>('table')!
+    const b: BlockBox = { top: 0, height: 180, el: table, modernTableHeaders: true }
+    const page = [{ contentHeight: 100, forceBreak: false }]
+    fillLineBoxes([b], page, 1)
+    const out: SliceOutputs = { rowSplits: [], rowFills: [] }
+    const slices = computeSectionedSlicesF2([b], page, 180, out)
+    expect(slices.map((s) => [s.start, s.end])).toEqual([
+      [0, 40],
+      [40, 140],
+      [140, 180],
+    ])
+    expect(out.rowFills).toEqual([])
+    expect(labelMeasurements).toBe(1)
+    // Removing the authored span must retire its constraints, even when the
+    // table's text, total height, width and descendant count stay unchanged.
+    table.querySelector('td')!.setAttribute('rowspan', '1')
+    table.querySelector<HTMLElement>('td')!.getBoundingClientRect = () => new DOMRect(0, 0, 100, 40)
+    const label = table.querySelector<HTMLElement>('#span-label')!
+    label.dataset.ink = '5,14'
+    label.getBoundingClientRect = () => new DOMRect(0, 5, 70, 14)
+    const changed: BlockBox = { top: 0, height: 180, el: table, modernTableHeaders: true }
+    fillLineBoxes([changed], page, 1)
+    expect(
+      computeSectionedSlicesF2([changed], page, 180, { rowSplits: [], rowFills: [] }).map((s) => [
+        s.start,
+        s.end,
+      ]),
+    ).toEqual([
+      [0, 100],
+      [100, 180],
+    ])
+    expect(labelMeasurements).toBe(2)
+  } finally {
+    Range.prototype.getClientRects = originalRects
+    document.body.innerHTML = ''
+  }
+})
+
+it('leaves oversized rows on the existing split path and ignores expired inherited ink', () => {
+  const own = {
+    lines: Array.from({ length: 10 }, (_, i): [number, number] => [i * 20, (i + 1) * 20]),
+    childOf: Array.from({ length: 10 }, () => 0),
+    paraOf: Array.from({ length: 10 }, () => 0),
+    alignDy: 0,
+    alignFrac: 0,
+  }
+  const rows: TableRowBox[] = [{ height: 40 }, { height: 200, cells: [own, own] }]
+  const run = (values: TableRowBox[]) => {
+    const height = values.reduce((sum, row) => sum + row.height, 0)
+    return computeSectionedSlicesF2(
+      [{ top: 0, height, tableRows: values, modernTableHeaders: true }],
+      [{ contentHeight: 100, forceBreak: false }],
+      height,
+      { rowSplits: [], rowFills: [] },
+    )
+  }
+  expect(run(rows).map((s) => [s.start, s.end])).toEqual([
+    [0, 100],
+    [100, 200],
+    [200, 240],
+  ])
+  expect(run([rows[0], { ...rows[1], precedingSpanInk: [[55, 69]] }])).toEqual(run(rows))
+  const small: TableRowBox[] = [
+    { height: 40 },
+    {
+      height: 100,
+      cells: [
+        {
+          ...own,
+          lines: own.lines.slice(0, 5),
+          childOf: own.childOf.slice(0, 5),
+          paraOf: own.paraOf.slice(0, 5),
+        },
+        {
+          ...own,
+          lines: own.lines.slice(0, 5),
+          childOf: own.childOf.slice(0, 5),
+          paraOf: own.paraOf.slice(0, 5),
+        },
+      ],
+    },
+  ]
+  expect(run([small[0], { ...small[1], precedingSpanInk: [[-20, -5]] }])).toEqual(run(small))
+})
+
 describe('computePageSlices', () => {
   it('empty document yields one page', () => {
     expect(computePageSlices([], 800, 0)).toEqual([{ start: 0, end: 0, section: 0 }])

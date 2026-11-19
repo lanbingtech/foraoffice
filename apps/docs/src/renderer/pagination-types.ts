@@ -235,6 +235,9 @@ export interface RowPlan {
 export interface TableRowBox {
   /** row height (px) */
   height: number
+  /** Ink of cells started in earlier rows whose authored rowspan covers this
+   * row; offsets are relative to this row's top. Sampled once at the owner. */
+  precedingSpanInk?: Array<[number, number]>
   /** cantSplit: the row cannot be broken internally (whole row stays on one page) */
   cantSplit?: boolean
   /** tblHeader: the row is a header row, repeated at the top of the next page after a break */
