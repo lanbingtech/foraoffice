@@ -183,6 +183,35 @@ it('leaves oversized rows on the existing split path and ignores expired inherit
   expect(run([small[0], { ...small[1], precedingSpanInk: [[-20, -5]] }])).toEqual(run(small))
 })
 
+it('charges a rowspan-constrained first body row note once when modern headers retract and replay', () => {
+  const cell = {
+    lines: Array.from({ length: 5 }, (_, i): [number, number] => [i * 20, (i + 1) * 20]),
+    childOf: [0, 0, 0, 0, 0],
+    paraOf: [0, 0, 0, 0, 0],
+    alignDy: 0,
+    alignFrac: 0,
+  }
+  const rows: TableRowBox[] = [
+    { height: 40, isHeader: true },
+    { height: 100, notesPx: 10, cells: [cell, cell], precedingSpanInk: [[45, 59]] },
+  ]
+  const slices = computeSectionedSlicesF2(
+    [
+      block(0, 80),
+      block(80, 165, { tableRows: rows, modernTableHeaders: true, footnoteExtraPx: 25 }),
+      block(245, 25),
+    ],
+    [{ contentHeight: 200, forceBreak: false }],
+    270,
+    { rowSplits: [], rowFills: [] },
+  )
+  expect(slices.map((s) => [s.start, s.end])).toEqual([
+    [0, 80],
+    [80, 245],
+    [245, 270],
+  ])
+})
+
 describe('computePageSlices', () => {
   it('empty document yields one page', () => {
     expect(computePageSlices([], 800, 0)).toEqual([{ start: 0, end: 0, section: 0 }])
