@@ -14,6 +14,7 @@ export interface HostOptions {
   kind: PerformanceHost
   workspace: string
   document: string
+  initialDocument?: string
   sdk: string
   electronApp: string
   qtExecutable: string
@@ -111,7 +112,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
         '--state',
         join(options.workspace, 'profile'),
         '--open',
-        options.document,
+        options.initialDocument ?? options.document,
         '--language',
         'en',
       ],
@@ -149,7 +150,12 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
       return {
         page,
         nativeProcessId: child.pid,
-        evidence: { kind: 'qt', rendering: 'normal-window', debuggerVersion },
+        evidence: {
+          kind: 'qt',
+          rendering: 'normal-window',
+          debuggerVersion,
+          exportMethod: 'existing-product-exportPdf-callback-with-native-save-picker',
+        },
         open: () =>
           editorPage.evaluate(async (path) => {
             const editor = (
@@ -176,10 +182,16 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
         async exportPdf() {
           const controller = new AbortController()
           try {
-            await Promise.all([
-              triggerPdf(editorPage),
+            const [exported] = await Promise.all([
+              editorPage.evaluate(async () => {
+                const exportPdf = (window as unknown as { __exportPdf?: () => Promise<unknown> })
+                  .__exportPdf
+                if (!exportPdf) throw new Error('Qt product PDF export callback is missing')
+                return await exportPdf()
+              }),
               nativeSaveDialog(child.pid!, pdf, controller.signal),
             ])
+            if (exported === false) throw new Error('Qt product PDF export returned false')
             return pdf
           } finally {
             controller.abort()
@@ -207,7 +219,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
     const require = createRequire(join(options.electronApp, 'package.json'))
     const app = await electron.launch({
       executablePath: require('electron') as string,
-      args: [options.electronApp, options.document],
+      args: [options.electronApp, options.initialDocument ?? options.document],
       env: {
         ...environment(),
         AI_OFFICE_USER_DATA: join(options.workspace, 'profile'),
@@ -312,8 +324,8 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
   const defaults={getLanguage:'en',getSystemLocale:'en-US',getTheme:'light',getDocumentTheme:'follow',getAuthorName:'Performance fixture',getAutoSaveDefault:{on:false,updatedAt:0},getAiPanelPrefs:{side:'left',fontSize:'default',spellcheck:false,openInNewDocs:false,showAiSidebar:false},spellLanguages:{active:[],available:[]},docPasswordIntentRevision:0,getRecentFiles:[]};
   const services=new Proxy({}, {get(_,name){if(name==='then')return undefined;if(name.startsWith('on'))return ()=>()=>{};if(name==='confirmDocumentReplace')return async()=>true;
   if(['printPdfBuffer','exportPdf','saveMergedPdf'].includes(name))return async(...args)=>(await fetch('/service/'+name,{method:'POST',body:JSON.stringify(args)})).json();return async()=>defaults[name];}});
-  const host=createExternalDocsHost('browser',services);const doc=async()=>({id:'performance:document',name:'Benchmark.docx',data:await(await fetch('/document.docx')).arrayBuffer()});
-  host.documents={autoSave:{enabled:false,onBlur:false,allowToggle:false},initialDocument:doc,openDocument:doc,saveDocument:async r=>{await fetch('/saved.docx',{method:'POST',body:r.data});return{ok:true,committed:true,pending:false,document:{id:'performance:document',name:'Benchmark.docx'}}}};
+  const host=createExternalDocsHost('browser',services);const doc=async(path='/document.docx')=>({id:'performance:document',name:'Benchmark.docx',data:await(await fetch(path)).arrayBuffer()});
+  host.documents={autoSave:{enabled:false,onBlur:false,allowToggle:false},initialDocument:()=>doc('/initial.docx'),openDocument:()=>doc(),saveDocument:async r=>{await fetch('/saved.docx',{method:'POST',body:r.data});return{ok:true,committed:true,pending:false,document:{id:'performance:document',name:'Benchmark.docx'}}}};
   window.performanceEditor=await mountDocsEditor(document.getElementById('root'),{host});await window.performanceEditor.ready;window.performanceReady=true;
   </script></body></html>`
   const server = createServer(async (request, response) => {
@@ -324,8 +336,14 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
         response.end(html)
         return
       }
-      if (path === '/document.docx') {
-        response.end(await readFile(options.document))
+      if (path === '/document.docx' || path === '/initial.docx') {
+        response.end(
+          await readFile(
+            path === '/initial.docx'
+              ? (options.initialDocument ?? options.document)
+              : options.document,
+          ),
+        )
         return
       }
       if (request.method === 'POST') {

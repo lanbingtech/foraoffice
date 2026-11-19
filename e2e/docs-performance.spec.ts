@@ -1,3 +1,4 @@
+import { readLayoutProbe, type Activity } from './docs-performance-layout-probe'
 import { test, expect, type Page } from '@playwright/test'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
@@ -16,6 +17,8 @@ import {
   verifyTextboxStories,
 } from './docs-performance-stories'
 import type { createDocumentStoryDiagnostic } from '../apps/docs/src/renderer/document-story-diagnostic'
+import { createPerformanceFocusGuard } from './docs-performance-focus'
+import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
 import {
   documentZoom,
   expectedInsertion,
@@ -35,16 +38,6 @@ import {
   type PerformanceObservation,
 } from './docs-performance-result'
 
-type Activity = {
-  version: number
-  generation: number
-  owners: number
-  contentPending: boolean
-  pending: number
-  active: number
-  fontProbes: number
-  errors: string[]
-}
 type ProbeWindow = Window & {
   __docsLayoutActivity?: { snapshot(): Activity }
   __pageDebug?: {
@@ -131,89 +124,7 @@ async function waitForLayout(
   let unchangedSince = 0
   while (Date.now() < deadline) {
     const state = await withDeadline(
-      page.evaluate(
-        ({ end, textRuns }) => {
-          const probeStarted = performance.now()
-          const win = window as ProbeWindow
-          const activity = win.__docsLayoutActivity?.snapshot()
-          const pm = document.querySelector<HTMLElement>('.ProseMirror')
-          const images = pm ? [...pm.querySelectorAll('img')] : []
-          let texts = ''
-          if (pm) {
-            const walker = document.createTreeWalker(pm, NodeFilter.SHOW_TEXT)
-            for (let node = walker.nextNode(); node; node = walker.nextNode())
-              if (!node.parentElement?.closest('.doc-textbox')) texts += node.textContent ?? ''
-          }
-          texts = texts.replace(/\s+/g, ' ')
-          const fonts = document.fonts
-          const visible =
-            !!pm && pm.getBoundingClientRect().width > 0 && pm.getBoundingClientRect().height > 0
-          const normalized = texts.replace(/\s+/g, '')
-          let position = 0
-          let missingRunIndex: number | null = null
-          const orderedTextPresent = textRuns.every((run, index) => {
-            const found = normalized.indexOf(run, position)
-            if (found < 0) {
-              missingRunIndex = index
-              return false
-            }
-            position = found + run.length
-            return true
-          })
-          const tailPresent = !!end && normalized.includes(end.replace(/\s+/g, ''))
-          const complete = tailPresent && orderedTextPresent
-          const last = pm?.lastElementChild?.getBoundingClientRect()
-          return {
-            activity,
-            fonts: fonts
-              ? {
-                  status: fonts.status,
-                  count: fonts.size,
-                  faces: [...fonts].map((font) => ({ family: font.family, status: font.status })),
-                }
-              : null,
-            visible,
-            complete,
-            incompleteText: complete ? undefined : texts,
-            oracle: {
-              tailPresent,
-              orderedTextPresent,
-              missingRunIndex,
-            },
-            imagesReady: images.every((image) => image.complete && image.naturalWidth > 0),
-            images: images.length,
-            brokenImages: images.flatMap((image, index) =>
-              image.complete && image.naturalWidth > 0
-                ? []
-                : [{ index, complete: image.complete, naturalWidth: image.naturalWidth }],
-            ),
-            pages: win.__pageDebug?.slices?.length,
-            signature: JSON.stringify([
-              activity?.generation,
-              pm?.children.length,
-              pm?.scrollHeight,
-              last?.top,
-              last?.bottom,
-              win.__pageDebug?.slices?.length,
-            ]),
-            characters: texts.length,
-            domElements: pm?.querySelectorAll('*').length,
-            environment: {
-              viewport: [innerWidth, innerHeight],
-              devicePixelRatio,
-              visibilityState: document.visibilityState,
-              hasFocus: document.hasFocus(),
-              theme: document.documentElement.dataset.theme ?? 'system/default',
-              prefersDark: matchMedia('(prefers-color-scheme: dark)').matches,
-              documentDarkPage: !!pm?.closest('.page-dark'),
-              zoom: '',
-              spellcheck: pm?.spellcheck,
-            },
-            validationProbeMs: performance.now() - probeStarted,
-          }
-        },
-        { end: tail, textRuns },
-      ),
+      page.evaluate(readLayoutProbe, { end: tail, textRuns }),
       Math.max(1, deadline - Date.now()),
       'layout probe',
     )
@@ -289,16 +200,23 @@ async function firstDiagnosticIdle(page: Page, started: number, newerThan = -1) 
   throw new Error('Pending layout work did not become idle')
 }
 
-async function firstVisibleContent(page: Page) {
+async function firstVisibleContent(page: Page, head: string, newerThan: number) {
   await page.waitForFunction(
-    () => {
+    ({ head, newerThan }) => {
       const pm = document.querySelector<HTMLElement>('.ProseMirror')
-      if (!pm || !pm.textContent?.trim()) return false
+      const activity = (window as ProbeWindow).__docsLayoutActivity?.snapshot()
+      if (
+        !pm ||
+        !pm.textContent?.replace(/\s+/g, '').includes(head) ||
+        !activity ||
+        activity.generation <= newerThan
+      )
+        return false
       const rect = pm.getBoundingClientRect()
       return rect.width > 0 && rect.height > 0
     },
-    undefined,
-    { timeout: 180_000 },
+    { head, newerThan },
+    { timeout: 180_000, polling: 50 },
   )
   const started = now()
   const image = await page.screenshot({ type: 'jpeg', quality: 60 })
@@ -312,24 +230,26 @@ async function verifyRenderedStories(page: Page, documentXml: string, artifact: 
       const sources = win.__pageDebug?.sourceStories?.()
       const activity = win.__docsLayoutActivity?.snapshot()
       const pm = document.querySelector('.editor-scroll .ProseMirror')
-      const boxes = [...(pm?.querySelectorAll<HTMLElement>('.doc-textbox') ?? [])].map((box) => {
-        const owner = box.closest<HTMLElement>('[data-idx]')?.dataset.idx
-        const ordinal = box.dataset.sourceTxbxIndex
-        const rect = box.getBoundingClientRect()
-        const style = getComputedStyle(box)
-        return {
-          docxIndex: owner !== undefined && /^\d+$/.test(owner) ? Number(owner) : null,
-          txbxIndex: ordinal !== undefined && /^\d+$/.test(ordinal) ? Number(ordinal) : undefined,
-          shapeId: box.dataset.sourceShapeId,
-          text: box.textContent ?? '',
-          laidOut:
-            rect.width > 0 &&
-            rect.height > 0 &&
-            style.display !== 'none' &&
-            style.visibility !== 'hidden',
-          rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-        }
-      })
+      const boxes = [...(pm?.querySelectorAll<HTMLElement>('.doc-textbox') ?? [])]
+        .filter((box) => !box.closest('.page-gap,.page-repeat-header'))
+        .map((box) => {
+          const owner = box.closest<HTMLElement>('[data-idx]')?.dataset.idx
+          const ordinal = box.dataset.sourceTxbxIndex
+          const rect = box.getBoundingClientRect()
+          const style = getComputedStyle(box)
+          return {
+            docxIndex: owner !== undefined && /^\d+$/.test(owner) ? Number(owner) : null,
+            txbxIndex: ordinal !== undefined && /^\d+$/.test(ordinal) ? Number(ordinal) : undefined,
+            shapeId: box.dataset.sourceShapeId,
+            text: box.textContent ?? '',
+            laidOut:
+              rect.width > 0 &&
+              rect.height > 0 &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden',
+            rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+          }
+        })
       return { sources, activity, boxes }
     }),
     30_000,
@@ -446,6 +366,8 @@ test('production document performance and correctness evidence', async () => {
   const oracle = await documentOracle(bytes)
   const sourceXml = await (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string')
   const mainStory = mainStoryOracle(sourceXml)
+  const primerText = 'Performance runtime primer'
+  const primer = await buildDocx({ bodyXml: `<w:p><w:r><w:t>${primerText}</w:t></w:r></w:p>` })
   const tail = oracle.tail
   const samples = process.env.FORAOFFICE_PERF_SMOKE === '1' ? 1 : 30
   const opens = process.env.FORAOFFICE_PERF_SMOKE === '1' ? 1 : 10
@@ -463,6 +385,9 @@ test('production document performance and correctness evidence', async () => {
     'process-start-to-visible-observation': 5,
     'process-start-to-layout-verified-observation': 5,
     'process-start-to-first-diagnostic-idle-observation': 5,
+    'fresh-process-primed-sample-open-to-visible-observation': 5,
+    'fresh-process-primed-sample-open-to-layout-verified-observation': 5,
+    'fresh-process-primed-sample-open-to-first-diagnostic-idle-observation': 5,
     'hot-open-to-layout-verified-observation': 10,
     'hot-open-to-first-diagnostic-idle-observation': 10,
     'wheel-visible-observation': 30,
@@ -527,7 +452,9 @@ test('production document performance and correctness evidence', async () => {
     cachePolicy:
       'fresh application profile per process; OS cache uncontrolled; hot opens reuse one process',
     timingBoundary:
-      'request/process start to observed visible content screenshot or verified settled state; observation upper bounds, not INP',
+      'fresh process loads a tiny primer, then verified foreground before measured sample open; process-start metrics include primer/activation; separate sample-open metrics; visible source-prefix predicate polls50ms then JPEG; observation upper bounds, not INP or complete cold-start latency',
+    focusPolicy:
+      'Qt/Electron owned native HWND/start identity and foreground/focus verified before/after; transient DOM blur/visibility loss invalidates interval; headless browser native foreground not applicable; activation/native inspection excluded from sample-input timing',
     diagnostics:
       'internal pagination activity v1 and lazy source-story/cell diagnostics v1; same product instrumentation required on both sides',
     sourceStoryMethod:
@@ -542,6 +469,7 @@ test('production document performance and correctness evidence', async () => {
   let correctness: Record<string, unknown> | undefined
   let currentScenario = 'process-start-to-layout-verified-observation'
   let session: PerformanceSession | undefined
+  let focus: ReturnType<typeof createPerformanceFocusGuard> | undefined
   let document = ''
   try {
     for (let launch = 0; launch < launches; launch++) {
@@ -549,11 +477,14 @@ test('production document performance and correctness evidence', async () => {
       await mkdir(workspace)
       document = join(workspace, 'Benchmark.docx')
       await writeFile(document, bytes)
+      const initialDocument = join(workspace, 'Primer.docx')
+      await writeFile(initialDocument, primer)
       const started = now()
       session = await launchPerformanceHost({
         kind: host,
         workspace,
         document,
+        initialDocument,
         sdk,
         electronApp,
         qtExecutable: resolve(process.env.FORAOFFICE_QT_HOST ?? join(root, 'missing-qt-host.exe')),
@@ -561,23 +492,47 @@ test('production document performance and correctness evidence', async () => {
       session.page.on('pageerror', (error) => errors.push(error.message))
       errors.push(...(await session.page.pageErrors()).map((error) => error.message))
       await installProbe(session.page)
-      const first = await firstVisibleContent(session.page)
+      focus = createPerformanceFocusGuard(host, session.page, session.nativeProcessId)
+      details.push({ launch, operation: 'foreground-control', observations: focus.observations })
+      await focus.begin()
+      const prepared = await waitForLayout(session.page, primerText, 180_000, -1, started, [
+        primerText.replace(/\s+/g, ''),
+      ])
+      await focus.end()
+      const primerGeneration = prepared.activity!.generation
+      await focus.begin()
+      const sampleStarted = now()
+      const opened = await withDeadline(session.open(), 180_000, 'fresh-process primed sample open')
+      const apiReturnMs = now() - sampleStarted
+      if (opened === false) throw new Error('Fresh-process sample open returned false')
+      const first = await firstVisibleContent(
+        session.page,
+        mainStory.paragraphs.find((p) => p.text)!.text.slice(0, 32),
+        primerGeneration,
+      )
       const screenshot = { path: join(workspace, 'first-visible.jpg'), image: first.image }
       pendingScreenshots.push(screenshot)
       push('process-start-to-visible-observation', now() - started)
-      const firstIdleMs = await firstDiagnosticIdle(session.page, started)
+      push('fresh-process-primed-sample-open-to-visible-observation', now() - sampleStarted)
+      const firstIdleMs = await firstDiagnosticIdle(session.page, started, primerGeneration)
       push('process-start-to-first-diagnostic-idle-observation', firstIdleMs)
+      push(
+        'fresh-process-primed-sample-open-to-first-diagnostic-idle-observation',
+        firstIdleMs - (sampleStarted - started),
+      )
       const verificationStarted = now()
       const state = await waitForLayout(
         session.page,
         tail,
         180_000,
-        -1,
+        primerGeneration,
         started,
         mainStory.textRuns,
       )
       push('process-start-to-layout-verified-observation', now() - started)
+      push('fresh-process-primed-sample-open-to-layout-verified-observation', now() - sampleStarted)
       const verificationMs = now() - verificationStarted
+      await focus.end()
       const stories = await verifyRenderedStories(
         session.page,
         sourceXml,
@@ -591,7 +546,8 @@ test('production document performance and correctness evidence', async () => {
         engine: session.evidence,
         state,
         stories,
-        initialOpenApiReturn: 'not observed during process startup',
+        sampleOpenApiReturnMs: opened === null ? null : apiReturnMs,
+        primerPreparationMs: sampleStarted - started,
         components: {
           firstIdleMs,
           screenshotMs: first.screenshotMs,
@@ -608,6 +564,7 @@ test('production document performance and correctness evidence', async () => {
         machine: metadata.machine,
         cachePolicy: metadata.cachePolicy,
         timingBoundary: metadata.timingBoundary,
+        focusPolicy: metadata.focusPolicy,
         diagnostics: metadata.diagnostics,
         sourceStoryMethod: metadata.sourceStoryMethod,
         compositionMethod: metadata.compositionMethod,
@@ -627,6 +584,7 @@ test('production document performance and correctness evidence', async () => {
       const generation = await live.page.evaluate(
         () => (window as ProbeWindow).__docsLayoutActivity!.snapshot().generation,
       )
+      await focus!.begin()
       const started = now()
       const opened = await withDeadline(live.open(), 180_000, 'document open')
       const apiReturnMs = now() - started
@@ -642,6 +600,7 @@ test('production document performance and correctness evidence', async () => {
         mainStory.textRuns,
       )
       push('hot-open-to-layout-verified-observation', now() - started)
+      await focus!.end()
       const stories = await verifyRenderedStories(
         live.page,
         sourceXml,
@@ -667,6 +626,7 @@ test('production document performance and correctness evidence', async () => {
           fraction,
         )
         await waitForLayout(live.page, tail)
+        await focus!.begin()
         const inputIndex = await live.page.evaluate(() => {
           const probe = (window as ProbeWindow).performanceProbe!
           probe.activity = true
@@ -726,6 +686,7 @@ test('production document performance and correctness evidence', async () => {
         const verificationStarted = now()
         const state = await waitForLayout(live.page, tail, 180_000, -1, started)
         push(`${scenario}-layout-verified-observation`, now() - started)
+        await focus!.end()
         if (!probe.input.length)
           throw new Error(`No current input/keydown attribution for ${scenario}`)
         if (scenario === 'enter' && !probe.input.some((event) => event.type === 'Enter keydown'))
@@ -767,6 +728,7 @@ test('production document performance and correctness evidence', async () => {
     for (let i = 0; i < samples; i++) {
       currentScenario = 'wheel-visible-observation'
       const scroller = live.page.locator('.editor-scroll')
+      await focus!.begin()
       await scroller.hover()
       const before = await scroller.evaluate((element) => element.scrollTop)
       const maximum = await scroller.evaluate(
@@ -790,11 +752,13 @@ test('production document performance and correctness evidence', async () => {
         return { frames: probe.frames.splice(0), longTasks: probe.longTasks.splice(0) }
       })
       await waitForLayout(live.page, tail)
+      await focus!.end()
       details.push({ scenario: 'wheel', index: i, probe })
       blockingTasks.push(...probe.longTasks.map((entry) => entry.duration))
     }
     currentScenario = 'save-print'
     const saveMarker = 'PERFORMANCE-SAVE-CHECK'
+    await focus!.begin()
     const saveTarget = await chooseText(live.page, 'paragraph', 0)
     const expected = expectedInsertion(
       oracle,
@@ -854,6 +818,7 @@ test('production document performance and correctness evidence', async () => {
       join(root, 'reopened-source-stories.json'),
     )
     expect(await live.page.locator('.ProseMirror').first().textContent()).toContain(saveMarker)
+    await focus!.end()
     const pdf = await withDeadline(live.exportPdf(), 180_000, 'PDF export')
     const printed = await waitForPdf(pdf)
     const visiblePages = Number(

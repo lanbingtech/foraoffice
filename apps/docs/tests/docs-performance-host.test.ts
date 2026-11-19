@@ -11,6 +11,42 @@ vi.mock('@playwright/test', () => ({
 }))
 import { launchPerformanceHost } from '../../../e2e/docs-performance-host'
 
+it('launches Electron with a separate primer while retaining the measured document for real Open', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'docs-perf-host-'))
+  try {
+    await mkdir(join(workspace, 'node_modules/electron'), { recursive: true })
+    await writeFile(join(workspace, 'package.json'), '{}')
+    await writeFile(
+      join(workspace, 'node_modules/electron/index.js'),
+      'module.exports=process.execPath',
+    )
+    const press = vi.fn().mockResolvedValue(undefined)
+    const evaluate = vi.fn().mockResolvedValue(undefined)
+    launches.electron.mockResolvedValue({
+      firstWindow: async () => ({ keyboard: { press } }),
+      evaluate,
+      process: () => ({ pid: 12, exitCode: 0, signalCode: null }),
+      close: async () => {},
+    })
+    const session = await launchPerformanceHost({
+      kind: 'electron',
+      workspace,
+      document: 'sample.docx',
+      initialDocument: 'primer.docx',
+      sdk: '',
+      electronApp: workspace,
+      qtExecutable: '',
+    })
+    expect(launches.electron.mock.lastCall![0].args).toEqual([workspace, 'primer.docx'])
+    expect(evaluate.mock.calls[0][1]).toMatchObject({ document: 'sample.docx' })
+    await session.open()
+    expect(press).toHaveBeenCalledWith('Control+o')
+    await session.close()
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
 it('closes the browser when creating its first page fails before returning a session', async () => {
   const close = vi.fn().mockResolvedValue(undefined)
   launches.browser.mockResolvedValue({
