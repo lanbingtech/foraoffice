@@ -12,6 +12,7 @@ import { scriptFontHtml } from './editor/script-fonts'
 import { carryDocSeen } from './ai/tools'
 import { DOC_CSS_COMMITTED_EVENT, WRAP_WIDTHS_COMMITTED_EVENT } from './editor/cjk-punct-shrink'
 import { trackPaginationActivity } from './pagination-activity'
+import { observePaginationFonts } from './pagination-fonts'
 import { justifyShrinkPluginKey } from './editor/justify-shrink'
 import { tabReflowMeta } from './editor/decoration-extensions'
 import {
@@ -5930,10 +5931,7 @@ export function App({
       onUpdate()
     }
     // the epoch bump re-runs this effect; an already-settled ready promise must not re-probe
-    const fontsLoading = document.fonts.status === 'loading'
-    document.fonts.ready.then(() => onFontsChanged(fontsLoading)).catch(() => {})
-    const onLoadingDone = () => onFontsChanged(true)
-    document.fonts.addEventListener('loadingdone', onLoadingDone)
+    const stopFonts = observePaginationFonts(document.fonts, onFontsChanged)
     scroller.addEventListener('scroll', locate, { passive: true })
     const onDocUpdate = ({ transaction }: { transaction: Transaction }) => {
       resetWidthPassHistory(colWidthPass)
@@ -5980,7 +5978,7 @@ export function App({
       flushPaginationRef.current = () => {}
       if (timer) window.clearTimeout(timer)
       if (hfTimer) window.clearTimeout(hfTimer)
-      document.fonts.removeEventListener('loadingdone', onLoadingDone)
+      stopFonts()
       scroller.removeEventListener('scroll', locate)
       editor?.off('update', onDocUpdate)
       editor?.off('transaction', onShrinkTr)
