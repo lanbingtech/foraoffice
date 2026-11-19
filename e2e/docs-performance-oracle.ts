@@ -2,6 +2,80 @@ import type { DocumentOracle } from './docs-performance-fixture'
 
 const normalize = (text: string) => text.replace(/\s+/g, '')
 
+export interface NativeCompositionEvent {
+  type: string
+  at: number
+  data?: string | null
+  trusted?: boolean
+  mainEditor?: boolean
+  twoFrameCallbacksMs?: number
+}
+
+/** Causal renderer evidence only; the independently guarded OS helper proves input origin. */
+export function verifyNativeCompositionEvents(
+  events: NativeCompositionEvent[],
+  since: number,
+  committed: string | null,
+) {
+  const sequence = events.filter((event) =>
+    ['compositionstart', 'compositionupdate', 'compositionend'].includes(event.type),
+  )
+  const updates = sequence.filter((event) => event.type === 'compositionupdate')
+  if (
+    sequence[0]?.type !== 'compositionstart' ||
+    sequence.at(-1)?.type !== 'compositionend' ||
+    sequence.filter((event) => event.type === 'compositionstart').length !== 1 ||
+    sequence.filter((event) => event.type === 'compositionend').length !== 1 ||
+    !updates.some((event) => /[a-z]/.test(event.data ?? '')) ||
+    sequence.some(
+      (event, index) =>
+        !event.mainEditor ||
+        !Number.isFinite(event.at) ||
+        event.at < since ||
+        (index > 0 && event.at < sequence[index - 1].at) ||
+        (event.type !== 'compositionend' && !event.trusted),
+    )
+  )
+    throw new Error('Fresh owned native composition was not observed')
+  const final = sequence.at(-1)!,
+    update = updates.at(-1)!
+  if (final.data !== (committed ?? '') || update.data !== (committed ?? ''))
+    throw new Error('Native composition outcome differs from intended commit/cancel')
+  if (!Number.isFinite(update.twoFrameCallbacksMs) || update.twoFrameCallbacksMs! < 0)
+    throw new Error('Native current-update frame callbacks are missing')
+  return {
+    endTrusted: final.trusted,
+    lastUpdateTwoFrameCallbacksMs: update.twoFrameCallbacksMs!,
+    events: sequence.length,
+  }
+}
+
+function hasExactInsertion(before: string, after: string, added: string | undefined): boolean {
+  if (!added || after.length !== before.length + added.length) return false
+
+  // Matching prefix and shifted suffix bound every valid insertion offset.
+  let latest = 0
+  while (latest < before.length && before[latest] === after[latest]) latest++
+  let earliest = before.length
+  while (earliest > 0 && before[earliest - 1] === after[earliest + added.length - 1]) earliest--
+
+  const offset = after.indexOf(added, earliest)
+  return offset >= 0 && offset <= latest
+}
+
+export function verifyKeyboardTextEdit(
+  before: string,
+  after: string,
+  inserted: string | null,
+  deleted?: string,
+) {
+  if (inserted === null) {
+    if (!hasExactInsertion(after, before, deleted))
+      throw new Error('Authored deletion differs from the selected preceding character')
+  } else if (!hasExactInsertion(before, after, inserted))
+    throw new Error('Authored insertion differs from the requested text')
+}
+
 export function expectedInsertion(
   original: DocumentOracle,
   paragraph: string,
@@ -16,13 +90,20 @@ export function expectedInsertion(
   const position = target.start + offset
   const all = original.textRuns.join('')
   const edited = all.slice(0, position) + normalize(inserted) + all.slice(position)
-  const paragraphs = original.paragraphs.map((item) =>
+  const targetIndex = original.paragraphs.indexOf(target)
+  const paragraphs = original.paragraphs.map((item, index) =>
     item === target
       ? {
           ...item,
           text: item.text.slice(0, offset) + normalize(inserted) + item.text.slice(offset),
         }
-      : { ...item },
+      : {
+          ...item,
+          start:
+            index > targetIndex && item.start >= position
+              ? item.start + normalize(inserted).length
+              : item.start,
+        },
   )
   let start = 0
   const textRuns = original.textRuns

@@ -4,8 +4,7 @@ import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { readFile, writeFile, mkdir, mkdtemp, realpath, readdir } from 'node:fs/promises'
 import { cpus, platform, release, totalmem } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { createRequire } from 'node:module'
+import { join, resolve } from 'node:path'
 import JSZip from 'jszip'
 import { PDFDocument } from 'pdf-lib'
 import { buildPerformanceFixture, documentOracle } from './docs-performance-fixture'
@@ -19,11 +18,19 @@ import {
 import type { createDocumentStoryDiagnostic } from '../apps/docs/src/renderer/document-story-diagnostic'
 import { createPerformanceFocusGuard } from './docs-performance-focus'
 import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
+import { readEditFingerprint } from './docs-performance-edit-fingerprint'
+import { observeFirstVisibleSource } from './docs-performance-first-visible'
+import { runWindowsNativeIme, type NativeImeRequest } from './windows-native-ime'
+import { capturePrintSourceSnapshot } from './docs-performance-print-snapshot'
+import { sourcePrintChains, sourceHeaderFooterChains } from './docs-performance-pdf-source'
+import { readPositionedPdf, verifyPositionedPdf, pdfExportBudget } from './docs-performance-pdf'
 import {
   documentZoom,
   expectedInsertion,
   verifySavedContent,
-  verifyPrintedContent,
+  verifyKeyboardTextEdit,
+  verifyNativeCompositionEvents,
+  type NativeCompositionEvent,
 } from './docs-performance-oracle'
 import {
   launchPerformanceHost,
@@ -35,6 +42,7 @@ import {
   comparePerformanceReports,
   summarizeScenario,
   withDeadline,
+  retainRunCondition,
   type PerformanceObservation,
 } from './docs-performance-result'
 
@@ -49,7 +57,7 @@ type ProbeWindow = Window & {
   performanceProbe?: {
     started: number
     activity: boolean
-    input: Array<{ type: string; at: number; twoFrameCallbacksMs?: number }>
+    input: NativeCompositionEvent[]
     longTasks: Array<{ start: number; duration: number }>
     frames: Array<{ at: number; gap: number }>
   }
@@ -90,9 +98,13 @@ async function installProbe(page: Page) {
             ? (event as InputEvent).inputType
             : event.type
       if (event.type === 'keydown' && (event as KeyboardEvent).key !== 'Enter') return
-      const item: { type: string; at: number; twoFrameCallbacksMs?: number } = {
+      const item: NativeCompositionEvent = {
         type,
         at: performance.now(),
+        trusted: event.isTrusted,
+        data: (event as CompositionEvent).data,
+        mainEditor:
+          event.target instanceof Element && !!event.target.closest('.ProseMirror.doc-page'),
       }
       probe.input.push(item)
       requestAnimationFrame(() =>
@@ -201,26 +213,16 @@ async function firstDiagnosticIdle(page: Page, started: number, newerThan = -1) 
 }
 
 async function firstVisibleContent(page: Page, head: string, newerThan: number) {
-  await page.waitForFunction(
-    ({ head, newerThan }) => {
-      const pm = document.querySelector<HTMLElement>('.ProseMirror')
-      const activity = (window as ProbeWindow).__docsLayoutActivity?.snapshot()
-      if (
-        !pm ||
-        !pm.textContent?.replace(/\s+/g, '').includes(head) ||
-        !activity ||
-        activity.generation <= newerThan
-      )
-        return false
-      const rect = pm.getBoundingClientRect()
-      return rect.width > 0 && rect.height > 0
-    },
+  const observed = await page.waitForFunction(
+    observeFirstVisibleSource,
     { head, newerThan },
     { timeout: 180_000, polling: 50 },
   )
+  const visibility = await observed.jsonValue()
+  await observed.dispose()
   const started = now()
   const image = await page.screenshot({ type: 'jpeg', quality: 60 })
-  return { image, screenshotMs: now() - started }
+  return { image, screenshotMs: now() - started, visibility }
 }
 
 async function verifyRenderedStories(page: Page, documentXml: string, artifact: string) {
@@ -286,9 +288,12 @@ async function chooseText(page: Page, kind: 'paragraph' | 'table', fraction: num
     ({ kind, fraction }) => {
       const pm = document.querySelector<HTMLElement>('.ProseMirror')
       if (!pm?.isContentEditable) throw new Error('Current document is not editable')
-      const candidates = [
-        ...pm.querySelectorAll<HTMLElement>(kind === 'table' ? 'td p, th p' : ':scope > p'),
-      ].filter(
+      const targetSelector =
+        kind === 'table'
+          ? 'td p:not(.page-gap *):not(.page-repeat-header *),th p:not(.page-gap *):not(.page-repeat-header *)'
+          : ':scope > p'
+      const allCandidates = [...pm.querySelectorAll<HTMLElement>(targetSelector)]
+      const candidates = allCandidates.filter(
         (p) => (p.textContent?.trim().length ?? 0) >= 12 && !p.closest('[contenteditable="false"]'),
       )
       const target =
@@ -306,12 +311,15 @@ async function chooseText(page: Page, kind: 'paragraph' | 'table', fraction: num
       selection?.addRange(range)
       pm.focus()
       return {
-        text: pm.textContent ?? '',
-        paragraphs: pm.querySelectorAll(':scope > p').length,
         targetText: target.textContent ?? '',
+        targetSelector,
+        targetIndex: allCandidates.indexOf(target),
         insertOffset: node.textContent
           .slice(0, Math.min(2, node.textContent.length))
           .replace(/\s+/g, '').length,
+        precedingCharacter: Array.from(
+          node.textContent.slice(0, Math.min(2, node.textContent.length)),
+        ).at(-1),
       }
     },
     { kind, fraction },
@@ -366,10 +374,14 @@ test('production document performance and correctness evidence', async () => {
   const oracle = await documentOracle(bytes)
   const sourceXml = await (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string')
   const mainStory = mainStoryOracle(sourceXml)
+  let workingOracle = oracle
+  let workingMainOracle = { ...oracle, ...mainStory }
+  const nativeImeRequested = host === 'qt' && process.env.FORAOFFICE_PERF_NATIVE_IME === '1'
   const primerText = 'Performance runtime primer'
   const primer = await buildDocx({ bodyXml: `<w:p><w:r><w:t>${primerText}</w:t></w:r></w:p>` })
   const tail = oracle.tail
   const samples = process.env.FORAOFFICE_PERF_SMOKE === '1' ? 1 : 30
+  const nativeSamples = samples === 1 ? 2 : samples // Smoke also exercises actual undo between native compositions.
   const opens = process.env.FORAOFFICE_PERF_SMOKE === '1' ? 1 : 10
   const launches = process.env.FORAOFFICE_PERF_SMOKE === '1' ? 1 : 5
   const edits = [
@@ -389,6 +401,7 @@ test('production document performance and correctness evidence', async () => {
     'fresh-process-primed-sample-open-to-layout-verified-observation': 5,
     'fresh-process-primed-sample-open-to-first-diagnostic-idle-observation': 5,
     'hot-open-to-layout-verified-observation': 10,
+    'hot-open-to-visible-observation': 10,
     'hot-open-to-first-diagnostic-idle-observation': 10,
     'wheel-visible-observation': 30,
     ...Object.fromEntries(
@@ -398,6 +411,13 @@ test('production document performance and correctness evidence', async () => {
         [`${name}-first-diagnostic-idle-observation`, 30],
       ]),
     ),
+    ...(host === 'qt'
+      ? {
+          'native-ime-commit-helper-and-layout-observation': 30,
+          'native-ime-cancel-helper-and-layout-observation': 30,
+          'native-ime-current-update-two-frame-callback-diagnostic': 30,
+        }
+      : {}),
   }
   const runs: Record<string, PerformanceObservation[]> = Object.fromEntries(
     Object.keys(requirements).map((name) => [name, []]),
@@ -420,6 +440,7 @@ test('production document performance and correctness evidence', async () => {
   }
   const metadata = {
     schema: 1,
+    wholeRunLimitMs: test.info().timeout,
     host,
     label,
     headless: host === 'browser',
@@ -452,7 +473,9 @@ test('production document performance and correctness evidence', async () => {
     cachePolicy:
       'fresh application profile per process; OS cache uncontrolled; hot opens reuse one process',
     timingBoundary:
-      'fresh process loads a tiny primer, then verified foreground before measured sample open; process-start metrics include primer/activation; separate sample-open metrics; visible source-prefix predicate polls50ms then JPEG; observation upper bounds, not INP or complete cold-start latency',
+      'fresh process loads a tiny primer, then verified foreground before measured sample open; process-start metrics include primer/activation; separate sample-open metrics; matching source-block geometry must intersect pane and viewport (scroll/rect recorded), polls50ms then JPEG; observation upper bounds, not INP or complete cold-start latency',
+    editFingerprintMethod:
+      'authored DOM text and root paragraph count; exclude only page-gap/repeat widgets and doc-toc-line generated doc-toc-page; localized target check during input, full exact authored edit/undo checks outside active rAF/longtask recording',
     focusPolicy:
       'Qt/Electron exact native HWND/start identity and foreground/focus verified at grouped phase endpoints; continuously armed DOM blur/visibility records and lightweight checks before/after each sample reject the whole phase on loss; headless browser native foreground not applicable; activation/native inspection excluded from sample-input timing',
     diagnostics:
@@ -461,8 +484,13 @@ test('production document performance and correctness evidence', async () => {
       'independent WML main flow; unresolved AlternateContent main projections must agree; post-timing source-bound textbox text/geometry; all archival alternatives preserved separately; no complete Requires-profile conformance claim',
     compositionMethod:
       'CDP Input.imeSetComposition followed by Input.insertText; composition events recorded; not an OS IME benchmark',
+    nativeImeMethod: {
+      requested: nativeImeRequested,
+      method:
+        'Qt only, explicit opt-in FORAOFFICE_PERF_NATIVE_IME=1; guarded owned OS SCANCODE ceshi/commit/cancel, fresh main-editor composition sequence and exact model/edit verification; end trust recorded; helper+validation inclusive observations and renderer two-rAF diagnostics are not presentation latency; candidate pixels/visual reference attached separately',
+    },
     printConditions:
-      'File → PDF; entire document; default original paper/section geometry; visible UI total must equal output page count; all original body text plus intended edit must occur in order',
+      'product preview and real PDF export; entire document; default original paper/section geometry; source-cell/body/textbox/HF baseline+full-advance chains and exact page count; semantic proof with separate paint evidence; print emulation removed before export',
   }
   let condition: Record<string, unknown> | undefined
   let platformFonts: Awaited<ReturnType<typeof collectPlatformFonts>> | undefined
@@ -471,6 +499,98 @@ test('production document performance and correctness evidence', async () => {
   let session: PerformanceSession | undefined
   let focus: ReturnType<typeof createPerformanceFocusGuard> | undefined
   let document = ''
+  const nativeImeEvidence: unknown[] = []
+  let nativeImeCondition: Record<string, unknown> | undefined
+  const nativeImeAcceptance: Record<string, unknown> = {
+    status: 'not-executed',
+    requested: nativeImeRequested,
+    candidatePixels:
+      'external source-bound visual evidence required; UIA metadata alone is not pixel proof',
+  }
+  const nativeAction = async (request: NativeImeRequest) => {
+    try {
+      const evidence = await runWindowsNativeIme(request)
+      nativeImeEvidence.push(evidence)
+      await writeFile(
+        join(root, 'native-ime-evidence.json'),
+        JSON.stringify(nativeImeEvidence, null, 2),
+      )
+      if (evidence.inputObservation) {
+        const actual = evidence.inputObservation.before
+        nativeImeCondition = retainRunCondition(nativeImeCondition, {
+          observationSource: actual.source,
+          keyboardLayout: evidence.before.profile.keyboardLayout,
+          languageId: evidence.before.profile.languageId,
+          provider: {
+            name: actual.provider.name,
+            image: actual.provider.image,
+            company: actual.provider.company,
+          },
+          mode: {
+            name: actual.mode.name,
+            automationId: actual.mode.automationId,
+            className: actual.mode.className,
+          },
+        })
+      }
+      return evidence
+    } catch (error) {
+      nativeImeEvidence.push({
+        action: request.action,
+        error: String(error),
+        stdout: error && typeof error === 'object' && 'stdout' in error ? error.stdout : undefined,
+      })
+      try {
+        await writeFile(
+          join(root, 'native-ime-evidence.json'),
+          JSON.stringify(nativeImeEvidence, null, 2),
+        )
+      } catch (persistence) {
+        throw new AggregateError(
+          [error, persistence],
+          'Native action and evidence persistence failed',
+          { cause: persistence },
+        )
+      }
+      throw error
+    }
+  }
+  const recordCondition = async (
+    page: Page,
+    state: Awaited<ReturnType<typeof waitForLayout>>,
+    engine: Record<string, unknown>,
+    phase: string,
+  ) => {
+    platformFonts = await collectPlatformFonts(page)
+    const observed = {
+      host,
+      headless: metadata.headless,
+      fixture: metadata.fixture,
+      machine: metadata.machine,
+      cachePolicy: metadata.cachePolicy,
+      timingBoundary: metadata.timingBoundary,
+      focusPolicy: metadata.focusPolicy,
+      editFingerprintMethod: metadata.editFingerprintMethod,
+      diagnostics: metadata.diagnostics,
+      sourceStoryMethod: metadata.sourceStoryMethod,
+      compositionMethod: metadata.compositionMethod,
+      nativeImeMethod: metadata.nativeImeMethod,
+      printConditions: metadata.printConditions,
+      conditionPolicy:
+        'reject stable environment/actual font identity drift after every unchanged fresh/hot open; font query outside measured intervals',
+      fontReadiness: state.fonts?.status,
+      platformFonts: { provenance: platformFonts.provenance, identities: platformFonts.identities },
+      environment: state.environment,
+      engine,
+    }
+    details.push({
+      operation: 'comparison-condition',
+      phase,
+      ...observed,
+      actualFontQueryParents: platformFonts.queriedParents,
+    })
+    condition = retainRunCondition(condition, observed)
+  }
   try {
     for (let launch = 0; launch < launches; launch++) {
       const workspace = join(root, `launch-${launch}`)
@@ -546,6 +666,7 @@ test('production document performance and correctness evidence', async () => {
         engine: session.evidence,
         state,
         stories,
+        firstVisibleSource: first.visibility,
         sampleOpenApiReturnMs: opened === null ? null : apiReturnMs,
         primerPreparationMs: sampleStarted - started,
         components: {
@@ -556,23 +677,7 @@ test('production document performance and correctness evidence', async () => {
           aggregateIncludesScreenshotAndVerification: true,
         },
       })
-      if (launch === 0) platformFonts = await collectPlatformFonts(session.page)
-      condition = {
-        host,
-        headless: metadata.headless,
-        fixture: metadata.fixture,
-        machine: metadata.machine,
-        cachePolicy: metadata.cachePolicy,
-        timingBoundary: metadata.timingBoundary,
-        focusPolicy: metadata.focusPolicy,
-        diagnostics: metadata.diagnostics,
-        sourceStoryMethod: metadata.sourceStoryMethod,
-        compositionMethod: metadata.compositionMethod,
-        fonts: state.fonts,
-        platformFonts,
-        environment: state.environment,
-        engine: session.evidence,
-      }
+      await recordCondition(session.page, state, session.evidence, `launch-${launch}`)
       if (launch + 1 < launches) {
         await session.close()
         session = undefined
@@ -590,6 +695,14 @@ test('production document performance and correctness evidence', async () => {
       const opened = await withDeadline(live.open(), 180_000, 'document open')
       const apiReturnMs = now() - started
       if (opened === false) throw new Error('Document open returned false')
+      const first = await firstVisibleContent(
+        live.page,
+        mainStory.paragraphs.find((p) => p.text)!.text.slice(0, 32),
+        generation,
+      )
+      const screenshot = { path: join(root, `hot-open-${i}-first-visible.jpg`), image: first.image }
+      pendingScreenshots.push(screenshot)
+      push('hot-open-to-visible-observation', now() - started)
       const firstIdleMs = await firstDiagnosticIdle(live.page, started, generation)
       push('hot-open-to-first-diagnostic-idle-observation', firstIdleMs)
       const state = await waitForLayout(
@@ -607,14 +720,21 @@ test('production document performance and correctness evidence', async () => {
         sourceXml,
         join(root, `hot-open-${i}-stories.json`),
       )
+      const writeStarted = now()
+      await writeFile(screenshot.path, screenshot.image)
+      pendingScreenshots.splice(pendingScreenshots.indexOf(screenshot), 1)
       details.push({
         operation: 'hot-open',
         index: i,
         apiReturnMs: opened === null ? null : apiReturnMs,
         firstIdleMs,
+        firstVisibleSource: first.visibility,
+        screenshotMs: first.screenshotMs,
+        screenshotWriteMs: now() - writeStarted,
         state,
         stories,
       })
+      await recordCondition(live.page, state, live.evidence, `hot-open-${i}`)
     }
     await focus!.end()
     for (const scenario of edits) {
@@ -629,6 +749,10 @@ test('production document performance and correctness evidence', async () => {
           fraction,
         )
         await waitForLayout(live.page, tail)
+        const mainEditor = live.page.locator('.ProseMirror.doc-page').first()
+        const beforeEdit = await mainEditor.evaluate(readEditFingerprint)
+        const editTarget = mainEditor.locator(before.targetSelector).nth(before.targetIndex)
+        const beforeTarget = await editTarget.evaluate(readEditFingerprint)
         await focus!.check()
         const inputIndex = await live.page.evaluate(() => {
           const probe = (window as ProbeWindow).performanceProbe!
@@ -661,11 +785,11 @@ test('production document performance and correctness evidence', async () => {
                 .first()
                 .evaluate((pm) => pm.querySelectorAll(':scope > p').length),
             )
-            .toBe(before.paragraphs + 1)
+            .toBe(beforeEdit.paragraphs + 1)
         else
           await expect
-            .poll(() => live.page.locator('.ProseMirror').first().textContent())
-            .not.toBe(before.text)
+            .poll(() => editTarget.evaluate(readEditFingerprint))
+            .not.toEqual(beforeTarget)
         const screenshotStarted = now()
         let screenshotMs = 0
         const [firstIdleMs, screenshot] = await Promise.all([
@@ -689,6 +813,17 @@ test('production document performance and correctness evidence', async () => {
         const verificationStarted = now()
         const state = await waitForLayout(live.page, tail, 180_000, -1, started)
         push(`${scenario}-layout-verified-observation`, now() - started)
+        const afterEdit = await mainEditor.evaluate(readEditFingerprint)
+        if (scenario === 'enter') expect(afterEdit.text).toBe(beforeEdit.text)
+        else {
+          expect(afterEdit.paragraphs).toBe(beforeEdit.paragraphs)
+          verifyKeyboardTextEdit(
+            beforeEdit.text,
+            afterEdit.text,
+            scenario === 'delete' ? null : scenario === 'composition' ? '测试' : '测',
+            before.precedingCharacter,
+          )
+        }
         await focus!.check()
         if (!probe.input.length)
           throw new Error(`No current input/keydown attribution for ${scenario}`)
@@ -714,9 +849,7 @@ test('production document performance and correctness evidence', async () => {
         })
         blockingTasks.push(...probe.longTasks.map((entry) => entry.duration))
         await live.page.keyboard.press('Control+z')
-        await expect
-          .poll(() => live.page.locator('.ProseMirror').first().textContent())
-          .toBe(before.text)
+        await expect.poll(() => mainEditor.evaluate(readEditFingerprint)).toEqual(beforeEdit)
         await expect
           .poll(() =>
             live.page
@@ -724,7 +857,7 @@ test('production document performance and correctness evidence', async () => {
               .first()
               .evaluate((pm) => pm.querySelectorAll(':scope > p').length),
           )
-          .toBe(before.paragraphs)
+          .toBe(beforeEdit.paragraphs)
         await waitForLayout(live.page, tail)
       }
       await focus!.end()
@@ -762,18 +895,166 @@ test('production document performance and correctness evidence', async () => {
       blockingTasks.push(...probe.longTasks.map((entry) => entry.duration))
     }
     await focus!.end()
+    if (nativeImeRequested) {
+      nativeImeAcceptance.status = 'input-phase-incomplete'
+      await focus!.begin()
+      const initial = await nativeAction({
+        action: 'inspect',
+        targetProcessId: live.nativeProcessId!,
+      })
+      if (!initial.before.foregroundOwned || !initial.before.focusOwned)
+        throw new Error('Native IME phase has no owned foreground/focus')
+      const requested = {
+        ...initial.before.owner,
+        keyboardLayout: initial.before.profile.keyboardLayout,
+        observationSource: 'os-tray-uia' as const,
+      }
+      const model = () =>
+        live.page.evaluate(() => {
+          const editor = (
+            window as unknown as {
+              docsEditor?: {
+                inspection: { snapshot(): { documentId: string; revision: number; text: string } }
+              }
+            }
+          ).docsEditor
+          if (!editor) throw new Error('Qt public inspection endpoint is missing')
+          const snapshot = editor.inspection.snapshot()
+          if (!snapshot.documentId || typeof snapshot.text !== 'string')
+            throw new Error('Qt model identity/text is missing')
+          return {
+            documentId: snapshot.documentId,
+            revision: snapshot.revision,
+            text: snapshot.text,
+          }
+        })
+      const mark = () =>
+        live.page.evaluate(() => ({
+          index: (window as ProbeWindow).performanceProbe!.input.length,
+          since: performance.now(),
+        }))
+      const eventsSince = (index: number) =>
+        live.page.evaluate(
+          (index) => (window as ProbeWindow).performanceProbe!.input.slice(index),
+          index,
+        )
+      for (let i = 0; i < nativeSamples; i++) {
+        currentScenario = 'native-ime-commit-helper-and-layout-observation'
+        const target = await chooseText(live.page, 'paragraph', 0)
+        const before = await model()
+        const beforeFingerprint = await live.page
+          .locator('.ProseMirror.doc-page')
+          .first()
+          .evaluate(readEditFingerprint)
+        await focus!.check()
+        const commitMark = await mark()
+        await nativeAction({ ...requested, action: 'type', text: 'ceshi' })
+        await expect
+          .poll(async () =>
+            (await eventsSince(commitMark.index)).some(
+              (event) => event.type === 'compositionupdate' && event.trusted && event.mainEditor,
+            ),
+          )
+          .toBe(true)
+        if (i === 0)
+          await nativeAction({
+            action: 'inspect',
+            targetProcessId: live.nativeProcessId!,
+            includeCandidates: true,
+          })
+        const commitStarted = now()
+        await nativeAction({ ...requested, action: 'commit' })
+        await waitForLayout(live.page, tail)
+        const committed = await model()
+        if (committed.documentId !== before.documentId)
+          throw new Error('Native IME document identity changed')
+        verifyKeyboardTextEdit(before.text, committed.text, '测试')
+        const committedFingerprint = await live.page
+          .locator('.ProseMirror.doc-page')
+          .first()
+          .evaluate(readEditFingerprint)
+        verifyKeyboardTextEdit(beforeFingerprint.text, committedFingerprint.text, '测试')
+        expect(committedFingerprint.paragraphs).toBe(beforeFingerprint.paragraphs)
+        const commitEvents = await eventsSince(commitMark.index)
+        const commitProof = verifyNativeCompositionEvents(commitEvents, commitMark.since, '测试')
+        await focus!.check()
+        push('native-ime-commit-helper-and-layout-observation', now() - commitStarted)
+        push(
+          'native-ime-current-update-two-frame-callback-diagnostic',
+          commitProof.lastUpdateTwoFrameCallbacksMs,
+        )
+        currentScenario = 'native-ime-cancel-helper-and-layout-observation'
+        const cancelMark = await mark()
+        await nativeAction({ ...requested, action: 'type', text: 'ceshi' })
+        await expect
+          .poll(async () =>
+            (await eventsSince(cancelMark.index)).some(
+              (event) => event.type === 'compositionupdate' && event.trusted && event.mainEditor,
+            ),
+          )
+          .toBe(true)
+        const cancelStarted = now()
+        await nativeAction({ ...requested, action: 'cancel' })
+        await waitForLayout(live.page, tail)
+        const cancelled = await model()
+        if (cancelled.documentId !== committed.documentId || cancelled.text !== committed.text)
+          throw new Error('Native composition cancel changed committed model content')
+        expect(
+          await live.page.locator('.ProseMirror.doc-page').first().evaluate(readEditFingerprint),
+        ).toEqual(committedFingerprint)
+        const cancelEvents = await eventsSince(cancelMark.index)
+        const cancelProof = verifyNativeCompositionEvents(cancelEvents, cancelMark.since, null)
+        await focus!.check()
+        push('native-ime-cancel-helper-and-layout-observation', now() - cancelStarted)
+        details.push({
+          scenario: 'native-ime',
+          index: i,
+          commitEvents,
+          cancelEvents,
+          commitProof,
+          cancelProof,
+          beforeModelSha256: sha(before.text),
+          committedModelSha256: sha(committed.text),
+          cancelledModelSha256: sha(cancelled.text),
+        })
+        if (i + 1 < nativeSamples) {
+          await live.page.keyboard.press('Control+z')
+          await expect.poll(async () => (await model()).text).toBe(before.text)
+          await waitForLayout(live.page, tail)
+          expect(
+            await live.page.locator('.ProseMirror.doc-page').first().evaluate(readEditFingerprint),
+          ).toEqual(beforeFingerprint)
+        } else {
+          workingOracle = expectedInsertion(
+            workingOracle,
+            target.targetText,
+            target.insertOffset,
+            '测试',
+          )
+          workingMainOracle = expectedInsertion(
+            workingMainOracle,
+            target.targetText,
+            target.insertOffset,
+            '测试',
+          )
+        }
+      }
+      await focus!.end()
+      nativeImeAcceptance.status = 'commit-cancel-verified-persistence-pending'
+      nativeImeAcceptance.validCommitCancelSamples = nativeSamples
+    }
     currentScenario = 'save-print'
     const saveMarker = 'PERFORMANCE-SAVE-CHECK'
     await focus!.begin()
     const saveTarget = await chooseText(live.page, 'paragraph', 0)
     const expected = expectedInsertion(
-      oracle,
+      workingOracle,
       saveTarget.targetText,
       saveTarget.insertOffset,
       saveMarker,
     )
     const expectedMainStory = expectedInsertion(
-      { ...oracle, ...mainStory },
+      workingMainOracle,
       saveTarget.targetText,
       saveTarget.insertOffset,
       saveMarker,
@@ -795,7 +1076,10 @@ test('production document performance and correctness evidence', async () => {
     const preservedParts = Object.keys(original.files).filter(
       (name) => /^word\/(media|embeddings)\//.test(name) && !original.files[name].dir,
     )
-    for (const name of preservedParts) {
+    const preservedStoryParts = Object.keys(original.files).filter((name) =>
+      /^word\/(header\d+|footer\d+|footnotes|endnotes)\.xml$/.test(name),
+    )
+    for (const name of [...preservedParts, ...preservedStoryParts]) {
       const part = saved.file(name)
       if (
         !part ||
@@ -825,49 +1109,103 @@ test('production document performance and correctness evidence', async () => {
     )
     expect(await live.page.locator('.ProseMirror').first().textContent()).toContain(saveMarker)
     await focus!.end()
-    const pdf = await withDeadline(live.exportPdf(), 180_000, 'PDF export')
+    if (nativeImeRequested) nativeImeAcceptance.status = 'commit-cancel-save-reopen-verified'
+    // Source geometry/output verification is untimed. Use the product preview,
+    // the same preview used by its native PDF export, before reading exact identities.
+    await withDeadline(
+      live.page.evaluate(() => {
+        const open = (window as unknown as { __openPagePreview?: () => void }).__openPagePreview
+        if (!open) throw new Error('Product page-preview callback is missing')
+        open()
+      }),
+      10_000,
+      'product page preview',
+    )
+    await live.page.waitForFunction(
+      () => {
+        const diagnostic = (
+          window as unknown as {
+            __previewDebug?: { sourceCells?: () => { modelCurrent: boolean } }
+          }
+        ).__previewDebug?.sourceCells?.()
+        return !!window.document.querySelector('.pv-page') && diagnostic?.modelCurrent === true
+      },
+      undefined,
+      { polling: 50, timeout: 180_000 },
+    )
+    let printSource: ReturnType<typeof capturePrintSourceSnapshot>
+    try {
+      await live.page.emulateMedia({ media: 'print' })
+      printSource = await withDeadline(
+        live.page.evaluate(capturePrintSourceSnapshot),
+        60_000,
+        'print source snapshot',
+      )
+      await writeFile(
+        join(root, 'print-source-snapshot.json'),
+        JSON.stringify(printSource, null, 2),
+      )
+    } finally {
+      // Remove emulation; pinning screen would also override native printToPDF.
+      await live.page.emulateMedia({ media: null })
+    }
+    const savedXml = await saved.file('word/document.xml')!.async('string')
+    const printChains = sourcePrintChains(
+      savedXml,
+      printSource.source.tables,
+      printSource.bindings.blocks,
+    )
+    const storyParts = Object.fromEntries(
+      await Promise.all(
+        preservedStoryParts.map(
+          async (name) => [name, await saved.file(name)!.async('string')] as const,
+        ),
+      ),
+    )
+    Object.assign(
+      printChains,
+      sourceHeaderFooterChains(
+        savedXml,
+        (await saved.file('word/settings.xml')?.async('string')) ?? '',
+        (await saved.file('word/_rels/document.xml.rels')?.async('string')) ?? '',
+        storyParts,
+        printSource.pageSections,
+      ),
+    )
+    const budget = pdfExportBudget(printSource.snapshot.pages)
+    await writeFile(join(root, 'print-budget.json'), JSON.stringify(budget, null, 2))
+    const pdf = await withDeadline(live.exportPdf(budget.timeoutMs), budget.timeoutMs, 'PDF export')
     const printed = await waitForPdf(pdf)
     const visiblePages = Number(
       (await live.page.locator('.status-page').innerText()).match(/\d+/g)?.at(-1),
     )
-    const require = createRequire(join(sdk, 'package.json'))
-    const backend = require(
-      join(sdk, 'services/services.cjs'),
-    ) as typeof import('../apps/docs/src/services')
-    const reader = await backend.createDocsResourceServices({
-      stateDirectory: join(root, 'pdf-check'),
-      readRoots: [dirname(pdf)],
-      writeRoots: [],
-    })
-    try {
-      await reader.setAttachments([pdf])
-      let text = ''
-      let total = 1
-      while (text.length < total) {
-        const extracted = await reader.readAttachment(pdf, text.length, 24_000)
-        if (
-          !extracted.ok ||
-          !extracted.text ||
-          typeof extracted.totalChars !== 'number' ||
-          extracted.totalChars < text.length
-        )
-          throw new Error('PDF full-text extraction did not progress')
-        total = extracted.totalChars
-        text += extracted.text
-      }
-      verifyPrintedContent(expected, text, printed.getPageCount(), visiblePages)
-    } finally {
-      reader.dispose()
-    }
+    const positioned = await readPositionedPdf(await readFile(pdf))
+    const printProof = verifyPositionedPdf(printChains, printSource.snapshot, positioned, host)
+    if (printed.getPageCount() !== visiblePages || printed.getPageCount() !== reopened.pages)
+      throw new Error('PDF pages differ from the complete reopened editor')
+    await writeFile(
+      join(root, 'positioned-pdf-proof.json'),
+      JSON.stringify(
+        {
+          method:
+            'independent source chains; exact baseline and full horizontal advance ownership; separate paint evidence required',
+          ...printProof,
+        },
+        null,
+        2,
+      ),
+    )
     correctness = {
       savedEdit: true,
       reopenedEdit: true,
       originalResourcesPreserved: preservedParts.length,
+      originalStoryPartsPreserved: preservedStoryParts.length,
       printedEdit: true,
       pdfPages: printed.getPageCount(),
       layoutPages: reopened.pages,
       visiblePages,
       pageSizesPoints: printed.getPages().map((page) => page.getSize()),
+      printSourceChains: printProof.sourceChains,
     }
     details.push({
       operation: 'save-print',
@@ -927,17 +1265,19 @@ test('production document performance and correctness evidence', async () => {
     )
     const report = {
       metadata,
-      condition,
+      condition: condition
+        ? { ...condition, nativeImeProfile: nativeImeCondition ?? 'not-executed' }
+        : undefined,
       correctness,
       acceptance: {
         scope:
           'automated scenario sampling only; ticket acceptance requires the reviewed three-host A/A evidence',
-        nativeOsIme: 'not executed; synthetic CDP composition is diagnostic only',
+        nativeOsIme: nativeImeAcceptance,
         nativeOfficeComparison: 'not measured',
       },
       mainThreadBlocking: {
         scope:
-          'interaction intervals including automation, screenshots and lightweight pending-work polling; full structural validation excluded; no product-only attribution',
+          'ordinary keyboard/CDP/wheel intervals including automation, screenshots and lightweight pending-work polling; native OS phase recorded separately; full structural validation excluded; no product-only attribution',
         maxMs: blockingTasks.length ? Math.max(...blockingTasks) : 0,
         over50ms: blockingTasks.filter((value) => value > 50).length,
         nativeReference: 'not measured',

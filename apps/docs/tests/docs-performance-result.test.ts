@@ -7,9 +7,28 @@ import {
   summarizeScenario,
   comparePerformanceReports,
   withDeadline,
+  retainRunCondition,
 } from '../../../e2e/docs-performance-result'
 
 describe('Docs performance evidence', () => {
+  it('retains the first run condition and rejects an intermediate launch font/viewport drift', () => {
+    const original = {
+      environment: { viewport: [1280, 867], zoom: '1' },
+      platformFonts: ['SimSun'],
+    }
+    const baseline = retainRunCondition(undefined, original)
+    expect(retainRunCondition(baseline, structuredClone(original))).toEqual(original)
+    expect(() => retainRunCondition(baseline, { ...original, platformFonts: ['Arial'] })).toThrow(
+      'within-run conditions differ',
+    )
+    expect(() =>
+      retainRunCondition(baseline, {
+        ...original,
+        environment: { viewport: [1280, 900], zoom: '1' },
+      }),
+    ).toThrow('within-run conditions differ')
+    expect(baseline).toEqual(original)
+  })
   it('fails a stalled operation at its deadline and preserves a real operation error', async () => {
     vi.useFakeTimers()
     try {

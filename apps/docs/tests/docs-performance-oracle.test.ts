@@ -1,9 +1,11 @@
 import { expect, it } from 'vitest'
 import {
+  verifyNativeCompositionEvents,
   expectedInsertion,
   verifySavedContent,
   verifyPrintedContent,
   documentZoom,
+  verifyKeyboardTextEdit,
 } from '../../../e2e/docs-performance-oracle'
 import { documentOracle } from '../../../e2e/docs-performance-fixture'
 import { buildDocx } from '../../../packages/docx-engine/tests/helpers/build-docx'
@@ -21,6 +23,47 @@ const original = {
   opaqueXml: [],
   relationships: [],
 }
+
+it('requires the exact requested authored edit, independently of generated pagination fields', () => {
+  expect(() => verifyKeyboardTextEdit('Chapter text', 'Chap测ter text', '测')).not.toThrow()
+  expect(() => verifyKeyboardTextEdit('Chapter text', 'Chaper text', null, 't')).not.toThrow()
+  expect(() => verifyKeyboardTextEdit('Chapter text', 'Chapwrongter text', '测')).toThrow(
+    'Authored insertion differs',
+  )
+  expect(() => verifyKeyboardTextEdit('Chapter text', 'Chap text', null, 't')).toThrow(
+    'Authored deletion differs',
+  )
+})
+
+it('accepts an exact edit whose text shares a prefix with the retained text', () => {
+  const source = 'AA测量ZZ'
+  const edited = 'AA测试测量ZZ'
+  const change = '测试'
+  expect(() => verifyKeyboardTextEdit(source, edited, change)).not.toThrow()
+  expect(() => verifyKeyboardTextEdit(edited, source, null, change)).not.toThrow()
+})
+
+it('rejects collateral text changes even when the expected delta and length are present', () => {
+  const source = 'AA测量ZZ'
+  const edited = 'AA测试测量ZZ'
+  const change = '测试'
+  expect(() => verifyKeyboardTextEdit(source, 'AX测试测量ZZ', change)).toThrow(
+    'Authored insertion differs',
+  )
+  expect(() => verifyKeyboardTextEdit(source, 'AA测试测量ZX', change)).toThrow(
+    'Authored insertion differs',
+  )
+  expect(() => verifyKeyboardTextEdit(edited, 'AA测量ZX', null, change)).toThrow(
+    'Authored deletion differs',
+  )
+})
+
+it('rejects an empty insertion or deletion', () => {
+  expect(() => verifyKeyboardTextEdit('same', 'same', '')).toThrow('Authored insertion differs')
+  expect(() => verifyKeyboardTextEdit('same', 'same', null, '')).toThrow(
+    'Authored deletion differs',
+  )
+})
 
 it('rejects losing an unselected opaque fallback even when all ordinary text and the intended edit survive', async () => {
   const initial = '<w:p><w:r><w:t>Editable public paragraph</w:t></w:r></w:p>'
@@ -95,4 +138,48 @@ it('records the actual zoom owner above ProseMirror', () => {
   document.body.innerHTML =
     '<div class="doc-zoom" style="zoom:0.75"><div class="ProseMirror" style="zoom:1"></div></div>'
   expect(documentZoom(document.querySelector<HTMLElement>('.ProseMirror')!)).toBe('0.75')
+})
+
+it('keeps independent paragraph positions correct when composing native and later saved edits', () => {
+  const first = expectedInsertion(original, 'Alpha', 2, '测试')
+  const both = expectedInsertion(first, 'Beta', 2, 'MARK')
+  expect(both.textRuns.join('')).toBe('Al测试phaBeMARKta')
+  expect(both.paragraphs.map((p) => ({ text: p.text, start: p.start }))).toEqual([
+    { text: 'Al测试pha', start: 0 },
+    { text: 'BeMARKta', start: 7 },
+  ])
+})
+
+it('attributes a fresh owned native preedit/commit while recording the measured untrusted compositionend', () => {
+  const common = { trusted: true, mainEditor: true }
+  const events = [
+    { ...common, type: 'compositionstart', at: 100, data: '' },
+    { ...common, type: 'compositionupdate', at: 101, data: "ce'shi" },
+    { ...common, type: 'compositionupdate', at: 102, data: '测试', twoFrameCallbacksMs: 24 },
+    { ...common, type: 'compositionend', at: 103, data: '测试', trusted: false },
+  ]
+  expect(verifyNativeCompositionEvents(events, 99, '测试')).toMatchObject({
+    endTrusted: false,
+    lastUpdateTwoFrameCallbacksMs: 24,
+  })
+  expect(() => verifyNativeCompositionEvents(events, 101, '测试')).toThrow(
+    'Fresh owned native composition',
+  )
+  expect(() =>
+    verifyNativeCompositionEvents(
+      events.map((e) => ({ ...e, mainEditor: false })),
+      99,
+      '测试',
+    ),
+  ).toThrow('Fresh owned native composition')
+  expect(() => verifyNativeCompositionEvents(events, 99, null)).toThrow(
+    'Native composition outcome differs',
+  )
+  expect(
+    verifyNativeCompositionEvents(
+      events.map((e) => (e.at >= 102 ? { ...e, data: '' } : e)),
+      99,
+      null,
+    ),
+  ).toMatchObject({ endTrusted: false })
 })

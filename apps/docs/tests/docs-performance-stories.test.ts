@@ -81,6 +81,17 @@ it('fails explicitly for text in an unclassified non-WML story instead of silent
   )
 })
 
+it('keeps the full-document tail requirement while explicitly allowing an empty source table cell projection', () => {
+  expect(() => mainStoryOracle(wrap(p('')))).toThrow(
+    'Main story requires a nonempty final paragraph',
+  )
+  expect(mainStoryOracle(wrap(p('')), { allowEmpty: true })).toEqual({
+    textRuns: [],
+    paragraphs: [{ text: '', start: 0 }],
+    tail: '',
+  })
+})
+
 it('resolves a compatibility branch prefix declared on that branch itself', () => {
   const actual = mainStoryOracle(
     wrap(

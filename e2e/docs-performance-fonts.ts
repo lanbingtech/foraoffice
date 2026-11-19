@@ -9,7 +9,7 @@ interface DomNode {
   shadowRoots?: DomNode[]
 }
 
-/** Actual used faces from Chromium; collect once, after the unchanged document timing ends. */
+/** Actual used faces from Chromium; collect after each unchanged-document timing ends. */
 export async function collectPlatformFonts(page: Page) {
   const cdp = await page.context().newCDPSession(page)
   try {
@@ -49,7 +49,7 @@ export async function collectPlatformFonts(page: Page) {
       throw new Error('Actual rendered document font identities are missing')
     return {
       provenance:
-        'CDP CSS.getPlatformFontsForNode; every nonempty document text parent after initial unchanged-document verification; identities exclude glyph counts',
+        'CDP CSS.getPlatformFontsForNode; every nonempty document text parent after unchanged-document verification; identities exclude glyph counts',
       queriedParents: parents.size,
       identities: [...identities.entries()]
         .sort(([a], [b]) => a.localeCompare(b))
