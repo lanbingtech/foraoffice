@@ -238,6 +238,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
         GENOFFICE_LANG: 'en',
       },
     })
+    const child = app.process()
     try {
       const page = await app.firstWindow()
       await app.evaluate(
@@ -256,7 +257,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
       )
       return {
         page,
-        nativeProcessId: app.process().pid,
+        nativeProcessId: child.pid,
         evidence: {
           kind: 'electron',
           rendering: 'standalone-product',
@@ -274,7 +275,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
           return pdf
         },
         async close() {
-          const timer = setTimeout(() => app.process().kill(), 10_000)
+          const timer = setTimeout(() => child.kill(), 10_000)
           try {
             await app
               .evaluate(({ dialog }) => {
@@ -287,13 +288,12 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
             await app.close()
           } finally {
             clearTimeout(timer)
-            const process = app.process()
-            if (process.exitCode === null && process.signalCode === null) process.kill()
+            if (child.exitCode === null && child.signalCode === null) child.kill()
           }
         },
       }
     } catch (error) {
-      const timer = setTimeout(() => app.process().kill(), 10_000)
+      const timer = setTimeout(() => child.kill(), 10_000)
       try {
         await app.close()
       } catch (cleanup) {
@@ -304,8 +304,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
         )
       } finally {
         clearTimeout(timer)
-        const process = app.process()
-        if (process.exitCode === null && process.signalCode === null) process.kill()
+        if (child.exitCode === null && child.signalCode === null) child.kill()
       }
       throw error
     }
