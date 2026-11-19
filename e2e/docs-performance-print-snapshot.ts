@@ -135,8 +135,11 @@ export function capturePrintSourceSnapshot() {
         if (rows.length !== native.rows.length)
           throw new Error('Printed/source table row topology differs')
         rows.forEach((row, index) => {
-          if (!visible(row)) return
-          const cells = [...row.children].filter((cell) => cell.matches('td,th')) as HTMLElement[]
+          const cells = [...row.children].filter((cell) =>
+            cell.matches('td,th'),
+          ) as HTMLTableCellElement[]
+          // A spanning cell can still be visible after its source row leaves the page.
+          if (!visible(row) && !cells.some((cell) => cell.rowSpan !== 1)) return
           if (cells.length !== native.rows[index].cells.length)
             throw new Error('Printed/source table cell topology differs')
           cells.forEach((cell, c) => {

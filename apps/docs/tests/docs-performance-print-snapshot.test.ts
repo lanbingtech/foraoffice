@@ -57,6 +57,22 @@ it('captures exact cell identity through real clip styles and ignores empty prun
       height: 585,
     })
     content.style.clipPath = 'none'
+    const row = document.querySelector('tr')!
+    const cell = document.querySelector('td')!
+    const sourceRowRect = row.getBoundingClientRect
+    row.getBoundingClientRect = () => new DOMRect(0, 30, 800, 20)
+    cell.rowSpan = 3
+    expect(capturePrintSourceSnapshot().snapshot.regions).toContainEqual({
+      page: 0,
+      owner: 'T:0:1',
+      role: 'body',
+      rect: { x: 7.5, y: 90, width: 150, height: 270 },
+    })
+    cell.rowSpan = 1
+    expect(
+      capturePrintSourceSnapshot().snapshot.regions.some((region) => region.owner === 'T:0:1'),
+    ).toBe(false)
+    row.getBoundingClientRect = sourceRowRect
     const paper = document.querySelector<HTMLElement>('.pv-page')!
     paper.getBoundingClientRect = () => new DOMRect(0, 0, 799.98575, 998)
     expect(capturePrintSourceSnapshot().snapshot.pages[0].width).toBe(600)
