@@ -7,8 +7,8 @@ it('captures exact cell identity through real clip styles and ignores empty prun
   document.body.innerHTML =
     '<div class="pagination-preview" style="zoom:1" data-rect="0,0,800,1000">' +
     '<div class="pv-page" data-pv-section="0" style="width:800px;height:1000px" data-rect="0,0,800,998">' +
-    '<div class="pv-clip" style="overflow:hidden" data-rect="0,100,800,800">' +
-    '<div class="pv-content" data-pv-body data-rect="0,-500,800,2000">' +
+    '<div class="pv-clip" style="overflow-x:hidden;overflow-y:hidden" data-rect="0,100,800,800">' +
+    '<div class="pv-content" data-pv-body data-rect="50,105,700,780">' +
     '<div class="pv-prune-spacer" data-rect="0,-500,800,600"></div>' +
     '<table class="doc-table" data-idx="1" data-rect="0,80,800,400"><tbody>' +
     '<tr data-rect="0,80,800,400"><td data-rect="0,80,800,400">' +
@@ -39,9 +39,24 @@ it('captures exact cell identity through real clip styles and ignores empty prun
   try {
     const captured = capturePrintSourceSnapshot()
     expect(captured.snapshot.pages).toEqual([{ width: 600, height: 750 }])
+    expect(captured.snapshot.regions[0]).toEqual({
+      page: 0,
+      owner: 'body',
+      role: 'body',
+      rect: { x: 0, y: 78.75, width: 600, height: 585 },
+    })
     expect(captured.snapshot.regions.filter((region) => region.owner !== 'body')).toEqual([
       { page: 0, owner: 'T:0:1', role: 'body', rect: { x: 7.5, y: 90, width: 150, height: 270 } },
     ])
+    const content = document.querySelector<HTMLElement>('.pv-content')!
+    content.style.clipPath = 'inset(0px 30px)'
+    expect(capturePrintSourceSnapshot().snapshot.regions[0].rect).toEqual({
+      x: 60,
+      y: 78.75,
+      width: 480,
+      height: 585,
+    })
+    content.style.clipPath = 'none'
     const paper = document.querySelector<HTMLElement>('.pv-page')!
     paper.getBoundingClientRect = () => new DOMRect(0, 0, 799.98575, 998)
     expect(capturePrintSourceSnapshot().snapshot.pages[0].width).toBe(600)

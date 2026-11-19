@@ -51,8 +51,15 @@ export function capturePrintSourceSnapshot() {
     if (!(width > 0 && height > 0) || Math.abs(origin.width - width) > 0.02)
       throw new Error('Authored print paper geometry is missing or scaled')
     snapshot.pages.push({ width: width * 0.75, height: height * 0.75 })
-    const visible = (element: HTMLElement): PdfRect | null => {
-      let rect: PdfRect | null = intersect(box(element), origin)
+    const visible = (
+      element: HTMLElement,
+      horizontal?: Pick<PdfRect, 'x' | 'width'>,
+    ): PdfRect | null => {
+      const measured = box(element)
+      let rect: PdfRect | null = intersect(
+        horizontal ? { ...measured, x: horizontal.x, width: horizontal.width } : measured,
+        origin,
+      )
       for (
         let ancestor: HTMLElement | null = element;
         rect && ancestor;
@@ -83,7 +90,7 @@ export function capturePrintSourceSnapshot() {
         }
         if (
           rect &&
-          ancestor !== element &&
+          (ancestor !== element || horizontal !== undefined) &&
           /hidden|clip|auto|scroll/.test(style.overflowX + style.overflowY)
         )
           rect = intersect(rect, bounds)
@@ -92,19 +99,24 @@ export function capturePrintSourceSnapshot() {
       return rect
     }
     const add = (element: HTMLElement, owner: string, role: 'body' | 'repeat') => {
-      const rect = visible(element)
-      if (rect)
-        snapshot.regions.push({
-          page,
-          owner,
-          role,
-          rect: {
-            x: (rect.x - origin.x) * 0.75,
-            y: (rect.y - origin.y) * 0.75,
-            width: rect.width * 0.75,
-            height: rect.height * 0.75,
-          },
-        })
+      const clip = owner === 'body' ? element.closest<HTMLElement>('.pv-clip') : null
+      if (owner === 'body' && !clip) throw new Error('Printed body clip geometry is missing')
+      // The paper clip also paints hanging CJK punctuation in the side margins.
+      const bounds = clip ? visible(clip) : undefined
+      if (bounds === null) return
+      const rect = visible(element, bounds)
+      if (!rect) return
+      snapshot.regions.push({
+        page,
+        owner,
+        role,
+        rect: {
+          x: (rect.x - origin.x) * 0.75,
+          y: (rect.y - origin.y) * 0.75,
+          width: rect.width * 0.75,
+          height: rect.height * 0.75,
+        },
+      })
     }
     for (const content of paper.querySelectorAll<HTMLElement>('.pv-content')) {
       const role = content.hasAttribute('data-pv-body') ? 'body' : 'repeat'
