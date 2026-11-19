@@ -34,6 +34,36 @@ it('requires the exact requested authored edit, independently of generated pagin
   )
 })
 
+it('accepts an exact edit whose text shares a prefix with the retained text', () => {
+  const source = 'AA测量ZZ'
+  const edited = 'AA测试测量ZZ'
+  const change = '测试'
+  expect(() => verifyKeyboardTextEdit(source, edited, change)).not.toThrow()
+  expect(() => verifyKeyboardTextEdit(edited, source, null, change)).not.toThrow()
+})
+
+it('rejects collateral text changes even when the expected delta and length are present', () => {
+  const source = 'AA测量ZZ'
+  const edited = 'AA测试测量ZZ'
+  const change = '测试'
+  expect(() => verifyKeyboardTextEdit(source, 'AX测试测量ZZ', change)).toThrow(
+    'Authored insertion differs',
+  )
+  expect(() => verifyKeyboardTextEdit(source, 'AA测试测量ZX', change)).toThrow(
+    'Authored insertion differs',
+  )
+  expect(() => verifyKeyboardTextEdit(edited, 'AA测量ZX', null, change)).toThrow(
+    'Authored deletion differs',
+  )
+})
+
+it('rejects an empty insertion or deletion', () => {
+  expect(() => verifyKeyboardTextEdit('same', 'same', '')).toThrow('Authored insertion differs')
+  expect(() => verifyKeyboardTextEdit('same', 'same', null, '')).toThrow(
+    'Authored deletion differs',
+  )
+})
+
 it('rejects losing an unselected opaque fallback even when all ordinary text and the intended edit survive', async () => {
   const initial = '<w:p><w:r><w:t>Editable public paragraph</w:t></w:r></w:p>'
   const opaque =
