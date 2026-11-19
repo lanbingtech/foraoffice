@@ -91,3 +91,34 @@ it('records headless browser OS foreground as not applicable without launching a
   expect(after.native).toBe('not-applicable-headless-browser')
   expect(native).not.toHaveBeenCalled()
 })
+
+it('checks each sample inside one continuously observed phase without spawning per-sample native processes', async () => {
+  native.mockReset().mockResolvedValue({ before: snapshot() })
+  const guard = createPerformanceFocusGuard('qt', page() as unknown as Page, owner.targetProcessId)
+  await guard.begin()
+  for (let i = 0; i < 30; i++) await guard.check()
+  await guard.end()
+  expect(native).toHaveBeenCalledTimes(3)
+})
+
+it('preserves actual blur evidence across lightweight checks until phase end', async () => {
+  const actualPage = page()
+  const fakeWindow = new EventTarget()
+  const fakeDocument = Object.assign(new EventTarget(), {
+    visibilityState: 'visible',
+    hasFocus: () => true,
+  })
+  vi.stubGlobal('window', fakeWindow)
+  vi.stubGlobal('document', fakeDocument)
+  actualPage.evaluate.mockImplementation(async (fn, arg) => fn(arg))
+  try {
+    const guard = createPerformanceFocusGuard('browser', actualPage as unknown as Page)
+    await guard.begin()
+    await guard.check()
+    fakeWindow.dispatchEvent(new Event('blur'))
+    await expect(guard.check()).rejects.toThrow('Focus or visibility was lost')
+    await expect(guard.end()).rejects.toThrow('Focus or visibility was lost')
+  } finally {
+    vi.unstubAllGlobals()
+  }
+})

@@ -454,7 +454,7 @@ test('production document performance and correctness evidence', async () => {
     timingBoundary:
       'fresh process loads a tiny primer, then verified foreground before measured sample open; process-start metrics include primer/activation; separate sample-open metrics; visible source-prefix predicate polls50ms then JPEG; observation upper bounds, not INP or complete cold-start latency',
     focusPolicy:
-      'Qt/Electron owned native HWND/start identity and foreground/focus verified before/after; transient DOM blur/visibility loss invalidates interval; headless browser native foreground not applicable; activation/native inspection excluded from sample-input timing',
+      'Qt/Electron exact native HWND/start identity and foreground/focus verified at grouped phase endpoints; continuously armed DOM blur/visibility records and lightweight checks before/after each sample reject the whole phase on loss; headless browser native foreground not applicable; activation/native inspection excluded from sample-input timing',
     diagnostics:
       'internal pagination activity v1 and lazy source-story/cell diagnostics v1; same product instrumentation required on both sides',
     sourceStoryMethod:
@@ -580,11 +580,12 @@ test('production document performance and correctness evidence', async () => {
     }
     const live = session!
     currentScenario = 'hot-open-to-layout-verified-observation'
+    await focus!.begin()
     for (let i = 0; i < opens; i++) {
       const generation = await live.page.evaluate(
         () => (window as ProbeWindow).__docsLayoutActivity!.snapshot().generation,
       )
-      await focus!.begin()
+      await focus!.check()
       const started = now()
       const opened = await withDeadline(live.open(), 180_000, 'document open')
       const apiReturnMs = now() - started
@@ -600,7 +601,7 @@ test('production document performance and correctness evidence', async () => {
         mainStory.textRuns,
       )
       push('hot-open-to-layout-verified-observation', now() - started)
-      await focus!.end()
+      await focus!.check()
       const stories = await verifyRenderedStories(
         live.page,
         sourceXml,
@@ -615,7 +616,9 @@ test('production document performance and correctness evidence', async () => {
         stories,
       })
     }
+    await focus!.end()
     for (const scenario of edits) {
+      await focus!.begin()
       for (let i = 0; i < samples; i++) {
         currentScenario = `${scenario}-layout-verified-observation`
         const fraction =
@@ -626,7 +629,7 @@ test('production document performance and correctness evidence', async () => {
           fraction,
         )
         await waitForLayout(live.page, tail)
-        await focus!.begin()
+        await focus!.check()
         const inputIndex = await live.page.evaluate(() => {
           const probe = (window as ProbeWindow).performanceProbe!
           probe.activity = true
@@ -686,7 +689,7 @@ test('production document performance and correctness evidence', async () => {
         const verificationStarted = now()
         const state = await waitForLayout(live.page, tail, 180_000, -1, started)
         push(`${scenario}-layout-verified-observation`, now() - started)
-        await focus!.end()
+        await focus!.check()
         if (!probe.input.length)
           throw new Error(`No current input/keydown attribution for ${scenario}`)
         if (scenario === 'enter' && !probe.input.some((event) => event.type === 'Enter keydown'))
@@ -724,11 +727,13 @@ test('production document performance and correctness evidence', async () => {
           .toBe(before.paragraphs)
         await waitForLayout(live.page, tail)
       }
+      await focus!.end()
     }
+    await focus!.begin()
     for (let i = 0; i < samples; i++) {
       currentScenario = 'wheel-visible-observation'
       const scroller = live.page.locator('.editor-scroll')
-      await focus!.begin()
+      await focus!.check()
       await scroller.hover()
       const before = await scroller.evaluate((element) => element.scrollTop)
       const maximum = await scroller.evaluate(
@@ -752,10 +757,11 @@ test('production document performance and correctness evidence', async () => {
         return { frames: probe.frames.splice(0), longTasks: probe.longTasks.splice(0) }
       })
       await waitForLayout(live.page, tail)
-      await focus!.end()
+      await focus!.check()
       details.push({ scenario: 'wheel', index: i, probe })
       blockingTasks.push(...probe.longTasks.map((entry) => entry.duration))
     }
+    await focus!.end()
     currentScenario = 'save-print'
     const saveMarker = 'PERFORMANCE-SAVE-CHECK'
     await focus!.begin()

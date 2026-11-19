@@ -8,7 +8,7 @@ type FocusState = {
 }
 
 /** Serialized into the actual host page; records transient loss rather than only final focus. */
-function observeFocus(active: boolean) {
+function observeFocus(mode: 'begin' | 'check' | 'end') {
   const win = window as Window & { performanceFocus?: FocusState }
   let state = win.performanceFocus
   if (!state) {
@@ -19,8 +19,10 @@ function observeFocus(active: boolean) {
     window.addEventListener('blur', record)
     document.addEventListener('visibilitychange', record)
   }
-  if (active) state.losses = []
-  state.active = active
+  if (mode === 'begin') {
+    state.losses = []
+    state.active = true
+  } else if (mode === 'end') state.active = false
   return {
     visibilityState: document.visibilityState,
     hasFocus: document.hasFocus(),
@@ -35,6 +37,7 @@ export function createPerformanceFocusGuard(
 ) {
   let owner: NativeImeOwner | undefined
   const observations: Array<Record<string, unknown>> = []
+  let checks = 0
   const inspect = async () => {
     if (host === 'browser') return 'not-applicable-headless-browser' as const
     if (!nativeProcessId) throw new Error('Native launcher-owned PID is missing')
@@ -65,7 +68,15 @@ export function createPerformanceFocusGuard(
   }
   return {
     observations,
+    async check() {
+      const dom = await page.evaluate(observeFocus, 'check' as const)
+      checks++
+      if (dom.visibilityState !== 'visible' || !dom.hasFocus || dom.losses.length)
+        observations.push({ stage: 'lost-during-phase', dom, checks })
+      requireDomFocus(dom)
+    },
     async begin() {
+      checks = 0
       const before = await inspect()
       observations.push({ stage: 'before-activation', native: before })
       if (
@@ -78,15 +89,15 @@ export function createPerformanceFocusGuard(
       const native = await inspect()
       observations.push({ stage: 'after-native-verification', native })
       requireNativeFocus(native)
-      const dom = await page.evaluate(observeFocus, true)
+      const dom = await page.evaluate(observeFocus, 'begin' as const)
       observations.push({ stage: 'begin', native, dom })
       requireDomFocus(dom)
       return { native, dom }
     },
     async end() {
-      const dom = await page.evaluate(observeFocus, false)
+      const dom = await page.evaluate(observeFocus, 'end' as const)
       const native = await inspect()
-      observations.push({ stage: 'end', native, dom })
+      observations.push({ stage: 'end', native, dom, checks })
       requireNativeFocus(native)
       requireDomFocus(dom)
       return { native, dom }
