@@ -20,3 +20,31 @@ it('excludes pagination header widgets and repeated rows from the source body st
     vi.unstubAllGlobals()
   }
 })
+
+it('excludes only src-less ProseMirror separator images while retaining genuine missing/broken image failures', () => {
+  vi.stubGlobal('matchMedia', () => ({ matches: false }))
+  document.body.innerHTML =
+    '<div class="ProseMirror"><p>End<img class="ProseMirror-separator"></p></div>'
+  try {
+    expect(readLayoutProbe({ end: 'End', textRuns: ['End'] })).toMatchObject({
+      imagesReady: true,
+      images: 0,
+      excludedSeparatorImages: 1,
+    })
+    const authored = document.createElement('img')
+    document.querySelector('.ProseMirror')!.append(authored)
+    expect(readLayoutProbe({ end: 'End', textRuns: ['End'] })).toMatchObject({
+      imagesReady: false,
+      images: 1,
+    })
+    authored.className = 'ProseMirror-separator'
+    authored.setAttribute('src', 'missing-authored-image.png')
+    expect(readLayoutProbe({ end: 'End', textRuns: ['End'] })).toMatchObject({
+      imagesReady: false,
+      images: 1,
+    })
+  } finally {
+    document.body.innerHTML = ''
+    vi.unstubAllGlobals()
+  }
+})

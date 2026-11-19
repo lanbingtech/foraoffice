@@ -18,7 +18,10 @@ export function readLayoutProbe({ end, textRuns }: { end: string; textRuns: stri
   const win = window as ProbeWindow
   const activity = win.__docsLayoutActivity?.snapshot()
   const pm = document.querySelector<HTMLElement>('.ProseMirror')
-  const images = pm ? [...pm.querySelectorAll('img')] : []
+  const allImages = pm ? [...pm.querySelectorAll('img')] : []
+  const images = allImages.filter(
+    (image) => !(image.classList.contains('ProseMirror-separator') && !image.hasAttribute('src')),
+  )
   let texts = ''
   if (pm) {
     const walker = document.createTreeWalker(pm, NodeFilter.SHOW_TEXT)
@@ -64,6 +67,7 @@ export function readLayoutProbe({ end, textRuns }: { end: string; textRuns: stri
     },
     imagesReady: images.every((image) => image.complete && image.naturalWidth > 0),
     images: images.length,
+    excludedSeparatorImages: allImages.length - images.length,
     brokenImages: images.flatMap((image, index) =>
       image.complete && image.naturalWidth > 0
         ? []
