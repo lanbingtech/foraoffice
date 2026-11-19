@@ -267,13 +267,15 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
         },
         { document: options.document, pdf },
       )
+      // The executable launcher can be a distinct process with no native window.
+      const main = await app.evaluate(() => ({ pid: process.pid, versions: process.versions }))
       return {
         page,
-        nativeProcessId: child.pid,
+        nativeProcessId: main.pid,
         evidence: {
           kind: 'electron',
           rendering: 'standalone-product',
-          versions: await app.evaluate(() => process.versions),
+          versions: main.versions,
         },
         async open() {
           await page.keyboard.press('Control+o')

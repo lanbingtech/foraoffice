@@ -34,7 +34,11 @@ it('launches Electron with a separate primer while retaining the measured docume
       'module.exports=process.execPath',
     )
     const press = vi.fn().mockResolvedValue(undefined)
-    const evaluate = vi.fn().mockResolvedValue(undefined)
+    const evaluate = vi
+      .fn()
+      .mockResolvedValue(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ pid: 34, versions: { electron: '43.8.3' } })
     launches.electron.mockResolvedValue({
       firstWindow: async () => ({ keyboard: { press } }),
       evaluate,
@@ -51,6 +55,7 @@ it('launches Electron with a separate primer while retaining the measured docume
       qtExecutable: '',
     })
     expect(launches.electron.mock.lastCall![0].args).toEqual([workspace, 'primer.docx'])
+    expect(session.nativeProcessId).toBe(34)
     expect(evaluate.mock.calls[0][1]).toMatchObject({ document: 'sample.docx' })
     await session.open()
     expect(press).toHaveBeenCalledWith('Control+o')
