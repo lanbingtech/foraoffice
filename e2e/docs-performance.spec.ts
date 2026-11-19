@@ -9,6 +9,7 @@ import JSZip from 'jszip'
 import { PDFDocument } from 'pdf-lib'
 import { buildPerformanceFixture, documentOracle } from './docs-performance-fixture'
 import { collectPlatformFonts } from './docs-performance-fonts'
+import { captureFailureEvidence } from './docs-performance-evidence'
 import {
   documentZoom,
   expectedInsertion,
@@ -157,6 +158,7 @@ async function waitForLayout(
               : null,
             visible,
             complete,
+            incompleteText: complete ? undefined : texts,
             oracle: {
               tailPresent: !!end && texts.includes(end.replace(/\s+/g, ' ')),
               orderedTextPresent,
@@ -183,6 +185,8 @@ async function waitForLayout(
             environment: {
               viewport: [innerWidth, innerHeight],
               devicePixelRatio,
+              visibilityState: document.visibilityState,
+              hasFocus: document.hasFocus(),
               theme: document.documentElement.dataset.theme ?? 'system/default',
               prefersDark: matchMedia('(prefers-color-scheme: dark)').matches,
               documentDarkPage: !!pm?.closest('.page-dark'),
@@ -419,6 +423,7 @@ test('production document performance and correctness evidence', async () => {
     schema: 1,
     host,
     label,
+    headless: host === 'browser',
     harnessCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
       cwd: repository,
       encoding: 'utf8',
@@ -508,6 +513,7 @@ test('production document performance and correctness evidence', async () => {
       if (launch === 0) platformFonts = await collectPlatformFonts(session.page)
       condition = {
         host,
+        headless: metadata.headless,
         fixture: metadata.fixture,
         machine: metadata.machine,
         cachePolicy: metadata.cachePolicy,
@@ -796,42 +802,7 @@ test('production document performance and correctness evidence', async () => {
     if (runs[currentScenario]) runs[currentScenario].push({ ok: false, error: String(error) })
     if (session) {
       try {
-        const [screenshot, state] = await withDeadline(
-          Promise.all([
-            session.page.screenshot({ type: 'png', timeout: 5_000 }),
-            session.page.evaluate(() => ({
-              status: window.document.querySelector('.status-bar')?.textContent,
-              previewPages: window.document.querySelectorAll('.pv-page').length,
-              menuItems: [...window.document.querySelectorAll('[role="menuitem"]')].map((item) => ({
-                text: item.textContent,
-                disabled: item.getAttribute('aria-disabled'),
-              })),
-              activity: (window as ProbeWindow).__docsLayoutActivity?.snapshot(),
-              documentText: window.document.querySelector('.ProseMirror')?.textContent,
-            })),
-          ]),
-          5_000,
-          'failure context',
-        )
-        await writeFile(join(root, 'failure.png'), screenshot)
-        if (state.documentText !== undefined)
-          await writeFile(join(root, 'failure-document-text.txt'), state.documentText ?? '')
-        await writeFile(
-          join(root, 'failure-state.json'),
-          JSON.stringify(
-            {
-              scenario: currentScenario,
-              ...state,
-              documentText: undefined,
-              lastProbe:
-                typeof error === 'object' && error !== null && 'lastProbe' in error
-                  ? error.lastProbe
-                  : undefined,
-            },
-            null,
-            2,
-          ),
-        )
+        errors.push(...(await captureFailureEvidence(session.page, root, currentScenario, error)))
         if (!platformFonts) {
           try {
             const fonts = await withDeadline(
