@@ -9,7 +9,20 @@ vi.mock('@playwright/test', () => ({
   chromium: { launch: launches.browser },
   _electron: { launch: launches.electron },
 }))
-import { launchPerformanceHost } from '../../../e2e/docs-performance-host'
+import { launchPerformanceHost, exportWithNativePicker } from '../../../e2e/docs-performance-host'
+
+it('rejects a false product export immediately and aborts a picker that never appears', async () => {
+  let signal: AbortSignal | undefined
+  const pending = exportWithNativePicker(
+    async () => false,
+    (active) => {
+      signal = active
+      return new Promise(() => {})
+    },
+  )
+  await expect(pending).rejects.toThrow('Qt product PDF export returned false')
+  expect(signal?.aborted).toBe(true)
+}, 200)
 
 it('launches Electron with a separate primer while retaining the measured document for real Open', async () => {
   const workspace = await mkdtemp(join(tmpdir(), 'docs-perf-host-'))

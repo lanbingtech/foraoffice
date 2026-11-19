@@ -37,6 +37,23 @@ const environment = () =>
     ),
   ) as Record<string, string>
 
+export async function exportWithNativePicker(
+  exportDocument: () => Promise<boolean>,
+  choosePath: (signal: AbortSignal) => Promise<unknown>,
+) {
+  const controller = new AbortController()
+  try {
+    await Promise.all([
+      exportDocument().then((exported) => {
+        if (!exported) throw new Error('Qt product PDF export returned false')
+      }),
+      choosePath(controller.signal),
+    ])
+  } finally {
+    controller.abort()
+  }
+}
+
 async function reservePort(): Promise<number> {
   const reservation = createPortReservation()
   await new Promise<void>((done) => reservation.listen(0, '127.0.0.1', done))
@@ -180,22 +197,17 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
           )
         },
         async exportPdf() {
-          const controller = new AbortController()
-          try {
-            const [exported] = await Promise.all([
+          await exportWithNativePicker(
+            () =>
               editorPage.evaluate(async () => {
-                const exportPdf = (window as unknown as { __exportPdf?: () => Promise<unknown> })
+                const exportPdf = (window as unknown as { __exportPdf?: () => Promise<boolean> })
                   .__exportPdf
                 if (!exportPdf) throw new Error('Qt product PDF export callback is missing')
                 return await exportPdf()
               }),
-              nativeSaveDialog(child.pid!, pdf, controller.signal),
-            ])
-            if (exported === false) throw new Error('Qt product PDF export returned false')
-            return pdf
-          } finally {
-            controller.abort()
-          }
+            (signal) => nativeSaveDialog(child.pid!, pdf, signal),
+          )
+          return pdf
         },
         async close() {
           await writeFile(join(options.workspace, 'qt-stderr.log'), stderr)
