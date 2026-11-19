@@ -53,6 +53,9 @@ public static class DocsNativeIme {
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr window, StringBuilder text, int count);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out RECT bounds);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint process);
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder image, ref uint size);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
   [DllImport("imm32.dll", CharSet=CharSet.Unicode)] public static extern uint ImmGetDescriptionW(IntPtr layout, StringBuilder text, uint count);
   [DllImport("imm32.dll", CharSet=CharSet.Unicode)] public static extern uint ImmGetIMEFileNameW(IntPtr layout, StringBuilder text, uint count);
   [DllImport("imm32.dll")] public static extern IntPtr ImmGetContext(IntPtr window);
@@ -75,6 +78,19 @@ public static class DocsNativeIme {
       return true;
     }, IntPtr.Zero);
     return windows.ToArray();
+  }
+  public static string ProcessImage(uint process) {
+    var handle = OpenProcess(0x1000, false, process); // PROCESS_QUERY_LIMITED_INFORMATION
+    if (handle == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    try {
+      var image = new StringBuilder(32768);
+      uint size = (uint)image.Capacity;
+      if (!QueryFullProcessImageNameW(handle, 0, image, ref size))
+        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+      return image.ToString();
+    } finally {
+      if (!CloseHandle(handle)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    }
   }
 }
 '@
@@ -286,37 +302,62 @@ public static class DocsNativeIme {
         Add-Type -AssemblyName UIAutomationTypes
         $candidateWindows = @()
         $candidateErrors = @()
+        $candidateProcesses = @()
         foreach ($imeProcess in @(Get-Process -Name ChsIME, TextInputHost -ErrorAction SilentlyContinue)) {
+          $visibleWindows = @([DocsNativeIme]::VisibleWindows($imeProcess.Id))
+          if ($visibleWindows.Count -eq 0) { continue }
+          $processEvidence = @{ processId=$imeProcess.Id; processName=$imeProcess.ProcessName; image=$null; status='unavailable' }
           try {
             $image = $imeProcess.Path
+            if ([string]::IsNullOrWhiteSpace($image)) { $image = [DocsNativeIme]::ProcessImage($imeProcess.Id) }
+            $processEvidence.image = $image
             if (-not $image.StartsWith([Environment]::GetFolderPath('Windows') + '\', [StringComparison]::OrdinalIgnoreCase) -or
                 [Diagnostics.FileVersionInfo]::GetVersionInfo($image).CompanyName -ne 'Microsoft Corporation') {
-              throw 'The candidate UI process does not have the expected Microsoft Windows identity'
-            }
-            foreach ($candidateWindow in [DocsNativeIme]::VisibleWindows($imeProcess.Id)) {
+              $processEvidence.status = 'identity-mismatch'
+              $processEvidence.error = 'The candidate UI process does not have the expected Microsoft Windows identity'
+            } else { $processEvidence.status = 'available' }
+          } catch {
+            $failure = $_.Exception.GetBaseException()
+            $processEvidence.error = $failure.Message
+            if ($failure -is [ComponentModel.Win32Exception]) { $processEvidence.win32Error = $failure.NativeErrorCode }
+          }
+          $candidateProcesses += $processEvidence
+          foreach ($candidateWindow in $visibleWindows) {
+            try {
+              [uint32]$currentProcessId = 0
+              [void][DocsNativeIme]::GetWindowThreadProcessId($candidateWindow, [ref]$currentProcessId)
+              if ($currentProcessId -ne $imeProcess.Id -or -not [DocsNativeIme]::IsWindowVisible($candidateWindow)) {
+                throw 'The visible candidate window changed during inspection'
+              }
               $class = [Text.StringBuilder]::new(256)
               [void][DocsNativeIme]::GetClassNameW($candidateWindow, $class, $class.Capacity)
               $bounds = [DocsNativeIme+RECT]::new()
-              if (-not [DocsNativeIme]::GetWindowRect($candidateWindow, [ref]$bounds)) {
+              if (-not [DocsNativeIme]::GetWindowRect($candidateWindow, [ref]$bounds) -or
+                  $bounds.right -le $bounds.left -or $bounds.bottom -le $bounds.top) {
                 throw 'The native candidate UI bounds could not be read'
               }
-              $element = [System.Windows.Automation.AutomationElement]::FromHandle($candidateWindow)
-              $children = $element.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-              $names = @($element.Current.Name)
-              for ($child = 0; $child -lt [Math]::Min($children.Count, 500); $child++) {
-                $name = $children[$child].Current.Name
-                if ($name) { $names += $name }
-              }
-              $candidateWindows += @{
-                processId = $imeProcess.Id; image = $image
+              $windowEvidence = @{
+                processId = $imeProcess.Id; image = $processEvidence.image
                 windowHandle = $candidateWindow.ToInt64().ToString(); windowClass = $class.ToString()
                 left = $bounds.left; top = $bounds.top; right = $bounds.right; bottom = $bounds.bottom
-                names = $names; truncated = $children.Count -gt 500
+                names = @(); truncated = $false
               }
-            }
-          } catch { $candidateErrors += $_.Exception.Message }
+              try {
+                $element = [System.Windows.Automation.AutomationElement]::FromHandle($candidateWindow)
+                $children = $element.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+                $names = @($element.Current.Name | Where-Object { $null -ne $_ })
+                for ($child = 0; $child -lt [Math]::Min($children.Count, 500); $child++) {
+                  $name = $children[$child].Current.Name
+                  if ($name) { $names += $name }
+                }
+                $windowEvidence.names = $names
+                $windowEvidence.truncated = $children.Count -gt 500
+              } catch { $windowEvidence.uiaError = $_.Exception.GetBaseException().Message }
+              $candidateWindows += $windowEvidence
+            } catch { $candidateErrors += "PID $($imeProcess.Id), HWND $($candidateWindow.ToInt64()): $($_.Exception.Message)" }
+          }
         }
-        $result.candidateInspection = @{ windows = $candidateWindows; errors = $candidateErrors }
+        $result.candidateInspection = @{ evidenceKind='uia-metadata-only'; processes=$candidateProcesses; windows=$candidateWindows; errors=$candidateErrors }
       }
     }
     'focus' {

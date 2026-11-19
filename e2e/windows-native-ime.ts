@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -66,9 +68,18 @@ export type NativeImeEvidence = {
   after?: NativeImeSnapshot
   loadedProfiles?: NativeImeProfile[]
   candidateInspection?: {
+    evidenceKind: 'uia-metadata-only'
+    processes: {
+      processId: number
+      processName: string
+      image: string | null
+      status: 'available' | 'unavailable' | 'identity-mismatch'
+      error?: string
+      win32Error?: number
+    }[]
     windows: {
       processId: number
-      image: string
+      image: string | null
       windowHandle: string
       windowClass: string
       left: number
@@ -77,6 +88,7 @@ export type NativeImeEvidence = {
       bottom: number
       names: string[]
       truncated: boolean
+      uiaError?: string
     }[]
     errors: string[]
   }
@@ -108,6 +120,131 @@ export type NativeImeRequest =
       keyboardLayout: string
       previousForeground: NativeImeOwner | null
     } & NativeImeOwner)
+
+export type NativeCandidateProof =
+  | { status: 'incomplete'; reason: string }
+  | { status: 'pending-visual-review'; imageSha256: string }
+  | {
+      status: 'confirmed'
+      imageSha256: string
+      selectedCandidate: string
+      preedit: string
+      reviewer: string
+      reviewedUtc: string
+    }
+
+// Metadata and the existence of a PNG cannot establish what candidate pixels depict.
+export async function evaluateNativeCandidateCapture(
+  owner: NativeImeOwner,
+  capture: unknown,
+  visualReview?: unknown,
+): Promise<NativeCandidateProof> {
+  try {
+    requireOwner(owner)
+    requireEvidence(
+      isRecord(capture) &&
+        capture.source === 'win32-desktop-copy-from-screen' &&
+        capture.coordinateSource === 'uia-physical-screen',
+      'native desktop pixel source',
+    )
+    for (const identity of [capture.owner, capture.foregroundBefore, capture.foregroundAfter]) {
+      requireOwner(identity)
+      requireEvidence(
+        identity.targetProcessId === owner.targetProcessId &&
+          identity.windowHandle === owner.windowHandle &&
+          identity.processStartTime === owner.processStartTime,
+        'candidate capture foreground binding',
+      )
+    }
+    requireEvidence(
+      isTimestamp(capture.startedUtc) &&
+        isTimestamp(capture.completedUtc) &&
+        Date.parse(capture.startedUtc) >= Date.parse(owner.processStartTime) &&
+        Date.parse(capture.completedUtc) >= Date.parse(capture.startedUtc),
+      'candidate capture UTC interval',
+    )
+    const window = capture.window
+    requireEvidence(
+      isRecord(window) &&
+        isInteger(window.processId) &&
+        window.processId > 0 &&
+        isPointer(window.windowHandle) &&
+        typeof window.windowClass === 'string' &&
+        !!window.windowClass,
+      'native candidate window',
+    )
+    requireEvidence(
+      [window.left, window.top, window.right, window.bottom].every(isInteger),
+      'candidate physical pixel bounds',
+    )
+    const width = (window.right as number) - (window.left as number)
+    const height = (window.bottom as number) - (window.top as number)
+    requireEvidence(
+      width > 0 && height > 0 && width < 10000 && height < 10000,
+      'candidate capture dimensions',
+    )
+    requireEvidence(
+      typeof capture.imagePath === 'string' &&
+        typeof capture.imageSha256 === 'string' &&
+        /^[a-f0-9]{64}$/.test(capture.imageSha256),
+      'candidate image digest',
+    )
+    const bytes = await readFile(capture.imagePath)
+    requireEvidence(
+      bytes.length >= 24 &&
+        bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) &&
+        bytes.toString('ascii', 12, 16) === 'IHDR' &&
+        bytes.readUInt32BE(16) === width &&
+        bytes.readUInt32BE(20) === height,
+      'candidate PNG physical dimensions',
+    )
+    const imageSha256 = createHash('sha256').update(bytes).digest('hex')
+    requireEvidence(imageSha256 === capture.imageSha256, 'candidate image SHA256 mismatch')
+    if (isRecord(visualReview)) {
+      requireEvidence(
+        visualReview.source === 'manual-native-pixel-review' &&
+          visualReview.imageSha256 === imageSha256,
+        'matching separate native pixel review',
+      )
+      requireOwner(visualReview.owner)
+      requireEvidence(
+        visualReview.owner.targetProcessId === owner.targetProcessId &&
+          visualReview.owner.windowHandle === owner.windowHandle &&
+          visualReview.owner.processStartTime === owner.processStartTime,
+        'visual review owner',
+      )
+      requireEvidence(
+        isTimestamp(visualReview.reviewedUtc) &&
+          Date.parse(visualReview.reviewedUtc) >= Date.parse(capture.completedUtc),
+        'visual review UTC',
+      )
+      requireEvidence(
+        typeof visualReview.reviewer === 'string' &&
+          !!visualReview.reviewer.trim() &&
+          typeof visualReview.preedit === 'string' &&
+          !!visualReview.preedit.trim() &&
+          typeof visualReview.selectedCandidate === 'string' &&
+          !!visualReview.selectedCandidate.trim(),
+        'observed native preedit and selected candidate',
+      )
+      return {
+        status: 'confirmed',
+        imageSha256,
+        selectedCandidate: visualReview.selectedCandidate,
+        preedit: visualReview.preedit,
+        reviewer: visualReview.reviewer,
+        reviewedUtc: visualReview.reviewedUtc,
+      }
+    }
+    requireEvidence(visualReview === undefined, 'separate visual review record')
+    return { status: 'pending-visual-review', imageSha256 }
+  } catch (error) {
+    return {
+      status: 'incomplete',
+      reason: error instanceof Error ? error.message : 'Native candidate capture unavailable',
+    }
+  }
+}
 
 function requireEvidence(condition: unknown, field: string): asserts condition {
   if (!condition) throw new Error(`Invalid native IME evidence: ${field}`)
@@ -291,6 +428,69 @@ function readNativeImeEvidence(request: NativeImeRequest, stdout: string): Nativ
       'loaded profiles',
     )
     for (const profile of value.loadedProfiles) requireProfile(profile)
+    if (request.includeCandidates) {
+      const inspection = value.candidateInspection
+      requireEvidence(
+        isRecord(inspection) && inspection.evidenceKind === 'uia-metadata-only',
+        'candidate metadata source',
+      )
+      requireEvidence(
+        Array.isArray(inspection.processes) &&
+          Array.isArray(inspection.windows) &&
+          Array.isArray(inspection.errors) &&
+          inspection.errors.every((error: unknown) => typeof error === 'string'),
+        'candidate metadata collections',
+      )
+      const processes = new Map<number, Record<string, unknown>>()
+      for (const process of inspection.processes) {
+        requireEvidence(
+          isRecord(process) &&
+            isInteger(process.processId) &&
+            process.processId > 0 &&
+            !processes.has(process.processId) &&
+            typeof process.processName === 'string',
+          'candidate process identity',
+        )
+        requireEvidence(
+          ['available', 'unavailable', 'identity-mismatch'].includes(String(process.status)) &&
+            (process.image === null || typeof process.image === 'string'),
+          'candidate image availability',
+        )
+        requireEvidence(
+          process.status === 'available'
+            ? typeof process.image === 'string' && !!process.image
+            : typeof process.error === 'string' && !!process.error,
+          'candidate process diagnostics',
+        )
+        if (process.win32Error !== undefined)
+          requireEvidence(isInteger(process.win32Error), 'candidate Win32 diagnostic')
+        processes.set(process.processId, process)
+      }
+      for (const window of inspection.windows) {
+        requireEvidence(
+          isRecord(window) &&
+            isInteger(window.processId) &&
+            processes.has(window.processId) &&
+            window.image === processes.get(window.processId)?.image &&
+            isPointer(window.windowHandle) &&
+            typeof window.windowClass === 'string',
+          'candidate window identity',
+        )
+        requireEvidence(
+          [window.left, window.top, window.right, window.bottom].every(isInteger) &&
+            (window.right as number) > (window.left as number) &&
+            (window.bottom as number) > (window.top as number),
+          'candidate physical bounds',
+        )
+        requireEvidence(
+          Array.isArray(window.names) &&
+            window.names.every((name: unknown) => typeof name === 'string') &&
+            typeof window.truncated === 'boolean' &&
+            (window.uiaError === undefined || typeof window.uiaError === 'string'),
+          'candidate UIA metadata',
+        )
+      }
+    }
   }
   if (request.action === 'focus' || request.action === 'select-language') {
     requireEvidence(after?.foregroundOwned && after.focusOwned, 'owned foreground focus')
