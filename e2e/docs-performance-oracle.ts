@@ -2,23 +2,30 @@ import type { DocumentOracle } from './docs-performance-fixture'
 
 const normalize = (text: string) => text.replace(/\s+/g, '')
 
+function hasExactInsertion(before: string, after: string, added: string | undefined): boolean {
+  if (!added || after.length !== before.length + added.length) return false
+
+  // Matching prefix and shifted suffix bound every valid insertion offset.
+  let latest = 0
+  while (latest < before.length && before[latest] === after[latest]) latest++
+  let earliest = before.length
+  while (earliest > 0 && before[earliest - 1] === after[earliest + added.length - 1]) earliest--
+
+  const offset = after.indexOf(added, earliest)
+  return offset >= 0 && offset <= latest
+}
+
 export function verifyKeyboardTextEdit(
   before: string,
   after: string,
   inserted: string | null,
   deleted?: string,
 ) {
-  let at = 0
-  while (at < before.length && at < after.length && before[at] === after[at]) at++
-  if (inserted !== null) {
-    if (after !== before.slice(0, at) + inserted + before.slice(at))
-      throw new Error('Authored insertion differs from the requested text')
-  } else if (
-    !deleted ||
-    before.slice(at, at + deleted.length) !== deleted ||
-    after !== before.slice(0, at) + before.slice(at + deleted.length)
-  )
-    throw new Error('Authored deletion differs from the selected preceding character')
+  if (inserted === null) {
+    if (!hasExactInsertion(after, before, deleted))
+      throw new Error('Authored deletion differs from the selected preceding character')
+  } else if (!hasExactInsertion(before, after, inserted))
+    throw new Error('Authored insertion differs from the requested text')
 }
 
 export function expectedInsertion(
