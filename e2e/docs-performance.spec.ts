@@ -1158,6 +1158,7 @@ test('production document performance and correctness evidence', async () => {
       savedXml,
       printSource.source.tables,
       printSource.bindings.blocks,
+      { numberingXml: await saved.file('word/numbering.xml')?.async('string') },
     )
     const storyParts = Object.fromEntries(
       await Promise.all(
