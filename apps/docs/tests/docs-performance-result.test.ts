@@ -112,5 +112,11 @@ describe('Docs performance evidence', () => {
     expect(() => comparePerformanceReports(before, { ...after, summaries: {} })).toThrow(
       'scenarios',
     )
+    expect(() =>
+      comparePerformanceReports(before, {
+        ...after,
+        correctness: { printTextboxClipping: { 'box:1:0': [2] } },
+      }),
+    ).toThrow('textbox clipping differs')
   })
 })

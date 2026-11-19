@@ -1,9 +1,26 @@
 // @vitest-environment node
 import { expect, it } from 'vitest'
 import {
+  projectPrintedTextboxes,
   sourcePrintChains,
   sourceHeaderFooterChains,
 } from '../../../e2e/docs-performance-pdf-source'
+
+it('projects only source textbox characters measured beyond their own clip in every copy', () => {
+  const source = { 'box:1:0': 'A💠B', 'box:2:0': 'Untouched', body: 'Body' }
+  const first = { owner: 'box:1:0', page: 0, text: 'A💠B', clipped: [1, 2] }
+  const next = { owner: 'box:1:0', page: 1, text: 'A💠B', clipped: [2] }
+  expect(projectPrintedTextboxes(source, [first, next])).toEqual({
+    chains: { ...source, 'box:1:0': 'A💠' },
+    clippedTextboxes: { 'box:1:0': [2] },
+  })
+  expect(() => projectPrintedTextboxes(source, [{ ...first, text: 'A.B' }])).toThrow(
+    'exact archived story',
+  )
+  expect(() => projectPrintedTextboxes(source, [{ ...first, clipped: [3] }])).toThrow(
+    'clip index is invalid',
+  )
+})
 
 const p = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`
 const cell = (text: string, properties = '') =>

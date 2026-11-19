@@ -27,6 +27,7 @@ export function capturePrintSourceSnapshot() {
     throw new Error('Positioned PDF proof requires unscaled print preview')
   const snapshot: PdfSourceSnapshot = { pages: [], regions: [] }
   const pageSections: number[] = []
+  const textboxClips: Array<{ owner: string; page: number; text: string; clipped: number[] }> = []
   const intersect = (a: PdfRect, b: PdfRect): PdfRect | null => {
     const x = Math.max(a.x, b.x),
       y = Math.max(a.y, b.y)
@@ -159,7 +160,43 @@ export function capturePrintSourceSnapshot() {
       const ordinal = textbox.dataset.sourceTxbxIndex
       if (!index || !/^\d+$/.test(index) || ordinal === undefined || !/^\d+$/.test(ordinal))
         throw new Error('Printed textbox source identity is unknown')
-      add(textbox, `box:${index}:${ordinal}`, 'body')
+      const owner = `box:${index}:${ordinal}`
+      if (!visible(textbox)) continue
+      add(textbox, owner, 'body')
+      const style = getComputedStyle(textbox)
+      const clipX = style.overflowX === 'hidden' || style.overflowX === 'clip'
+      const clipY = style.overflowY === 'hidden' || style.overflowY === 'clip'
+      const ownBounds = textbox.getBoundingClientRect()
+      const walker = document.createTreeWalker(textbox, NodeFilter.SHOW_TEXT)
+      const range = document.createRange()
+      const clipped: number[] = []
+      const text: string[] = []
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        let offset = 0
+        for (const char of node.textContent ?? '') {
+          const start = offset
+          offset += char.length
+          if (/\s/u.test(char)) continue
+          // A missing or partially painted glyph remains required. Only the
+          // box's own measured clip can remove a character from this check.
+          if (clipX || clipY) {
+            range.setStart(node, start)
+            range.setEnd(node, offset)
+            const rects = [...range.getClientRects()].filter((r) => r.width > 0 && r.height > 0)
+            if (
+              rects.length &&
+              rects.every(
+                (r) =>
+                  (clipX && (r.right <= ownBounds.left || r.left >= ownBounds.right)) ||
+                  (clipY && (r.bottom <= ownBounds.top || r.top >= ownBounds.bottom)),
+              )
+            )
+              clipped.push(text.length)
+          }
+          text.push(char)
+        }
+      }
+      textboxClips.push({ owner, page, text: text.join(''), clipped })
     }
     for (const kind of ['header', 'footer'] as const)
       for (const area of paper.querySelectorAll<HTMLElement>(`.page-hf-${kind}`)) {
@@ -173,6 +210,7 @@ export function capturePrintSourceSnapshot() {
   return {
     snapshot,
     pageSections,
+    textboxClips,
     source,
     bindings,
     conditions: { media: 'print', devicePixelRatio, cssPxToPoints: 0.75 },

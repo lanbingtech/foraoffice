@@ -22,7 +22,11 @@ import { readEditFingerprint } from './docs-performance-edit-fingerprint'
 import { observeFirstVisibleSource } from './docs-performance-first-visible'
 import { runWindowsNativeIme, type NativeImeRequest } from './windows-native-ime'
 import { capturePrintSourceSnapshot } from './docs-performance-print-snapshot'
-import { sourcePrintChains, sourceHeaderFooterChains } from './docs-performance-pdf-source'
+import {
+  projectPrintedTextboxes,
+  sourcePrintChains,
+  sourceHeaderFooterChains,
+} from './docs-performance-pdf-source'
 import { readPositionedPdf, verifyPositionedPdf, pdfExportBudget } from './docs-performance-pdf'
 import {
   documentZoom,
@@ -1174,7 +1178,8 @@ test('production document performance and correctness evidence', async () => {
       (await live.page.locator('.status-page').innerText()).match(/\d+/g)?.at(-1),
     )
     const positioned = await readPositionedPdf(await readFile(pdf))
-    const printProof = verifyPositionedPdf(printChains, printSource.snapshot, positioned, host)
+    const projected = projectPrintedTextboxes(printChains, printSource.textboxClips)
+    const printProof = verifyPositionedPdf(projected.chains, printSource.snapshot, positioned, host)
     if (printed.getPageCount() !== visiblePages || printed.getPageCount() !== reopened.pages)
       throw new Error('PDF pages differ from the complete reopened editor')
     await writeFile(
@@ -1183,6 +1188,7 @@ test('production document performance and correctness evidence', async () => {
         {
           method:
             'independent source chains; exact baseline and full horizontal advance ownership; separate paint evidence required',
+          clippedTextboxes: projected.clippedTextboxes,
           ...printProof,
         },
         null,
@@ -1200,6 +1206,7 @@ test('production document performance and correctness evidence', async () => {
       visiblePages,
       pageSizesPoints: printed.getPages().map((page) => page.getSize()),
       printSourceChains: printProof.sourceChains,
+      printTextboxClipping: projected.clippedTextboxes,
     }
     details.push({
       operation: 'save-print',

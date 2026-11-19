@@ -66,6 +66,7 @@ export function assertExternalArtifacts(repository: string, artifacts: string): 
 type Report = {
   status: string
   condition: unknown
+  correctness?: { printTextboxClipping?: Record<string, number[]> }
   summaries: Record<string, ReturnType<typeof summarizeScenario>>
 }
 
@@ -75,6 +76,11 @@ export function comparePerformanceReports(before: Report, after: Report) {
     throw new Error('Both reports must be complete')
   if (JSON.stringify(before.condition) !== JSON.stringify(after.condition))
     throw new Error('Performance conditions differ')
+  if (
+    JSON.stringify(before.correctness?.printTextboxClipping) !==
+    JSON.stringify(after.correctness?.printTextboxClipping)
+  )
+    throw new Error('Printed textbox clipping differs between reports')
   const names = Object.keys(before.summaries).sort()
   if (
     !names.length ||

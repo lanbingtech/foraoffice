@@ -202,6 +202,38 @@ export function sourcePrintChains(
   return expected
 }
 
+/** The source story must match before projecting physically clipped characters. */
+export function projectPrintedTextboxes(
+  source: Record<string, string>,
+  evidence: ReadonlyArray<{ owner: string; page: number; text: string; clipped: number[] }>,
+) {
+  const clips = new Map<string, Set<number>>()
+  for (const observed of evidence) {
+    const authored = source[observed.owner]
+    if (!observed.owner.startsWith('box:') || !authored || authored !== observed.text)
+      throw new Error('Printed textbox visibility lacks an exact archived story')
+    const length = Array.from(authored).length
+    if (observed.clipped.some((index) => !Number.isInteger(index) || index < 0 || index >= length))
+      throw new Error('Printed textbox clip index is invalid')
+    const previous = clips.get(observed.owner)
+    clips.set(
+      observed.owner,
+      new Set(observed.clipped.filter((index) => previous === undefined || previous.has(index))),
+    )
+  }
+  const chains = { ...source }
+  const clippedTextboxes: Record<string, number[]> = {}
+  for (const owner of [...clips.keys()].sort()) {
+    const hidden = clips.get(owner)!
+    if (!hidden.size) continue
+    chains[owner] = Array.from(source[owner])
+      .filter((_, index) => !hidden.has(index))
+      .join('')
+    clippedTextboxes[owner] = [...hidden].sort((a, b) => a - b)
+  }
+  return { chains, clippedTextboxes }
+}
+
 /** Narrow independent HF contract exercised by the supplied fixture: default
  * inherited parts and decimal PAGE. ECMA-376-1:2016 §§17.10/17.6.12/17.16.5.44.
  * Other variants/field modes remain explicit unsupported conditions. */
