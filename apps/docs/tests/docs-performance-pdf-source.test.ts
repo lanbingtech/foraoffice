@@ -1,6 +1,9 @@
 // @vitest-environment node
 import { expect, it } from 'vitest'
-import { sourcePrintChains } from '../../../e2e/docs-performance-pdf-source'
+import {
+  sourcePrintChains,
+  sourceHeaderFooterChains,
+} from '../../../e2e/docs-performance-pdf-source'
 
 const p = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`
 const cell = (text: string, properties = '') =>
@@ -114,4 +117,99 @@ it('keeps an empty uncovered merge-continuation gap distinct from an authored ed
     'T:0:1': 'Topright',
     'T:1:1': 'Bottomright',
   })
+})
+
+it('derives default inherited header/footer stories and decimal PAGE from raw section/relationship XML', () => {
+  const relNs = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+  const partNs = 'http://schemas.openxmlformats.org/package/2006/relationships'
+  const field =
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+    '<w:r><w:instrText> PAGE \\* MERGEFORMAT </w:instrText></w:r>' +
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+    '<w:r><w:t>999</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+  const first = `<w:sectPr><w:headerReference w:type="default" r:id="H"/><w:footerReference w:type="default" r:id="F"/><w:pgNumType w:start="5"/></w:sectPr>`
+  const document = xml('')
+    .replace('<w:document ', `<w:document xmlns:r="${relNs}" `)
+    .replace(p('Before'), `<w:p><w:pPr>${first}</w:pPr></w:p>`)
+    .replace('</w:body>', '<w:sectPr><w:pgNumType w:start="103"/></w:sectPr></w:body>')
+  const relationships = `<Relationships xmlns="${partNs}"><Relationship Id="H" Type="${relNs}/header" Target="header1.xml"/><Relationship Id="F" Type="${relNs}/footer" Target="footer1.xml"/></Relationships>`
+  const header = `<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Page </w:t></w:r>${field}</w:p></w:hdr>`
+  const parts = {
+    'word/header1.xml': header,
+    'word/footer1.xml': `<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${p('Literal footer')}</w:ftr>`,
+  }
+  expect(sourceHeaderFooterChains(document, '', relationships, parts, [0, 0, 1])).toEqual({
+    'hf:0:header': 'Page5',
+    'hf:0:footer': 'Literalfooter',
+    'hf:1:header': 'Page6',
+    'hf:1:footer': 'Literalfooter',
+    'hf:2:header': 'Page103',
+    'hf:2:footer': 'Literalfooter',
+  })
+  expect(() =>
+    sourceHeaderFooterChains(
+      document,
+      '',
+      relationships.replace('/header"', '/footer"'),
+      parts,
+      [0],
+    ),
+  ).toThrow('Header/footer relationship')
+  expect(() =>
+    sourceHeaderFooterChains(
+      document,
+      '',
+      relationships,
+      { ...parts, 'word/header1.xml': header.replace(' PAGE ', ' NUMPAGES ') },
+      [0],
+    ),
+  ).toThrow('Unsupported header/footer field')
+})
+
+it('requires equivalent alternate HF stories and rejects unsupported fields, external parts and missing source text', () => {
+  const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+  const doc = `<w:document xmlns:w="${w}" xmlns:r="${rel}"><w:body><w:sectPr><w:headerReference w:type="default" r:id="H"/></w:sectPr></w:body></w:document>`
+  const relationships = `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="H" Type="${rel}/header" Target="header1.xml"/></Relationships>`
+  const value =
+    p('Page') + '<w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>999</w:t></w:r></w:fldSimple></w:p>'
+  const header = `<w:hdr xmlns:w="${w}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:AlternateContent><mc:Choice Requires="x">${value}</mc:Choice><mc:Fallback>${value}</mc:Fallback></mc:AlternateContent></w:hdr>`
+  const parts = { 'word/header1.xml': header }
+  expect(sourceHeaderFooterChains(doc, '', relationships, parts, [0])).toEqual({
+    'hf:0:header': 'Page1',
+  })
+  expect(() =>
+    sourceHeaderFooterChains(
+      doc,
+      '',
+      relationships,
+      {
+        'word/header1.xml': header.replace('<mc:Fallback>', '<mc:Fallback>' + p('Lost variant')),
+      },
+      [0],
+    ),
+  ).toThrow('alternate text requires a consumer profile')
+  expect(() =>
+    sourceHeaderFooterChains(
+      doc,
+      '',
+      relationships,
+      {
+        'word/header1.xml': header.replaceAll('w:instr="PAGE"', 'w:instr="NUMPAGES"'),
+      },
+      [0],
+    ),
+  ).toThrow('Unsupported header/footer field instruction')
+  expect(() =>
+    sourceHeaderFooterChains(
+      doc,
+      '',
+      relationships.replace(' Target=', ' TargetMode="External" Target='),
+      parts,
+      [0],
+    ),
+  ).toThrow('wrong type/mode')
+  expect(() => sourceHeaderFooterChains(doc, '', relationships, {}, [0])).toThrow(
+    'target is missing',
+  )
 })

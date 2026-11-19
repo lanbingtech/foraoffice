@@ -19,12 +19,18 @@ if (!['qt', 'electron', 'browser'].includes(process.env.FORAOFFICE_PERF_HOST ?? 
   throw new Error('Set FORAOFFICE_PERF_HOST to qt, electron or browser')
 if (!process.env.FORAOFFICE_PERF_LABEL)
   throw new Error('Set FORAOFFICE_PERF_LABEL to identify this baseline/candidate run')
+const timeout = Number(
+  process.env.FORAOFFICE_PERF_TIMEOUT_MS ??
+    (process.env.FORAOFFICE_PERF_SMOKE === '1' ? 30 : 60) * 60_000,
+)
+if (!Number.isSafeInteger(timeout) || timeout <= 0)
+  throw new Error('FORAOFFICE_PERF_TIMEOUT_MS must be a positive whole-run limit')
 
 export default defineConfig({
   testDir: '.',
   testMatch: 'docs-performance.spec.ts',
   outputDir: join(artifacts, 'playwright'),
-  timeout: 30 * 60_000,
+  timeout,
   fullyParallel: false,
   workers: 1,
   retries: 0,

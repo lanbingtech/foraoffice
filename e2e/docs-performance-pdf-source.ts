@@ -196,3 +196,188 @@ export function sourcePrintChains(
   expected.body = mainStoryOracle(remaining).textRuns.join('')
   return expected
 }
+
+/** Narrow independent HF contract exercised by the supplied fixture: default
+ * inherited parts and decimal PAGE. ECMA-376-1:2016 §§17.10/17.6.12/17.16.5.44.
+ * Other variants/field modes remain explicit unsupported conditions. */
+export function sourceHeaderFooterChains(
+  documentXml: string,
+  settingsXml: string,
+  relationshipsXml: string,
+  parts: Record<string, string>,
+  pageSections: number[],
+): Record<string, string> {
+  const descendants = (nodes: Xml, scope: Record<string, string>): SourceElement[] =>
+    elements(nodes, scope).flatMap((element) => [
+      element,
+      ...descendants(element.children, element.scope),
+    ])
+  const enabled = (element: SourceElement) =>
+    !['0', 'false', 'off'].includes(String(wmlAttribute(element, 'val')))
+  if (
+    descendants(parse(settingsXml), {}).some(
+      (e) => wml.has(e.namespace) && e.local === 'evenAndOddHeaders' && enabled(e),
+    )
+  )
+    throw new Error('Unsupported odd/even header output expectation')
+  const sections = descendants(parse(documentXml), {}).filter(
+    (e) => wml.has(e.namespace) && e.local === 'sectPr',
+  )
+  if (!sections.length)
+    sections.push({ local: 'sectPr', namespace: '', scope: {}, attributes: {}, children: [] })
+  const relNamespaces = new Set([
+    'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+    'http://purl.oclc.org/ooxml/officeDocument/relationships',
+  ])
+  const rels = descendants(parse(relationshipsXml), {}).filter(
+    (e) =>
+      e.namespace === 'http://schemas.openxmlformats.org/package/2006/relationships' &&
+      e.local === 'Relationship',
+  )
+  const inherited = { header: '', footer: '' }
+  const sectionParts = sections.map((section) => {
+    if (children(section, 'titlePg').some(enabled))
+      throw new Error('Unsupported first-page header output expectation')
+    const numbering = children(section, 'pgNumType')[0]
+    const format = numbering && wmlAttribute(numbering, 'fmt')
+    if (format !== undefined && format !== 'decimal')
+      throw new Error('Unsupported page-number format')
+    const startValue = numbering && wmlAttribute(numbering, 'start')
+    const start = startValue === undefined ? undefined : Number(startValue)
+    if (start !== undefined && (!Number.isSafeInteger(start) || start < 0))
+      throw new Error('Invalid page-number start')
+    const type = children(section, 'type')[0]
+    if (type && !['nextPage', 'continuous'].includes(String(wmlAttribute(type, 'val'))))
+      throw new Error('Unsupported section page-number parity')
+    for (const kind of ['header', 'footer'] as const) {
+      const references = children(section, `${kind}Reference`).filter(
+        (e) => wmlAttribute(e, 'type') === 'default',
+      )
+      if (references.length > 1) throw new Error('Duplicate default header/footer reference')
+      if (!references.length) continue
+      const reference = references[0]
+      const id = Object.entries(reference.attributes).find(([key]) => {
+        const [prefix, local] = key.slice(2).split(':')
+        return local === 'id' && relNamespaces.has(reference.scope[prefix])
+      })?.[1]
+      const matches = rels.filter((r) => r.attributes['@_Id'] === id)
+      const rel = matches[0]
+      if (
+        matches.length !== 1 ||
+        !rel ||
+        ![...relNamespaces].some((ns) => rel.attributes['@_Type'] === `${ns}/${kind}`) ||
+        ![undefined, 'Internal'].includes(rel.attributes['@_TargetMode'] as string | undefined)
+      )
+        throw new Error('Header/footer relationship is missing or has the wrong type/mode')
+      const target = new URL(
+        String(rel.attributes['@_Target']),
+        'https://archive.invalid/word/document.xml',
+      )
+      const part = target.pathname.slice(1)
+      if (
+        target.origin !== 'https://archive.invalid' ||
+        target.search ||
+        target.hash ||
+        !(part in parts)
+      )
+        throw new Error('Header/footer relationship target is missing')
+      inherited[kind] = part
+    }
+    return { ...inherited, start }
+  })
+  type Token = string | { page: true }
+  const project = (nodes: Xml, scope: Record<string, string>): Token[] => {
+    const output: Token[] = []
+    let field: { instruction: string; separated: boolean } | null = null
+    const page = (instruction: string) => {
+      if (!/^PAGE(?:\s+\\\*\s+MERGEFORMAT)?$/i.test(instruction.trim()))
+        throw new Error('Unsupported header/footer field instruction')
+      output.push({ page: true })
+    }
+    const text = (element: SourceElement) =>
+      element.children.map((node) => String(node['#text'] ?? '')).join('')
+    const walk = (nodes: Xml, scope: Record<string, string>) => {
+      for (const element of elements(nodes, scope)) {
+        if (
+          element.namespace === 'http://schemas.openxmlformats.org/markup-compatibility/2006' &&
+          element.local === 'AlternateContent'
+        ) {
+          if (field) throw new Error('Unsupported field crossing alternate content')
+          const alternatives = elements(element.children, element.scope).map((branch) =>
+            project(branch.children, branch.scope),
+          )
+          if (
+            !alternatives.length ||
+            alternatives.some(
+              (branch) => JSON.stringify(branch) !== JSON.stringify(alternatives[0]),
+            )
+          )
+            throw new Error('Header/footer alternate text requires a consumer profile')
+          output.push(...alternatives[0])
+          continue
+        }
+        if (wml.has(element.namespace)) {
+          if (element.local === 'fldSimple') {
+            page(String(wmlAttribute(element, 'instr')))
+            continue
+          }
+          if (element.local === 'fldChar') {
+            const type = wmlAttribute(element, 'fldCharType')
+            if (type === 'begin' && !field) field = { instruction: '', separated: false }
+            else if (type === 'separate' && field && !field.separated) field.separated = true
+            else if (type === 'end' && field) {
+              page(field.instruction)
+              field = null
+            } else throw new Error('Unsupported header/footer field topology')
+            continue
+          }
+          if (element.local === 'instrText') {
+            if (!field || field.separated)
+              throw new Error('Unsupported header/footer instruction topology')
+            field.instruction += text(element)
+            continue
+          }
+          if (element.local === 't') {
+            if (!field) output.push(text(element))
+            continue
+          }
+        }
+        walk(element.children, element.scope)
+      }
+    }
+    walk(nodes, scope)
+    if (field) throw new Error('Unclosed header/footer field')
+    return output
+  }
+  for (const [part, xml] of Object.entries(parts))
+    if (
+      /^word\/(footnotes|endnotes)\.xml$/.test(part) &&
+      descendants(parse(xml), {}).some(
+        (e) =>
+          wml.has(e.namespace) &&
+          e.local === 't' &&
+          e.children.some((n) => String(n['#text'] ?? '').trim()),
+      )
+    )
+      throw new Error('Text-bearing note output needs an explicit source owner')
+  const expected: Record<string, string> = {}
+  let previous = -1,
+    number = 0
+  pageSections.forEach((section, pageIndex) => {
+    const current = sectionParts[section]
+    if (!Number.isSafeInteger(section) || section < previous || !current)
+      throw new Error('Print section identity is missing or out of order')
+    number = section !== previous ? (current.start ?? number + 1) : number + 1
+    previous = section
+    for (const kind of ['header', 'footer'] as const) {
+      const part = current[kind]
+      const tokens = part ? project(parse(parts[part]), {}) : []
+      const text = tokens
+        .map((token) => (typeof token === 'string' ? token : String(number)))
+        .join('')
+        .replace(/\s+/g, '')
+      if (text) expected[`hf:${pageIndex}:${kind}`] = text
+    }
+  })
+  return expected
+}

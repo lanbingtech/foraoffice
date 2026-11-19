@@ -6,7 +6,7 @@ it('captures exact cell identity through real clip styles and ignores empty prun
   vi.stubGlobal('devicePixelRatio', 1)
   document.body.innerHTML =
     '<div class="pagination-preview" style="zoom:1" data-rect="0,0,800,1000">' +
-    '<div class="pv-page" style="width:800px;height:1000px" data-rect="0,0,800,998">' +
+    '<div class="pv-page" data-pv-section="0" style="width:800px;height:1000px" data-rect="0,0,800,998">' +
     '<div class="pv-clip" style="overflow:hidden" data-rect="0,100,800,800">' +
     '<div class="pv-content" data-pv-body data-rect="0,-500,800,2000">' +
     '<div class="pv-prune-spacer" data-rect="0,-500,800,600"></div>' +
@@ -62,6 +62,40 @@ it('captures exact cell identity through real clip styles and ignores empty prun
     source.tables[0].rows[0].cells[0].sourceCell = identity
     paragraph.style.clipPath = 'polygon(0 0,100% 0,0 100%)'
     expect(capturePrintSourceSnapshot).toThrow('Unsupported visible print clip-path')
+  } finally {
+    delete win.__previewDebug
+    delete win.__pageDebug
+    document.body.innerHTML = ''
+    vi.unstubAllGlobals()
+  }
+})
+
+it('captures section identity and positioned HF paragraphs without assigning them to the body', () => {
+  vi.stubGlobal('matchMedia', () => ({ matches: true }))
+  vi.stubGlobal('devicePixelRatio', 1)
+  document.body.innerHTML =
+    '<div class="pagination-preview" style="zoom:1"><div class="pv-page" data-pv-section="2" style="width:800px;height:1000px" data-rect="0,0,800,998">' +
+    '<div class="page-hf page-hf-header" data-rect="50,20,700,20"><div class="page-hf-para" data-rect="50,15,700,25">Header source</div></div></div></div>'
+  for (const element of document.querySelectorAll<HTMLElement>('[data-rect]')) {
+    const [x, y, width, height] = element.dataset.rect!.split(',').map(Number)
+    element.getBoundingClientRect = () => new DOMRect(x, y, width, height)
+  }
+  const win = window as unknown as Record<string, unknown>
+  win.__previewDebug = {
+    sourceCells: () => ({ version: 1, disposed: false, modelCurrent: true, tables: [] }),
+  }
+  win.__pageDebug = { sourceStories: () => ({ version: 1, disposed: false, blocks: [] }) }
+  try {
+    const captured = capturePrintSourceSnapshot()
+    expect(captured.pageSections).toEqual([2])
+    expect(captured.snapshot.regions).toContainEqual({
+      page: 0,
+      owner: 'hf:0:header',
+      role: 'body',
+      rect: { x: 37.5, y: 11.25, width: 525, height: 18.75 },
+    })
+    document.querySelector<HTMLElement>('.pv-page')!.removeAttribute('data-pv-section')
+    expect(capturePrintSourceSnapshot).toThrow('Print section identity is missing')
   } finally {
     delete win.__previewDebug
     delete win.__pageDebug

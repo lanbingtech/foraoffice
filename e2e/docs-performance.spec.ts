@@ -21,7 +21,7 @@ import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
 import { readEditFingerprint } from './docs-performance-edit-fingerprint'
 import { observeFirstVisibleSource } from './docs-performance-first-visible'
 import { capturePrintSourceSnapshot } from './docs-performance-print-snapshot'
-import { sourcePrintChains } from './docs-performance-pdf-source'
+import { sourcePrintChains, sourceHeaderFooterChains } from './docs-performance-pdf-source'
 import { readPositionedPdf, verifyPositionedPdf, pdfExportBudget } from './docs-performance-pdf'
 import {
   documentZoom,
@@ -420,6 +420,7 @@ test('production document performance and correctness evidence', async () => {
   }
   const metadata = {
     schema: 1,
+    wholeRunLimitMs: test.info().timeout,
     host,
     label,
     headless: host === 'browser',
@@ -812,7 +813,10 @@ test('production document performance and correctness evidence', async () => {
     const preservedParts = Object.keys(original.files).filter(
       (name) => /^word\/(media|embeddings)\//.test(name) && !original.files[name].dir,
     )
-    for (const name of preservedParts) {
+    const preservedStoryParts = Object.keys(original.files).filter((name) =>
+      /^word\/(header\d+|footer\d+|footnotes|endnotes)\.xml$/.test(name),
+    )
+    for (const name of [...preservedParts, ...preservedStoryParts]) {
       const part = saved.file(name)
       if (
         !part ||
@@ -889,6 +893,23 @@ test('production document performance and correctness evidence', async () => {
     )
     for (const story of expectedTextboxStories(savedXml, printSource.bindings.blocks))
       printChains[`box:${story.docxIndex}:${story.txbxIndex}`] = story.text
+    const storyParts = Object.fromEntries(
+      await Promise.all(
+        preservedStoryParts.map(
+          async (name) => [name, await saved.file(name)!.async('string')] as const,
+        ),
+      ),
+    )
+    Object.assign(
+      printChains,
+      sourceHeaderFooterChains(
+        savedXml,
+        (await saved.file('word/settings.xml')?.async('string')) ?? '',
+        (await saved.file('word/_rels/document.xml.rels')?.async('string')) ?? '',
+        storyParts,
+        printSource.pageSections,
+      ),
+    )
     const budget = pdfExportBudget(printSource.snapshot.pages)
     await writeFile(join(root, 'print-budget.json'), JSON.stringify(budget, null, 2))
     const pdf = await withDeadline(live.exportPdf(budget.timeoutMs), budget.timeoutMs, 'PDF export')
@@ -916,6 +937,7 @@ test('production document performance and correctness evidence', async () => {
       savedEdit: true,
       reopenedEdit: true,
       originalResourcesPreserved: preservedParts.length,
+      originalStoryPartsPreserved: preservedStoryParts.length,
       printedEdit: true,
       pdfPages: printed.getPageCount(),
       layoutPages: reopened.pages,

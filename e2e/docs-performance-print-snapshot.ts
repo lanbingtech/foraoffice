@@ -26,6 +26,7 @@ export function capturePrintSourceSnapshot() {
   if (!root || Number(getComputedStyle(root).zoom || '1') !== 1)
     throw new Error('Positioned PDF proof requires unscaled print preview')
   const snapshot: PdfSourceSnapshot = { pages: [], regions: [] }
+  const pageSections: number[] = []
   const intersect = (a: PdfRect, b: PdfRect): PdfRect | null => {
     const x = Math.max(a.x, b.x),
       y = Math.max(a.y, b.y)
@@ -39,6 +40,10 @@ export function capturePrintSourceSnapshot() {
   }
   const pages = [...root.querySelectorAll<HTMLElement>('.pv-page')]
   pages.forEach((paper, page) => {
+    const section = paper.dataset.pvSection
+    if (section === undefined || !/^\d+$/.test(section))
+      throw new Error('Print section identity is missing')
+    pageSections.push(Number(section))
     const origin = box(paper)
     const width = parseFloat(paper.style.width),
       height = parseFloat(paper.style.height)
@@ -141,9 +146,18 @@ export function capturePrintSourceSnapshot() {
         throw new Error('Printed textbox source identity is unknown')
       add(textbox, `box:${index}:${ordinal}`, 'body')
     }
+    for (const kind of ['header', 'footer'] as const)
+      for (const area of paper.querySelectorAll<HTMLElement>(`.page-hf-${kind}`)) {
+        const owner = `hf:${page}:${kind}`
+        add(area, owner, 'body')
+        // Anchored HF paragraphs can extend beyond the strip's normal-flow box.
+        for (const paragraph of area.querySelectorAll<HTMLElement>('.page-hf-para'))
+          add(paragraph, owner, 'body')
+      }
   })
   return {
     snapshot,
+    pageSections,
     source,
     bindings,
     conditions: { media: 'print', devicePixelRatio, cssPxToPoints: 0.75 },
