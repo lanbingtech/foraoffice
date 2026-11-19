@@ -1,0 +1,127 @@
+import { readFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
+import JSZip from 'jszip'
+import { XMLParser } from 'fast-xml-parser'
+import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
+
+export const PERFORMANCE_END = 'PERFORMANCE DOCUMENT END'
+
+/** Public, deterministic structural sample; it contains no private document text. */
+export async function buildPerformanceFixture(scale = 1): Promise<Uint8Array> {
+  if (!Number.isInteger(scale) || scale < 1 || scale > 10) throw new Error('Invalid fixture scale')
+  const wmf = await readFile(
+    resolve(__dirname, '../packages/docx-engine/tests/fixtures/mathtype-axb.wmf'),
+  )
+  const body: string[] = []
+  const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`
+  for (let group = 0; group < 17 * scale; group++) {
+    for (let p = 0; p < 13; p++)
+      body.push(
+        paragraph(
+          `Body ${group}-${p}: A reproducible document paragraph. 中文排版，标点压缩与换行。`.repeat(
+            2,
+          ),
+        ),
+      )
+    body.push(
+      '<w:tbl><w:tblPr><w:tblW w:w="9000" w:type="dxa"/></w:tblPr>' +
+        '<w:tblGrid>' +
+        '<w:gridCol w:w="1800"/>'.repeat(5) +
+        '</w:tblGrid>' +
+        Array.from(
+          { length: 17 },
+          (_, row) =>
+            '<w:tr>' +
+            (row === 0 ? '<w:trPr><w:tblHeader/></w:trPr>' : '') +
+            Array.from(
+              { length: 5 },
+              (_, column) =>
+                '<w:tc><w:tcPr><w:tcW w:w="1800" w:type="dxa"/></w:tcPr>' +
+                paragraph(`Cell ${group}-${row}-${column}: Editable table text 中文。`) +
+                '</w:tc>',
+            ).join('') +
+            '</w:tr>',
+        ).join('') +
+        '</w:tbl>',
+    )
+    if (group % 2 === 0)
+      body.push(
+        '<w:p><w:r><w:pict><v:shape style="width:144pt;height:36pt">' +
+          '<v:imagedata r:id="rId50"/></v:shape></w:pict></w:r></w:p>',
+      )
+  }
+  body.push(paragraph(PERFORMANCE_END))
+  return buildDocx({
+    bodyXml: body.join(''),
+    docRootExtraAttrs: 'xmlns:v="urn:schemas-microsoft-com:vml"',
+    extraRels:
+      '<Relationship Id="rId50" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/equation.wmf"/>',
+    binaryParts: [
+      {
+        path: 'word/media/equation.wmf',
+        base64: wmf.toString('base64'),
+        extension: 'wmf',
+        contentType: 'image/x-wmf',
+      },
+    ],
+  })
+}
+
+/** Independent OOXML tail oracle, used alongside pending-work and layout checks. */
+export async function documentOracle(
+  bytes: Uint8Array,
+): Promise<{ tail: string; textRuns: string[]; sections: string }> {
+  const archive = await JSZip.loadAsync(bytes)
+  const xml = await archive.file('word/document.xml')?.async('string')
+  if (!xml) throw new Error('Input has no document XML')
+  const parsed = new XMLParser({
+    preserveOrder: true,
+    removeNSPrefix: true,
+    trimValues: false,
+    parseTagValue: false,
+  }).parse(xml)
+  type Xml = Array<Record<string, unknown>>
+  const document = (parsed as Xml).find((entry) => entry.document)?.document as Xml | undefined
+  const body = document?.find((entry) => entry.body)?.body as Xml | undefined
+  const text = (nodes: Xml): string =>
+    nodes
+      .flatMap((entry) =>
+        Object.entries(entry).map(([key, value]) =>
+          key === 't'
+            ? text(value as Xml)
+            : key === '#text'
+              ? String(value)
+              : Array.isArray(value)
+                ? text(value as Xml)
+                : '',
+        ),
+      )
+      .join('')
+  const tail = body
+    ?.filter((entry) => entry.p)
+    .map((entry) => text(entry.p as Xml).trim())
+    .filter(Boolean)
+    .at(-1)
+  if (!tail)
+    throw new Error('Input requires a nonempty final body paragraph as completeness oracle')
+  const textRuns: string[] = []
+  const sectionSpecs: unknown[] = []
+  const visit = (nodes: Xml) => {
+    for (const entry of nodes)
+      for (const [key, value] of Object.entries(entry)) {
+        if (key === 't') {
+          const run = text(value as Xml).replace(/\s+/g, '')
+          if (run) textRuns.push(run)
+        } else {
+          if (key === 'sectPr') sectionSpecs.push(value)
+          if (Array.isArray(value)) visit(value as Xml)
+        }
+      }
+  }
+  visit(body ?? [])
+  return { tail, textRuns, sections: JSON.stringify(sectionSpecs) }
+}
+
+export async function documentTail(bytes: Uint8Array): Promise<string> {
+  return (await documentOracle(bytes)).tail
+}
