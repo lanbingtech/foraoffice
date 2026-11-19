@@ -21,6 +21,7 @@ export interface HostOptions {
 
 export interface PerformanceSession {
   page: Page
+  nativeProcessId?: number
   evidence: Record<string, unknown>
   open(): Promise<boolean | null>
   save(): Promise<void>
@@ -147,6 +148,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
       delete debuggerVersion.webSocketDebuggerUrl
       return {
         page,
+        nativeProcessId: child.pid,
         evidence: { kind: 'qt', rendering: 'normal-window', debuggerVersion },
         open: () =>
           editorPage.evaluate(async (path) => {
@@ -230,6 +232,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
       )
       return {
         page,
+        nativeProcessId: app.process().pid,
         evidence: {
           kind: 'electron',
           rendering: 'standalone-product',
