@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 const execute = promisify(execFile)
@@ -276,7 +276,7 @@ export async function runWindowsNativeIme(request: NativeImeRequest): Promise<Na
       '-ExecutionPolicy',
       'Bypass',
       '-File',
-      fileURLToPath(new URL('./native-ime.ps1', import.meta.url)),
+      resolve(__dirname, 'native-ime.ps1'),
       '-RequestBase64',
       Buffer.from(JSON.stringify(request), 'utf8').toString('base64'),
     ],
