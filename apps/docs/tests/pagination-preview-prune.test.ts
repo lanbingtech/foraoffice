@@ -74,11 +74,16 @@ describe('prunedCloneHtml', () => {
 
 describe('shouldPruneClones', () => {
   it('keeps full clones for a document that fits both budgets', () => {
-    expect(shouldPruneClones(20, 500, 20_000)).toBe(false)
+    expect(shouldPruneClones(20, 500, 2_000)).toBe(false)
   })
 
   it('prunes once pages x blocks passes the block budget', () => {
-    expect(shouldPruneClones(300, 500, 1_000)).toBe(true)
+    expect(shouldPruneClones(300, 500, 600)).toBe(true)
+  })
+
+  it('prunes full clones for the measured 39-page print DOM', () => {
+    // Use a block count below the block budget to exercise the element budget.
+    expect(shouldPruneClones(39, 500, 5_826)).toBe(true)
   })
 
   it('prunes a page-heavy document whose few blocks carry a huge DOM', () => {
