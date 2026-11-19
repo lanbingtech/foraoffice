@@ -154,6 +154,68 @@ public static class DocsNativeIme {
     }
     return $snapshot
   }
+  function Read-OsTrayObservation {
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $started = [DateTime]::UtcNow.ToString('o')
+    $beforeTray = Assert-Focus
+    $currentOwner = Get-WindowOwner $window
+    if ($currentOwner.targetProcessId -ne $owned.targetProcessId -or
+        $currentOwner.processStartTime -cne $owned.processStartTime -or
+        $currentOwner.threadId -ne $owned.threadId) { throw 'The owned window identity changed before OS tray inspection' }
+    $taskbars = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
+      [System.Windows.Automation.TreeScope]::Children,
+      [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Shell_TrayWnd'))
+    $providers = @()
+    $modes = @()
+    foreach ($taskbar in $taskbars) {
+      $items = $taskbar.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+      foreach ($item in $items) {
+        $current = $item.Current
+        if ($current.ClassName -ne 'SystemTray.NormalButton' -or
+            $current.AutomationId -ne 'SystemTrayIcon' -or $current.IsOffscreen -or
+            -not $current.IsEnabled -or $current.ControlType -ne [System.Windows.Automation.ControlType]::Button) { continue }
+        $name = $current.Name
+        $providerMatch = $name -match '(?:^|\r?\n)\u5fae\u8f6f\u62fc\u97f3(?:\r?\n|$)'
+        $modeMatch = $name -match '^\u6258\u76d8\u8f93\u5165\u6307\u793a\u5668 \u4e2d\u6587\u6a21\u5f0f(?:\r?\n|$)'
+        if (-not $providerMatch -and -not $modeMatch) { continue }
+        $shellProcess = Get-Process -Id $current.ProcessId -ErrorAction Stop
+        $image = $shellProcess.Path
+        $company = $shellProcess.MainModule.FileVersionInfo.CompanyName
+        $expectedImage = Join-Path ([Environment]::GetFolderPath('Windows')) 'explorer.exe'
+        if (-not $image.Equals($expectedImage, [StringComparison]::OrdinalIgnoreCase) -or
+            $company -ne 'Microsoft Corporation' -or $current.ProcessId -ne $taskbar.Current.ProcessId) {
+          throw 'The observed input indicator is not owned by the Windows shell'
+        }
+        $entry = @{
+          processId=$current.ProcessId; processStartTime=$shellProcess.StartTime.ToUniversalTime().ToString('o')
+          image=$image; company=$company; name=$name; helpText=$current.HelpText; itemStatus=$current.ItemStatus
+          className=$current.ClassName; automationId=$current.AutomationId
+          controlType=$current.ControlType.ProgrammaticName; offscreen=$current.IsOffscreen; enabled=$current.IsEnabled
+          boundsPhysical=$current.BoundingRectangle.ToString()
+        }
+        if ($providerMatch) { $providers += $entry }
+        if ($modeMatch) { $modes += $entry }
+      }
+    }
+    if ($providers.Count -ne 1 -or $modes.Count -ne 1 -or $providers[0].processId -ne $modes[0].processId) {
+      throw 'An unambiguous visible Microsoft Pinyin Chinese-mode indicator was not observed'
+    }
+    $afterTray = Assert-Focus
+    $lastOwner = Get-WindowOwner $window
+    if ($lastOwner.targetProcessId -ne $currentOwner.targetProcessId -or
+        $lastOwner.processStartTime -cne $currentOwner.processStartTime -or
+        $lastOwner.threadId -ne $currentOwner.threadId -or
+        $beforeTray.profile.keyboardLayout -cne $request.keyboardLayout -or
+        $afterTray.profile.keyboardLayout -cne $request.keyboardLayout -or
+        $afterTray.profile.languageId -ne 0x0804) { throw 'The owned input context changed during OS tray inspection' }
+    return @{
+      source='os-tray-uia'; owner=$currentOwner; taskbarClass='Shell_TrayWnd'
+      foregroundBefore=$beforeTray.foreground; foregroundAfter=$afterTray.foreground
+      startedUtc=$started; completedUtc=[DateTime]::UtcNow.ToString('o')
+      provider=$providers[0]; mode=$modes[0]
+    }
+  }
   function Request-Layout([string]$keyboardLayout) {
     $layout = [IntPtr]::new([long]$keyboardLayout)
     $count = [DocsNativeIme]::GetKeyboardLayoutList(0, $null)
@@ -181,14 +243,23 @@ public static class DocsNativeIme {
   }
   function Assert-Input {
     $snapshot = Assert-Focus
-    if ($snapshot.profile.keyboardLayout -cne $request.keyboardLayout -or
+    if ($request.observationSource -eq 'os-tray-uia') {
+      if ($snapshot.profile.keyboardLayout -cne $request.keyboardLayout -or
+          $snapshot.profile.languageId -ne 0x0804 -or
+          $snapshot.profile.open -eq $false -or $snapshot.profile.nativeMode -eq $false) {
+        throw 'The native input context disagrees with the requested Chinese input state'
+      }
+      $snapshot.osTray = Read-OsTrayObservation
+    } else {
+      if ($snapshot.profile.keyboardLayout -cne $request.keyboardLayout -or
         [string]::IsNullOrWhiteSpace($request.imeDescription) -or
         $snapshot.profile.imeDescription -cne $request.imeDescription) {
-      throw 'The observed input profile changed or is unavailable; no keys were submitted'
-    }
-    if ($snapshot.profile.languageId -ne 0x0804 -or
+        throw 'The observed input profile changed or is unavailable; no keys were submitted'
+      }
+      if ($snapshot.profile.languageId -ne 0x0804 -or
         $snapshot.profile.open -ne $true -or $snapshot.profile.nativeMode -ne $true) {
-      throw 'Chinese conversion mode is not confirmed; no keys were submitted'
+        throw 'Chinese conversion mode is not confirmed; no keys were submitted'
+      }
     }
     foreach ($key in @(0x10, 0x11, 0x12, 0x5b, 0x5c)) {
       if (([int][DocsNativeIme]::GetAsyncKeyState($key) -band 0x8000) -ne 0) {
@@ -250,9 +321,14 @@ public static class DocsNativeIme {
     }
     'focus' {
       $result.channel = 'win32-window-state'
-      if (-not $before.foregroundOwned -and -not [DocsNativeIme]::SetForegroundWindow($window)) {
-        throw 'Windows refused foreground activation of the owned window'
+      Add-Type -AssemblyName UIAutomationClient
+      Add-Type -AssemblyName UIAutomationTypes
+      $element = [System.Windows.Automation.AutomationElement]::FromHandle($window)
+      if ($element.Current.ProcessId -ne $owned.targetProcessId -or $element.Current.IsOffscreen) {
+        throw 'The UI Automation element is not the visible owned window'
       }
+      $result.focusMethod = 'UIAutomation.SetFocus'
+      $element.SetFocus()
       $result.after = Assert-Focus
     }
     'select-language' {
@@ -313,7 +389,10 @@ public static class DocsNativeIme {
           $events[$index * 2 + $release] = [DocsNativeIme]::ScanKey([uint16]($scan -band 0xff), $flags)
         }
       }
-      [void](Assert-Input)
+      $lastInputState = Assert-Input
+      if ($request.observationSource -eq 'os-tray-uia') {
+        $result.inputObservation = @{ before=$lastInputState.osTray }
+      }
       $result.submission = @{
         requestedEvents = $events.Length
         utcBefore = [DateTime]::UtcNow.ToString('o')
@@ -338,6 +417,9 @@ public static class DocsNativeIme {
           $recovery = "; compensating key-up inserted $released of 1 events"
         }
         throw "Windows inserted only $inserted of $($events.Length) native key events$recovery"
+      }
+      if ($request.observationSource -eq 'os-tray-uia') {
+        $result.inputObservation.after = Read-OsTrayObservation
       }
       $result.after = Get-Snapshot
     }

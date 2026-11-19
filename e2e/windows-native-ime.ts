@@ -19,7 +19,35 @@ export type NativeImeProfile = {
   nativeMode?: boolean | null
 }
 
-type RequestedProfile = Pick<NativeImeProfile, 'keyboardLayout' | 'imeDescription'>
+type ImmProfile = Pick<NativeImeProfile, 'keyboardLayout' | 'imeDescription'> & {
+  observationSource?: 'imm'
+}
+type RequestedProfile = ImmProfile | { keyboardLayout: string; observationSource: 'os-tray-uia' }
+
+export type NativeTrayObservation = {
+  source: 'os-tray-uia'
+  owner: NativeImeOwner
+  foregroundBefore: NativeImeOwner
+  foregroundAfter: NativeImeOwner
+  taskbarClass: string
+  startedUtc: string
+  completedUtc: string
+  provider: NativeTrayElement
+  mode: NativeTrayElement
+}
+
+type NativeTrayElement = {
+  processId: number
+  processStartTime: string
+  image: string
+  company: string
+  name: string
+  className: string
+  automationId: string
+  controlType: string
+  offscreen: boolean
+  enabled: boolean
+}
 
 export type NativeImeSnapshot = {
   owner: NativeImeOwner & { threadId: number }
@@ -64,13 +92,15 @@ export type NativeImeEvidence = {
     keyUpRecovery?: { requestedEvents: number; insertedEvents: number; win32Error: number }
   }
   foregroundRestored?: boolean
+  focusMethod?: 'UIAutomation.SetFocus'
+  inputObservation?: { before: NativeTrayObservation; after: NativeTrayObservation }
   error?: string
 }
 
 export type NativeImeRequest =
   | { action: 'inspect'; targetProcessId: number; includeCandidates?: boolean }
   | ({ action: 'focus' } & NativeImeOwner)
-  | ({ action: 'select-language' } & NativeImeOwner & RequestedProfile)
+  | ({ action: 'select-language' } & NativeImeOwner & ImmProfile)
   | ({ action: 'type'; text: string } & NativeImeOwner & RequestedProfile)
   | ({ action: 'commit' | 'cancel' } & NativeImeOwner & RequestedProfile)
   | ({
@@ -156,6 +186,63 @@ function requireSnapshot(
   requireProfile(value.profile, true)
 }
 
+function requireTrayObservation(
+  value: unknown,
+  owner: NativeImeSnapshot['owner'],
+  earliest: number,
+  latest: number,
+): asserts value is NativeTrayObservation {
+  requireEvidence(isRecord(value) && value.source === 'os-tray-uia', 'OS tray source')
+  requireEvidence(value.taskbarClass === 'Shell_TrayWnd', 'native system tray scope')
+  for (const identity of [value.owner, value.foregroundBefore, value.foregroundAfter]) {
+    requireOwner(identity)
+    requireEvidence(
+      identity.targetProcessId === owner.targetProcessId &&
+        identity.windowHandle === owner.windowHandle &&
+        identity.processStartTime === owner.processStartTime &&
+        'threadId' in identity &&
+        identity.threadId === owner.threadId,
+      'fresh owned foreground around OS tray observation',
+    )
+  }
+  requireEvidence(isTimestamp(value.startedUtc) && isTimestamp(value.completedUtc), 'OS tray clock')
+  requireEvidence(
+    Date.parse(value.startedUtc) >= earliest &&
+      Date.parse(value.completedUtc) >= Date.parse(value.startedUtc) &&
+      Date.parse(value.completedUtc) <= latest,
+    'fresh OS tray observation interval',
+  )
+  for (const element of [value.provider, value.mode]) {
+    requireEvidence(isRecord(element), 'native input indicator element')
+    requireEvidence(
+      element.className === 'SystemTray.NormalButton' &&
+        element.automationId === 'SystemTrayIcon' &&
+        element.controlType === 'ControlType.Button' &&
+        element.offscreen === false &&
+        element.enabled === true &&
+        isInteger(element.processId) &&
+        element.processId > 0 &&
+        typeof element.image === 'string' &&
+        /\\explorer\.exe$/i.test(element.image) &&
+        element.company === 'Microsoft Corporation' &&
+        isTimestamp(element.processStartTime) &&
+        Date.parse(element.processStartTime) <= Date.parse(value.startedUtc),
+      'observed Windows input indicator identity',
+    )
+  }
+  requireEvidence(isRecord(value.provider) && isRecord(value.mode), 'OS tray elements')
+  requireEvidence(
+    value.provider.processId === value.mode.processId &&
+      value.provider.processStartTime === value.mode.processStartTime &&
+      value.provider.image === value.mode.image &&
+      typeof value.provider.name === 'string' &&
+      /(?:^|\r?\n)微软拼音(?:\r?\n|$)/.test(value.provider.name) &&
+      typeof value.mode.name === 'string' &&
+      /^托盘输入指示器 中文模式(?:\r?\n|$)/.test(value.mode.name),
+    'observed Microsoft Pinyin Chinese mode',
+  )
+}
+
 export function parseWindowsNativeImeEvidence(
   request: NativeImeRequest,
   stdout: string,
@@ -190,6 +277,8 @@ export function parseWindowsNativeImeEvidence(
   if (request.action === 'focus' || request.action === 'select-language') {
     requireEvidence(after?.foregroundOwned && after.focusOwned, 'owned foreground focus')
   }
+  if (request.action === 'focus')
+    requireEvidence(value.focusMethod === 'UIAutomation.SetFocus', 'owned focus activation method')
   if (request.action === 'select-language') {
     requireEvidence(
       after?.profile.keyboardLayout === request.keyboardLayout &&
@@ -210,13 +299,22 @@ export function parseWindowsNativeImeEvidence(
       requireEvidence(snapshot.foregroundOwned && snapshot.focusOwned, 'owned native input focus')
       requireEvidence(
         snapshot.profile.keyboardLayout === request.keyboardLayout &&
-          !!request.imeDescription.trim() &&
-          snapshot.profile.imeDescription === request.imeDescription &&
-          snapshot.profile.languageId === 0x0804 &&
-          snapshot.profile.open === true &&
-          snapshot.profile.nativeMode === true,
-        'confirmed Chinese input profile and mode',
+          snapshot.profile.languageId === 0x0804,
+        'native input locale',
       )
+      if (request.observationSource !== 'os-tray-uia')
+        requireEvidence(
+          !!request.imeDescription.trim() &&
+            snapshot.profile.imeDescription === request.imeDescription &&
+            snapshot.profile.open === true &&
+            snapshot.profile.nativeMode === true,
+          'confirmed IMM input profile and mode',
+        )
+      else
+        requireEvidence(
+          snapshot.profile.open !== false && snapshot.profile.nativeMode !== false,
+          'conflicting native IME mode observations',
+        )
     }
     const expected = request.action === 'type' ? request.text.length * 2 : 2
     requireEvidence(isRecord(value.submission), 'native key submission')
@@ -245,6 +343,21 @@ export function parseWindowsNativeImeEvidence(
       'native submission QPC interval',
     )
     requireEvidence(isInteger(value.submission.win32Error), 'native submission Win32 result')
+    if (request.observationSource === 'os-tray-uia') {
+      requireEvidence(isRecord(value.inputObservation), 'OS tray input observations')
+      requireTrayObservation(
+        value.inputObservation.before,
+        value.before.owner,
+        Date.parse(value.before.observedUtc),
+        Date.parse(value.submission.utcBefore),
+      )
+      requireTrayObservation(
+        value.inputObservation.after,
+        value.before.owner,
+        Date.parse(value.submission.utcAfter),
+        Date.parse(after.observedUtc),
+      )
+    }
   }
   return value as NativeImeEvidence
 }
@@ -262,6 +375,7 @@ export async function runWindowsNativeIme(request: NativeImeRequest): Promise<Na
     request.action !== 'inspect' &&
     request.action !== 'focus' &&
     request.action !== 'restore' &&
+    request.observationSource !== 'os-tray-uia' &&
     !request.imeDescription.trim()
   )
     throw new Error('An observed IME description is required')
