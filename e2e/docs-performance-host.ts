@@ -109,12 +109,34 @@ async function nativeSaveDialog(
   )
 }
 
-async function triggerPdf(page: Page): Promise<void> {
+async function triggerPdf(page: Page, useVisiblePointer = false): Promise<void> {
   if (await page.locator('.pagination-preview').count()) {
-    await page
+    const button = page
       .locator('.pv-toolbar')
       .getByRole('button', { name: 'Export PDF', exact: true })
-      .click({ timeout: 30_000 })
+    if (useVisiblePointer) {
+      // The browser preview toolbar is already onscreen. Avoid the driver's
+      // automatic scroll through the complete print DOM after media restoration.
+      const point = await button.evaluate(
+        (element) => {
+          const rect = element.getBoundingClientRect()
+          const x = Math.floor(rect.x + rect.width / 2)
+          const y = Math.floor(rect.y + rect.height / 2)
+          if (
+            !matchMedia('screen').matches ||
+            rect.width <= 0 ||
+            rect.height <= 0 ||
+            element.matches(':disabled') ||
+            !element.contains(document.elementFromPoint(x, y))
+          )
+            throw new Error('Browser preview export button does not own its pointer target')
+          return { x, y }
+        },
+        undefined,
+        { timeout: 75_000 },
+      )
+      await page.mouse.click(point.x, point.y)
+    } else await button.click({ timeout: 30_000 })
     return
   }
   await page.getByRole('button', { name: 'File', exact: true }).click({ timeout: 30_000 })
@@ -465,7 +487,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
       if (!saved) throw new Error('Browser public save returned false')
     },
     async exportPdf() {
-      await triggerPdf(page)
+      await triggerPdf(page, true)
       return pdf
     },
     async close() {

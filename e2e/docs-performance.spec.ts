@@ -1115,6 +1115,12 @@ test('production document performance and correctness evidence', async () => {
     await focus!.end()
     if (nativeImeRequested) nativeImeAcceptance.status = 'commit-cancel-save-reopen-verified'
     currentScenario = 'save-print'
+    const pageStatus = live.page.locator('.status-page')
+    const reopenedStatus = await pageStatus.innerText()
+    await writeFile(
+      join(root, 'reopened-page-count.json'),
+      JSON.stringify({ status: reopenedStatus, layoutSlices: reopened.pages }, null, 2),
+    )
     // Source geometry/output verification is untimed. Use the product preview,
     // the same preview used by its native PDF export, before reading exact identities.
     await withDeadline(
@@ -1181,15 +1187,12 @@ test('production document performance and correctness evidence', async () => {
     await writeFile(join(root, 'print-budget.json'), JSON.stringify(budget, null, 2))
     const pdf = await withDeadline(live.exportPdf(budget.timeoutMs), budget.timeoutMs, 'PDF export')
     const printed = await waitForPdf(pdf)
-    const visiblePages = Number(
-      (await live.page.locator('.status-page').innerText()).match(/\d+/g)?.at(-1),
-    )
+    const statusAfterPrint = await pageStatus.innerText()
+    const visiblePages = Number(statusAfterPrint.match(/\d+/g)?.at(-1))
     const positioned = await readPositionedPdf(await readFile(pdf))
     const projected = projectPrintedTextboxes(printChains, printSource.textboxClips)
     const toc = projectPrintedTocLeaders(savedXml, projected.chains, printSource.tocLeaders)
     const printProof = verifyPositionedPdf(toc.chains, printSource.snapshot, positioned, host)
-    if (printed.getPageCount() !== visiblePages || printed.getPageCount() !== reopened.pages)
-      throw new Error('PDF pages differ from the complete reopened editor')
     await writeFile(
       join(root, 'positioned-pdf-proof.json'),
       JSON.stringify(
@@ -1198,12 +1201,23 @@ test('production document performance and correctness evidence', async () => {
             'independent source chains; exact baseline and full horizontal advance ownership; separate paint evidence required',
           clippedTextboxes: projected.clippedTextboxes,
           authoredTocLeaders: Object.keys(toc.leaders).length,
+          pageCountObservations: {
+            reopenedStatus,
+            statusAfterPrint,
+            visiblePages,
+            layoutSlices: reopened.pages,
+            pdf: printed.getPageCount(),
+          },
           ...printProof,
         },
         null,
         2,
       ),
     )
+    if (printed.getPageCount() !== visiblePages || printed.getPageCount() !== reopened.pages)
+      throw new Error(
+        `PDF pages differ from the complete reopened editor (PDF ${printed.getPageCount()}, status ${visiblePages}, reopened slices ${reopened.pages})`,
+      )
     correctness = {
       savedEdit: true,
       reopenedEdit: true,
