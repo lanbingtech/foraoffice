@@ -1,3 +1,4 @@
+import { createPdfActualTextReader } from './docs-performance-pdf-actualtext'
 import { matchesPrintedTocLeader, type PdfTocLeader } from './docs-performance-toc'
 
 export interface PdfRect {
@@ -9,7 +10,7 @@ export interface PdfRect {
 export interface PdfTextPage {
   width: number
   height: number
-  items: Array<{ text: string; rect: PdfRect; baselineY: number }>
+  items: Array<{ text: string; actualText?: string; rect: PdfRect; baselineY: number }>
 }
 export interface PdfSourceSnapshot {
   pages: Array<{ width: number; height: number }>
@@ -47,12 +48,14 @@ export async function readPositionedPdf(bytes: Uint8Array): Promise<PdfTextPage[
   try {
     const pdf = await task.promise
     const result: PdfTextPage[] = []
+    const readActualText = createPdfActualTextReader(bytes)
     for (let number = 1; number <= pdf.numPages; number++) {
       const page = await pdf.getPage(number)
       if (page.rotate !== 0 || page.userUnit !== 1 || page.view[0] !== 0 || page.view[1] !== 0)
         throw new Error('Unsupported PDF page coordinate conditions')
       const viewport = page.getViewport({ scale: 1 })
-      const text = await page.getTextContent()
+      const text = await page.getTextContent({ includeMarkedContent: true })
+      const replacements = await readActualText(number - 1, text.items)
       const items: PdfTextPage['items'] = []
       for (const item of text.items) {
         if (!('str' in item) || !item.str.trim()) continue
@@ -70,8 +73,10 @@ export async function readPositionedPdf(bytes: Uint8Array): Promise<PdfTextPage[
         // A finite horizontal shear (synthetic italic) changes glyph ink above the
         // baseline, but preserves this LTR baseline and PDF.js horizontal advance.
         const point = viewport.convertToViewportPoint(x, y)
+        const actualText = replacements?.get(item)
         items.push({
           text: item.str,
+          ...(actualText === undefined ? {} : { actualText }),
           baselineY: point[1],
           rect: { x: point[0], y: point[1] - item.height, width: item.width, height: item.height },
         })
@@ -111,6 +116,7 @@ export function verifyPositionedPdf(
     throw new Error('PDF page count differs from authored preview')
   const actual = new Map<string, string>()
   const repeated = new Map<string, { owner: string; text: string }>()
+  let actualTextReplacements = 0
   pages.forEach((page, pageIndex) => {
     const source = snapshot.pages[pageIndex]
     if (
@@ -125,7 +131,8 @@ export function verifyPositionedPdf(
     )
       throw new Error('PDF page size differs from authored preview')
     for (const item of page.items) {
-      const text = normalize(item.text)
+      const text = normalize(item.actualText ?? item.text)
+      if (item.actualText !== undefined) actualTextReplacements++
       if (!text) continue
       if (
         !Number.isFinite(item.baselineY) ||
@@ -174,6 +181,7 @@ export function verifyPositionedPdf(
   return {
     pages: pages.length,
     sourceChains: Object.keys(expected).length,
+    actualTextReplacements,
     repeatedHeaders: repeated.size,
     paperTolerancePoints: paperTolerance,
     regionTolerancePoints: regionTolerance,
