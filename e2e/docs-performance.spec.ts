@@ -11,6 +11,12 @@ import { buildPerformanceFixture, documentOracle } from './docs-performance-fixt
 import { collectPlatformFonts } from './docs-performance-fonts'
 import { captureFailureEvidence } from './docs-performance-evidence'
 import {
+  mainStoryOracle,
+  expectedTextboxStories,
+  verifyTextboxStories,
+} from './docs-performance-stories'
+import type { createDocumentStoryDiagnostic } from '../apps/docs/src/renderer/document-story-diagnostic'
+import {
   documentZoom,
   expectedInsertion,
   verifySavedContent,
@@ -41,7 +47,10 @@ type Activity = {
 }
 type ProbeWindow = Window & {
   __docsLayoutActivity?: { snapshot(): Activity }
-  __pageDebug?: { slices?: unknown[] }
+  __pageDebug?: {
+    slices?: unknown[]
+    sourceStories?: ReturnType<typeof createDocumentStoryDiagnostic>['snapshot']
+  }
   performanceReady?: boolean
   docsEditor?: unknown
   performanceProbe?: {
@@ -129,7 +138,13 @@ async function waitForLayout(
           const activity = win.__docsLayoutActivity?.snapshot()
           const pm = document.querySelector<HTMLElement>('.ProseMirror')
           const images = pm ? [...pm.querySelectorAll('img')] : []
-          const texts = pm?.textContent?.replace(/\s+/g, ' ') ?? ''
+          let texts = ''
+          if (pm) {
+            const walker = document.createTreeWalker(pm, NodeFilter.SHOW_TEXT)
+            for (let node = walker.nextNode(); node; node = walker.nextNode())
+              if (!node.parentElement?.closest('.doc-textbox')) texts += node.textContent ?? ''
+          }
+          texts = texts.replace(/\s+/g, ' ')
           const fonts = document.fonts
           const visible =
             !!pm && pm.getBoundingClientRect().width > 0 && pm.getBoundingClientRect().height > 0
@@ -145,7 +160,8 @@ async function waitForLayout(
             position = found + run.length
             return true
           })
-          const complete = !!end && texts.includes(end.replace(/\s+/g, ' ')) && orderedTextPresent
+          const tailPresent = !!end && normalized.includes(end.replace(/\s+/g, ''))
+          const complete = tailPresent && orderedTextPresent
           const last = pm?.lastElementChild?.getBoundingClientRect()
           return {
             activity,
@@ -160,7 +176,7 @@ async function waitForLayout(
             complete,
             incompleteText: complete ? undefined : texts,
             oracle: {
-              tailPresent: !!end && texts.includes(end.replace(/\s+/g, ' ')),
+              tailPresent,
               orderedTextPresent,
               missingRunIndex,
             },
@@ -289,6 +305,62 @@ async function firstVisibleContent(page: Page) {
   return { image, screenshotMs: now() - started }
 }
 
+async function verifyRenderedStories(page: Page, documentXml: string, artifact: string) {
+  const state = await withDeadline(
+    page.evaluate(() => {
+      const win = window as ProbeWindow
+      const sources = win.__pageDebug?.sourceStories?.()
+      const activity = win.__docsLayoutActivity?.snapshot()
+      const pm = document.querySelector('.editor-scroll .ProseMirror')
+      const boxes = [...(pm?.querySelectorAll<HTMLElement>('.doc-textbox') ?? [])].map((box) => {
+        const owner = box.closest<HTMLElement>('[data-idx]')?.dataset.idx
+        const ordinal = box.dataset.sourceTxbxIndex
+        const rect = box.getBoundingClientRect()
+        const style = getComputedStyle(box)
+        return {
+          docxIndex: owner !== undefined && /^\d+$/.test(owner) ? Number(owner) : null,
+          txbxIndex: ordinal !== undefined && /^\d+$/.test(ordinal) ? Number(ordinal) : undefined,
+          shapeId: box.dataset.sourceShapeId,
+          text: box.textContent ?? '',
+          laidOut:
+            rect.width > 0 &&
+            rect.height > 0 &&
+            style.display !== 'none' &&
+            style.visibility !== 'hidden',
+          rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        }
+      })
+      return { sources, activity, boxes }
+    }),
+    30_000,
+    'source-bound textbox fidelity',
+  )
+  // Raw source/story evidence belongs only to the configured external fidelity artifacts.
+  await writeFile(artifact, JSON.stringify(state, null, 2))
+  const sources = state.sources
+  if (
+    !sources ||
+    sources.version !== 1 ||
+    sources.disposed ||
+    !Number.isInteger(sources.documentGeneration) ||
+    sources.layoutGeneration !== state.activity?.generation
+  )
+    throw new Error(
+      'Current source-story diagnostics are missing, disposed or generation-mismatched',
+    )
+  const expected = expectedTextboxStories(
+    documentXml,
+    sources.blocks.filter((block) => block.textboxes.length > 0),
+  )
+  verifyTextboxStories(expected, state.boxes)
+  return {
+    documentGeneration: sources.documentGeneration,
+    layoutGeneration: sources.layoutGeneration,
+    textStories: expected.length,
+    renderedTextStories: state.boxes.filter((box) => box.text.trim()).length,
+  }
+}
+
 async function chooseText(page: Page, kind: 'paragraph' | 'table', fraction: number) {
   return page.evaluate(
     ({ kind, fraction }) => {
@@ -372,6 +444,8 @@ test('production document performance and correctness evidence', async () => {
     ? await readFile(process.env.FORAOFFICE_PERF_DOCX)
     : await buildPerformanceFixture(Number(process.env.FORAOFFICE_PERF_SCALE ?? 1))
   const oracle = await documentOracle(bytes)
+  const sourceXml = await (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string')
+  const mainStory = mainStoryOracle(sourceXml)
   const tail = oracle.tail
   const samples = process.env.FORAOFFICE_PERF_SMOKE === '1' ? 1 : 30
   const opens = process.env.FORAOFFICE_PERF_SMOKE === '1' ? 1 : 10
@@ -439,7 +513,8 @@ test('production document performance and correctness evidence', async () => {
       bytes: bytes.length,
       tailSha256: sha(tail),
       private: !!process.env.FORAOFFICE_PERF_DOCX,
-      orderedTextRuns: oracle.textRuns.length,
+      archivalTextRuns: oracle.textRuns.length,
+      orderedMainStoryRuns: mainStory.textRuns.length,
       sections: JSON.parse(oracle.sections),
     },
     machine: {
@@ -454,7 +529,9 @@ test('production document performance and correctness evidence', async () => {
     timingBoundary:
       'request/process start to observed visible content screenshot or verified settled state; observation upper bounds, not INP',
     diagnostics:
-      'internal pagination activity v1; pending timers, active passes, HF font probes and streaming; same product instrumentation required on both sides',
+      'internal pagination activity v1 and lazy source-story/cell diagnostics v1; same product instrumentation required on both sides',
+    sourceStoryMethod:
+      'independent WML main flow; unresolved AlternateContent main projections must agree; post-timing source-bound textbox text/geometry; all archival alternatives preserved separately; no complete Requires-profile conformance claim',
     compositionMethod:
       'CDP Input.imeSetComposition followed by Input.insertText; composition events recorded; not an OS IME benchmark',
     printConditions:
@@ -491,9 +568,21 @@ test('production document performance and correctness evidence', async () => {
       const firstIdleMs = await firstDiagnosticIdle(session.page, started)
       push('process-start-to-first-diagnostic-idle-observation', firstIdleMs)
       const verificationStarted = now()
-      const state = await waitForLayout(session.page, tail, 180_000, -1, started, oracle.textRuns)
+      const state = await waitForLayout(
+        session.page,
+        tail,
+        180_000,
+        -1,
+        started,
+        mainStory.textRuns,
+      )
       push('process-start-to-layout-verified-observation', now() - started)
       const verificationMs = now() - verificationStarted
+      const stories = await verifyRenderedStories(
+        session.page,
+        sourceXml,
+        join(workspace, 'source-stories.json'),
+      )
       const writeStarted = now()
       await writeFile(screenshot.path, screenshot.image)
       pendingScreenshots.splice(pendingScreenshots.indexOf(screenshot), 1)
@@ -501,6 +590,7 @@ test('production document performance and correctness evidence', async () => {
         launch,
         engine: session.evidence,
         state,
+        stories,
         initialOpenApiReturn: 'not observed during process startup',
         components: {
           firstIdleMs,
@@ -519,6 +609,7 @@ test('production document performance and correctness evidence', async () => {
         cachePolicy: metadata.cachePolicy,
         timingBoundary: metadata.timingBoundary,
         diagnostics: metadata.diagnostics,
+        sourceStoryMethod: metadata.sourceStoryMethod,
         compositionMethod: metadata.compositionMethod,
         fonts: state.fonts,
         platformFonts,
@@ -548,15 +639,21 @@ test('production document performance and correctness evidence', async () => {
         180_000,
         generation,
         started,
-        oracle.textRuns,
+        mainStory.textRuns,
       )
       push('hot-open-to-layout-verified-observation', now() - started)
+      const stories = await verifyRenderedStories(
+        live.page,
+        sourceXml,
+        join(root, `hot-open-${i}-stories.json`),
+      )
       details.push({
         operation: 'hot-open',
         index: i,
         apiReturnMs: opened === null ? null : apiReturnMs,
         firstIdleMs,
         state,
+        stories,
       })
     }
     for (const scenario of edits) {
@@ -705,6 +802,12 @@ test('production document performance and correctness evidence', async () => {
       saveTarget.insertOffset,
       saveMarker,
     )
+    const expectedMainStory = expectedInsertion(
+      { ...oracle, ...mainStory },
+      saveTarget.targetText,
+      saveTarget.insertOffset,
+      saveMarker,
+    )
     await live.page.keyboard.insertText(saveMarker)
     await waitForLayout(live.page, tail)
     await withDeadline(live.save(), 180_000, 'document save acknowledgement')
@@ -743,7 +846,12 @@ test('production document performance and correctness evidence', async () => {
       180_000,
       generation,
       now(),
-      expected.textRuns,
+      expectedMainStory.textRuns,
+    )
+    await verifyRenderedStories(
+      live.page,
+      await saved.file('word/document.xml')!.async('string'),
+      join(root, 'reopened-source-stories.json'),
     )
     expect(await live.page.locator('.ProseMirror').first().textContent()).toContain(saveMarker)
     const pdf = await withDeadline(live.exportPdf(), 180_000, 'PDF export')
