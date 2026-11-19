@@ -1236,6 +1236,8 @@ export interface FieldDisplay {
   level?: number
   /** bookmark anchor of the tocLine hyperlink (_Toc...), for click-to-jump */
   anchor?: string
+  /** PAGEREF instruction target; null means the archived page result is not resolved here. */
+  pageRefBookmark?: string | null
   /** tocLine whose whole result is a tracked deletion (left/right hold the deleted text) */
   deleted?: boolean
   /** the deleted tocLine's paragraph mark is deleted too: Word's markup view shows no line at all */

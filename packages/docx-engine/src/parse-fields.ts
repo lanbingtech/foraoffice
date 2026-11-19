@@ -1,6 +1,7 @@
 // Field-code display (PAGE, TOC, REF, ...) and TOC entry numbering.
 import { inlineEqFieldResults } from './eq-field'
 import { computeListMarkers, type ListItemRef } from './list-markers'
+import { fieldInstructions } from './parse-props'
 import { decodeEntities, plainText } from './parse-xml-text'
 import type { Block, FieldDisplay, NumberingDef, StyleInfo, TabStop } from './types'
 import {
@@ -250,6 +251,24 @@ function resultRuns(
   return out
 }
 
+/** ECMA-376 §17.16.5.45: PAGEREF identifies its bookmark in the instruction.
+ * The surrounding hyperlink can point somewhere else. Relative or explicitly
+ * formatted fields keep their cache until their own switches can be resolved. */
+function tocPageRefBookmark(resultXml: string): string | null | undefined {
+  const refs = fieldInstructions(resultXml)
+  for (const match of resultXml.matchAll(/<w:fldSimple\b[^>]*\bw:instr=(["'])(.*?)\1/g)) {
+    refs.push(decodeEntities(match[2]))
+  }
+  const pageRefs = refs.filter((instruction) => /^\s*PAGEREF\b/i.test(instruction))
+  if (pageRefs.length === 0) return undefined
+  if (pageRefs.length !== 1) return null
+  const match =
+    /^\s*PAGEREF\s+(?:"([^"]+)"|([^\s"\\]+))(?:\s+(?:\\h|\\\*\s+MERGEFORMAT))*\s*$/i.exec(
+      pageRefs[0],
+    )
+  return match?.[1] ?? match?.[2] ?? null
+}
+
 export function fieldDisplayOf(
   xml: string,
   styles?: Map<string, StyleInfo>,
@@ -291,11 +310,16 @@ export function fieldDisplayOf(
     // still excluding tab-stop definitions (<w:tab w:val=…/> in w:tabs).
     const re =
       /<w:(?:t|delText)(?:\s[^>]*)?>([\s\S]*?)<[/]w:(?:t|delText)>|<w:tab\s*[/]>|<w:tab>\s*<[/]w:tab>/g
+    const displayXml = deleted ? xml : live
+    let pageResultStart = 0
     let m: RegExpExecArray | null
-    while ((m = re.exec(deleted ? xml : live)) !== null) {
-      if (m[1] === undefined) segs.push('')
-      else segs[segs.length - 1] += m[1]
+    while ((m = re.exec(displayXml)) !== null) {
+      if (m[1] === undefined) {
+        segs.push('')
+        pageResultStart = re.lastIndex
+      } else segs[segs.length - 1] += m[1]
     }
+    const pageRefBookmark = tocPageRefBookmark(displayXml.slice(pageResultStart))
     const right = segs.length > 1 ? segs.pop()! : ''
     const numTab = tocNumTabOf(pPr, styles?.get(styleId), eff.tabStops)
     // a short first segment (spaced too when a left stop exists for it) is the outline
@@ -346,6 +370,7 @@ export function fieldDisplayOf(
       ...(num && numTab ? { numTabTwips: Math.max(0, numTab - firstLineStart) } : {}),
       ...(firstLine ? { hangTwips: firstLine } : {}),
       ...(anchor ? { anchor } : {}),
+      ...(pageRefBookmark === undefined ? {} : { pageRefBookmark }),
       ...(deleted ? { deleted } : {}),
       ...(deleted && /<w:del\b[^>]*\/>/.test(pPr) ? { markDeleted: true } : {}),
       ...(sz > 0 ? { szHalfPoints: sz } : {}),
