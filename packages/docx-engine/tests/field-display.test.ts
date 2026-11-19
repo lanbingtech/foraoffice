@@ -82,6 +82,7 @@ describe('field paragraph display model', () => {
       right: '2',
       level: 1,
       anchor: '_Toc1',
+      pageRefBookmark: '_Toc1',
       leader: 'dot',
       rightTabTwips: 9350,
     })

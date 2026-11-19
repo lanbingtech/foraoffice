@@ -4119,6 +4119,18 @@ export function App({
     }
     const scroller = document.querySelector('.editor-scroll')
     if (!scroller) return
+
+    const sourceBookmarkIndices = new Map<string, number>()
+    const tocBookmarksByIndex = new Map<number, string | null>()
+    for (const block of doc.parsed.blocks) {
+      if (block.docxIndex == null) continue
+      for (const bookmark of block.bookmarks ?? [])
+        sourceBookmarkIndices.set(bookmark, block.docxIndex)
+      for (const bookmark of block.hiddenBookmarks ?? [])
+        sourceBookmarkIndices.set(bookmark, block.docxIndex)
+      const ref = block.fieldDisplay?.pageRefBookmark
+      if (ref !== undefined) tocBookmarksByIndex.set(block.docxIndex, ref)
+    }
     // Blink lays text out at the zoomed font size and snaps line boxes to device
     // pixels, so block heights read under a 10% (or 88%) canvas zoom differ from
     // the 100% layout by up to a pixel per line — enough to move page breaks and
@@ -4735,26 +4747,32 @@ export function App({
           prev?.first === first && prev.last === last ? prev : { first, last },
         )
       }
-      // Auto-refresh TOC page numbers from the fresh slicing, like Word's field
-      // update. Gated on dirtyRef — our pagination approximates Word's, so a
-      // pristine open keeps the file's numbers. History-exempt: a field result
-      // change is not an edit to undo.
+      const tocPageTextAt = (top: number | undefined) =>
+        top === undefined
+          ? undefined
+          : cuts[Math.max(0, Math.min(pageOfY(slices, top), cuts.length - 1))]?.display
+      let bookmarkTops: Map<number, number> | undefined
+      const tocPageTextOf = (bookmark: string) => {
+        const index = sourceBookmarkIndices.get(bookmark)
+        if (index === undefined) return undefined
+        if (!bookmarkTops) {
+          bookmarkTops = new Map()
+          for (const block of blocks)
+            if (block.docxIndex != null) bookmarkTops.set(block.docxIndex, block.top)
+        }
+        return tocPageTextAt(bookmarkTops.get(index))
+      }
+      // A pristine open keeps the file's caches. A refresh on edit updates
+      // the model for save and remains outside the user's undo history.
       if (editor && dirtyRef.current && slices.length > 0) {
-        const nums = secList ? pageNumbers(slices, secList) : slices.map((_, n) => n + 1)
         const byEl = new Map(blocks.filter((b) => b.el).map((b) => [b.el as HTMLElement, b.top]))
         const headings = collectHeadings(editor.state.doc, editor.storage.listNumbering?.styles)
-        // formatted with the owning section's pgNumType, like the header/footer numbers
         const displays = headings.map((h) => {
           const dom = editor.view.nodeDOM(h.pos) as HTMLElement | null
-          const top = dom ? byEl.get(dom) : undefined
-          if (top === undefined) return undefined
-          const idx = Math.min(Math.max(pageOfY(slices, top) + 1, 1), nums.length)
-          const fmt =
-            secList?.[Math.min(slices[idx - 1].section, secList.length - 1)]?.pageNumberFmt
-          return formatPageNumber(nums[idx - 1] ?? idx, fmt)
+          return tocPageTextAt(dom ? byEl.get(dom) : undefined)
         })
         const tr = editor.state.tr
-        if (applyTocPageDisplays(editor.state.doc, tr, headings, displays)) {
+        if (applyTocPageDisplays(editor.state.doc, tr, headings, displays, tocPageTextOf)) {
           tr.setMeta('addToHistory', false)
           const before = editor.state.doc
           editor.view.dispatch(tr)
@@ -4786,7 +4804,6 @@ export function App({
           // per-page header/footer for the gaps (previous page's footer + next page's
           // header), variant-selected like the pagination preview (first page / odd-even /
           // per-section references), with real page numbers for the '#' marker
-          const parsed = doc.parsed
           // floating shapes (watermarks) must not stack into the strip (mirrors
           // PaginationPreview); they render separately as per-page behind-text images
           // measured and document-derived section lists agree except mid-transition:
@@ -5400,31 +5417,15 @@ export function App({
               `[pagination] ${gaps.length + overlayCutAnchors.length} page gaps built for ${boundaries} boundaries`,
             )
           }
-          // DOM-only (contenteditable=false subtrees the save path never reads);
-          // a pristine open keeps the file's cached results like the refresh above
-          const tocLines = pm.querySelectorAll<HTMLElement>('.doc-toc-line[data-toc-anchor]')
-          if (tocLines.length > 0 && slices.length > 0) {
-            const anchorIdx = new Map<string, number>()
-            for (const b of parsed.blocks) {
-              if (b.docxIndex == null) continue
-              for (const a of b.hiddenBookmarks ?? []) anchorIdx.set(a, b.docxIndex)
-            }
-            const topByIdx = new Map<number, number>()
-            for (const b of blocks) {
-              if (b.docxIndex != null) topByIdx.set(b.docxIndex, b.top)
-            }
-            backfillTocPageDom(
-              tocLines,
-              (anchor) => {
-                const idx = anchorIdx.get(anchor)
-                const top = idx === undefined ? undefined : topByIdx.get(idx)
-                if (top === undefined) return undefined
-                // pageAt is 1-based; pageNoTextOf indexes nums/slices 0-based
-                return pageNoTextOf(Math.max(0, Math.min(pageOfY(slices, top), slices.length - 1)))
-              },
-              dirtyRef.current,
-            )
-          }
+          // Empty caches can follow the measured page on pristine open.
+          backfillTocPageDom(
+            pm.querySelectorAll<HTMLElement>(
+              tocBookmarksByIndex.size ? '.doc-toc-line' : '.doc-toc-line[data-toc-anchor]',
+            ),
+            tocPageTextOf,
+            dirtyRef.current,
+            tocBookmarksByIndex,
+          )
         }
         tGapsBuild = performance.now() - tGaps0
         const tSet0 = performance.now()
