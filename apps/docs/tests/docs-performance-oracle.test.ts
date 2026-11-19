@@ -105,6 +105,52 @@ it('rejects retargeting preserved package relationships even when ordinary text 
   expect(() => verifySavedContent(before, saved)).toThrow('relationships')
 })
 
+it('verifies a persisted TOC page cache change against its archived field and observed page', async () => {
+  const run = (contents: string) => `<w:r>${contents}</w:r>`
+  const field = (kind: string) => run(`<w:fldChar w:fldCharType="${kind}"/>`)
+  const toc = (page: string, reference = 'Chapter', title = 'Index heading') =>
+    '<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Table of Contents"/>' +
+    '</w:docPartObj></w:sdtPr><w:sdtContent><w:p><w:hyperlink w:anchor="Chapter">' +
+    run(`<w:t>${title}</w:t>`) +
+    run('<w:tab/>') +
+    field('begin') +
+    run(`<w:instrText> PAGEREF ${reference} \\h </w:instrText>`) +
+    field('separate') +
+    run(`<w:t>${page}</w:t>`) +
+    field('end') +
+    '</w:hyperlink></w:p></w:sdtContent></w:sdt>'
+  const archive = (text: string, tocXml: string) =>
+    buildDocx({
+      bodyXml:
+        `<w:p>${run(`<w:t>${text}</w:t>`)}</w:p>${tocXml}` +
+        '<w:p><w:bookmarkStart w:id="1" w:name="Chapter"/>' +
+        run('<w:t>Body heading</w:t>') +
+        '<w:bookmarkEnd w:id="1"/></w:p>',
+    })
+  const source = await archive('Before', toc('10'))
+  const sourceXml = await (await JSZip.loadAsync(source)).file('word/document.xml')!.async('string')
+  const expected = expectedInsertion(await documentOracle(source), 'Before', 2, 'EDIT')
+  const checked = async (tocXml: string, page = '9') =>
+    verifySavedContent(
+      expected,
+      await documentOracle(await archive('BeEDITfore', tocXml), {
+        sourceXml,
+        observedTocPages: [{ anchor: 'Chapter', page }],
+      }),
+    )
+  await expect(checked(toc('9'))).resolves.toBeUndefined()
+  await expect(checked(toc('10'))).resolves.toBeUndefined()
+  await expect(checked(toc('7'))).rejects.toThrow()
+  await expect(checked(toc('9', 'Changed'))).rejects.toThrow()
+  await expect(checked(toc('9', 'Chapter', 'Changed title'))).rejects.toThrow()
+  await expect(
+    checked(toc('9').replace('<w:instrText>', '<w:instrText xmlns:w="urn:invalid-field">')),
+  ).rejects.toThrow('TOC field structure')
+  await expect(
+    checked(toc('9').replace('w:fldCharType="end"', 'w:fldCharType="begin"')),
+  ).rejects.toThrow()
+})
+
 it('requires original content, table structure and section settings in addition to the intended edit', () => {
   const expected = expectedInsertion(original, 'Alpha', 2, 'EDIT')
   expect(() =>

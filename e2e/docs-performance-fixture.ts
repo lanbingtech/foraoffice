@@ -88,20 +88,130 @@ export interface DocumentOracle {
   relationships: Array<{ name: string; sha256: string }>
 }
 
-export async function documentOracle(bytes: Uint8Array): Promise<DocumentOracle> {
-  const archive = await JSZip.loadAsync(bytes)
-  const xml = await archive.file('word/document.xml')?.async('string')
-  if (!xml) throw new Error('Input has no document XML')
+type Xml = Array<Record<string, unknown>>
+interface ObservedTocPage {
+  anchor: string | null
+  page?: string | null
+}
+
+const xmlChildren = (nodes: Xml, key: string) =>
+  nodes.filter((node) => Array.isArray(node[key])).map((node) => node[key] as Xml)
+
+const xmlAttribute = (node: Record<string, unknown> | undefined, key: string) =>
+  (node?.[':@'] as Record<string, unknown> | undefined)?.[`@_${key}`]
+
+function documentBody(xml: string, retainNamespace = false): Xml {
   const parsed = new XMLParser({
     preserveOrder: true,
-    removeNSPrefix: true,
+    removeNSPrefix: !retainNamespace,
     trimValues: false,
     parseTagValue: false,
     ignoreAttributes: false,
-  }).parse(xml)
-  type Xml = Array<Record<string, unknown>>
-  const document = (parsed as Xml).find((entry) => entry.document)?.document as Xml | undefined
-  const body = document?.find((entry) => entry.body)?.body as Xml | undefined
+  }).parse(xml) as Xml
+  if (!retainNamespace)
+    return xmlChildren(xmlChildren(parsed, 'document')[0] ?? [], 'body')[0] ?? []
+  const document = parsed.find((node) => node['w:document'])
+  const namespace = xmlAttribute(document, 'xmlns:w')
+  if (
+    namespace !== 'http://schemas.openxmlformats.org/wordprocessingml/2006/main' &&
+    namespace !== 'http://purl.oclc.org/ooxml/wordprocessingml/main'
+  )
+    throw new Error('TOC verification requires the WordprocessingML document namespace')
+  const body = (document!['w:document'] as Xml).find((node) => node['w:body'])
+  const bodyNamespace = xmlAttribute(body, 'xmlns:w')
+  if (!body || (bodyNamespace !== undefined && bodyNamespace !== namespace))
+    throw new Error('TOC verification requires the WordprocessingML body namespace')
+  return body['w:body'] as Xml
+}
+
+function tocFieldResult(paragraph: Xml) {
+  const link = paragraph.find((child) => child['w:hyperlink'])
+  const anchor = xmlAttribute(link, 'w:anchor')
+  if (typeof anchor !== 'string' || !/^\w+$/.test(anchor)) return undefined
+  const runs = xmlChildren(link!['w:hyperlink'] as Xml, 'w:r')
+  const [tab, begin, instruction, separate, result, end] = runs.slice(-6)
+  if (!tab?.some((node) => node['w:tab']) || !end) return undefined
+  const fieldType = (run: Xml) =>
+    xmlAttribute(
+      run.find((node) => node['w:fldChar']),
+      'w:fldCharType',
+    )
+  const code = xmlChildren(instruction, 'w:instrText')[0]?.[0]?.['#text']
+  const cache = xmlChildren(result, 'w:t')[0]?.[0]
+  if (
+    fieldType(begin) !== 'begin' ||
+    fieldType(separate) !== 'separate' ||
+    fieldType(end) !== 'end' ||
+    typeof code !== 'string' ||
+    !new RegExp(`^PAGEREF\\s+${anchor}(?:\\s+\\\\h)?$`, 'i').test(code.trim()) ||
+    typeof cache?.['#text'] !== 'string' ||
+    !/^\d+$/.test(cache['#text'])
+  )
+    return undefined
+  return { anchor, cache, page: cache['#text'] }
+}
+
+/** Restore a verified generated result only for the archival authored-text comparison. */
+function verifyTocPageCaches(source: Xml, saved: Xml, observed: readonly ObservedTocPage[]) {
+  const tocBlocks = (body: Xml) =>
+    body.flatMap((node, index) => {
+      if (!Array.isArray(node['w:sdt'])) return []
+      const control = node['w:sdt'] as Xml
+      const properties = xmlChildren(control, 'w:sdtPr')[0] ?? []
+      const docPart = xmlChildren(properties, 'w:docPartObj')[0] ?? []
+      return xmlAttribute(
+        docPart.find((child) => child['w:docPartGallery']),
+        'w:val',
+      ) === 'Table of Contents'
+        ? [{ index, node, control }]
+        : []
+    })
+  const before = tocBlocks(source)
+  const after = tocBlocks(saved)
+  if (before.length !== after.length) throw new Error('Saved TOC controls differ from original')
+  const restored = new Set<number>()
+  for (const [i, original] of before.entries()) {
+    const current = after[i]
+    if (original.index !== current.index) throw new Error('Saved TOC control changed position')
+    const paragraphs = (control: Xml) =>
+      xmlChildren(xmlChildren(control, 'w:sdtContent')[0] ?? [], 'w:p')
+    const savedParagraphs = paragraphs(current.control)
+    for (const [index, paragraph] of paragraphs(original.control).entries()) {
+      const archived = tocFieldResult(paragraph)
+      const persisted = savedParagraphs[index] && tocFieldResult(savedParagraphs[index])
+      if (!archived || !persisted || archived.anchor !== persisted.anchor) continue
+      if (archived.page === persisted.page) continue
+      const targets = observed.filter(({ anchor }) => anchor === archived.anchor)
+      if (targets.length !== 1 || targets[0].page !== persisted.page)
+        throw new Error('Saved TOC page cache differs from its observed bookmark field')
+      persisted.cache['#text'] = archived.page
+      restored.add(current.index)
+    }
+    if (JSON.stringify(original.node) !== JSON.stringify(current.node))
+      throw new Error('Saved TOC field structure or authored content differs from original')
+  }
+  return restored
+}
+
+export async function documentOracle(
+  bytes: Uint8Array,
+  toc?: { sourceXml: string; observedTocPages: readonly ObservedTocPage[] },
+): Promise<DocumentOracle> {
+  const archive = await JSZip.loadAsync(bytes)
+  const xml = await archive.file('word/document.xml')?.async('string')
+  if (!xml) throw new Error('Input has no document XML')
+  const body = documentBody(xml)
+  if (toc) {
+    const restored = verifyTocPageCaches(
+      documentBody(toc.sourceXml, true),
+      documentBody(xml, true),
+      toc.observedTocPages,
+    )
+    if (restored.size) {
+      const sourceBody = documentBody(toc.sourceXml)
+      for (const index of restored) body[index] = sourceBody[index]
+    }
+  }
   const text = (nodes: Xml): string =>
     nodes
       .flatMap((entry) =>

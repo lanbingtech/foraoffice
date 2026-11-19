@@ -375,7 +375,6 @@ test('production document performance and correctness evidence', async () => {
   const sourceXml = await (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string')
   const mainStory = mainStoryOracle(sourceXml)
   let workingOracle = oracle
-  let workingMainOracle = { ...oracle, ...mainStory }
   const nativeImeRequested = host === 'qt' && process.env.FORAOFFICE_PERF_NATIVE_IME === '1'
   const primerText = 'Performance runtime primer'
   const primer = await buildDocx({ bodyXml: `<w:p><w:r><w:t>${primerText}</w:t></w:r></w:p>` })
@@ -1031,12 +1030,6 @@ test('production document performance and correctness evidence', async () => {
             target.insertOffset,
             '测试',
           )
-          workingMainOracle = expectedInsertion(
-            workingMainOracle,
-            target.targetText,
-            target.insertOffset,
-            '测试',
-          )
         }
       }
       await focus!.end()
@@ -1053,14 +1046,17 @@ test('production document performance and correctness evidence', async () => {
       saveTarget.insertOffset,
       saveMarker,
     )
-    const expectedMainStory = expectedInsertion(
-      workingMainOracle,
-      saveTarget.targetText,
-      saveTarget.insertOffset,
-      saveMarker,
-    )
     await live.page.keyboard.insertText(saveMarker)
     await waitForLayout(live.page, tail)
+    const observedTocPages = await live.page.evaluate(() =>
+      [...document.querySelectorAll('.ProseMirror.doc-page .doc-toc-line[data-toc-anchor]')]
+        .filter((line) => !line.closest('.page-gap,.page-repeat-header'))
+        .map((line) => ({
+          anchor: line.getAttribute('data-toc-anchor'),
+          page: line.querySelector('.doc-toc-page')?.textContent,
+        })),
+    )
+    await writeFile(join(root, 'pre-save-toc-dom.json'), JSON.stringify(observedTocPages, null, 2))
     await withDeadline(live.save(), 180_000, 'document save acknowledgement')
     await expect
       .poll(
@@ -1072,7 +1068,8 @@ test('production document performance and correctness evidence', async () => {
       )
       .toBe(true)
     const original = await JSZip.loadAsync(bytes)
-    const saved = await JSZip.loadAsync(await readFile(document))
+    const savedBytes = await readFile(document)
+    const saved = await JSZip.loadAsync(savedBytes)
     const preservedParts = Object.keys(original.files).filter(
       (name) => /^word\/(media|embeddings)\//.test(name) && !original.files[name].dir,
     )
@@ -1087,8 +1084,10 @@ test('production document performance and correctness evidence', async () => {
       )
         throw new Error(`Saved original resource differs: ${name}`)
     }
-    const savedOracle = await documentOracle(await readFile(document))
+    const savedOracle = await documentOracle(savedBytes, { sourceXml, observedTocPages })
     verifySavedContent(expected, savedOracle)
+    const savedXml = await saved.file('word/document.xml')!.async('string')
+    const savedMainStory = mainStoryOracle(savedXml)
     const generation = await live.page.evaluate(
       () => (window as ProbeWindow).__docsLayoutActivity!.snapshot().generation,
     )
@@ -1100,13 +1099,9 @@ test('production document performance and correctness evidence', async () => {
       180_000,
       generation,
       now(),
-      expectedMainStory.textRuns,
+      savedMainStory.textRuns,
     )
-    await verifyRenderedStories(
-      live.page,
-      await saved.file('word/document.xml')!.async('string'),
-      join(root, 'reopened-source-stories.json'),
-    )
+    await verifyRenderedStories(live.page, savedXml, join(root, 'reopened-source-stories.json'))
     expect(await live.page.locator('.ProseMirror').first().textContent()).toContain(saveMarker)
     await focus!.end()
     if (nativeImeRequested) nativeImeAcceptance.status = 'commit-cancel-save-reopen-verified'
@@ -1149,7 +1144,6 @@ test('production document performance and correctness evidence', async () => {
       // Remove emulation; pinning screen would also override native printToPDF.
       await live.page.emulateMedia({ media: null })
     }
-    const savedXml = await saved.file('word/document.xml')!.async('string')
     const printChains = sourcePrintChains(
       savedXml,
       printSource.source.tables,
