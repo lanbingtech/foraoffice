@@ -2263,10 +2263,12 @@ function _placeTable(
         row.precedingSpanInk?.some(([top, bottom]) => top < available && bottom > available) &&
         !row.precedingSpanInk.some(([top, bottom]) => top < 0 && bottom > 0)
       ) {
+        chargedNotes -= notes
         if (turnBeforeRow(ri, repeatH)) {
           ri = -1
           continue
         }
+        chargedNotes += notes
       }
       const contentEnd =
         row.contentBottom !== undefined ? Math.min(row.contentBottom, row.height) : row.height
