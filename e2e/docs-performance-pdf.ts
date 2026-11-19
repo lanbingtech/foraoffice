@@ -7,7 +7,7 @@ export interface PdfRect {
 export interface PdfTextPage {
   width: number
   height: number
-  items: Array<{ text: string; rect: PdfRect }>
+  items: Array<{ text: string; rect: PdfRect; baselineY: number }>
 }
 export interface PdfSourceSnapshot {
   pages: Array<{ width: number; height: number }>
@@ -30,12 +30,23 @@ export async function readPositionedPdf(bytes: Uint8Array): Promise<PdfTextPage[
       const items: PdfTextPage['items'] = []
       for (const item of text.items) {
         if (!('str' in item) || !item.str.trim()) continue
-        const [, rotation, , , x, y] = item.transform as number[]
-        if (Math.abs(rotation) > 1e-6 || item.dir !== 'ltr')
-          throw new Error('Unsupported rotated or non-LTR PDF text')
+        const matrix = item.transform as number[]
+        const [a, b, , d, x, y] = matrix
+        if (item.dir !== 'ltr') throw new Error('Unsupported non-LTR PDF text')
+        if (
+          matrix.length !== 6 ||
+          matrix.some((value) => !Number.isFinite(value)) ||
+          a <= 0 ||
+          d <= 0 ||
+          Math.abs(b) > 1e-6
+        )
+          throw new Error('Unsupported rotated or sheared PDF text')
+        // A finite horizontal shear (synthetic italic) changes glyph ink above the
+        // baseline, but preserves this LTR baseline and PDF.js horizontal advance.
         const point = viewport.convertToViewportPoint(x, y)
         items.push({
           text: item.str,
+          baselineY: point[1],
           rect: { x: point[0], y: point[1] - item.height, width: item.width, height: item.height },
         })
       }
@@ -87,8 +98,18 @@ export function verifyPositionedPdf(
     for (const item of page.items) {
       const text = normalize(item.text)
       if (!text) continue
+      if (
+        !Number.isFinite(item.baselineY) ||
+        !Number.isFinite(item.rect.x) ||
+        !Number.isFinite(item.rect.width) ||
+        item.rect.width < 0
+      )
+        throw new Error('PDF baseline geometry is missing or invalid')
+      // PDF em height can cross a legitimate clip while the actual baseline remains inside.
+      // Retain the raw em box, and bind semantics by measured baseline plus full advance span.
+      const placement = { x: item.rect.x, y: item.baselineY, width: item.rect.width, height: 0 }
       let owners = snapshot.regions.filter(
-        (region) => region.page === pageIndex && contains(region.rect, item.rect),
+        (region) => region.page === pageIndex && contains(region.rect, placement),
       )
       if (owners.some((region) => region.owner !== 'body'))
         owners = owners.filter((region) => region.owner !== 'body')
@@ -110,9 +131,17 @@ export function verifyPositionedPdf(
   for (const [owner, text] of Object.entries(expected))
     if (normalize(text) !== (actual.get(owner) ?? ''))
       throw new Error(`Printed source chain differs: ${owner}`)
-  for (const repeat of repeated.values())
-    if (repeat.text !== normalize(expected[repeat.owner]))
-      throw new Error(`Repeated printed header differs: ${repeat.owner}`)
+  const requiredRepeats = new Map(
+    snapshot.regions
+      .filter((region) => region.role === 'repeat')
+      .map((region) => [`${region.page}/${region.owner}`, region.owner]),
+  )
+  for (const [key, owner] of requiredRepeats) {
+    if (!Object.hasOwn(expected, owner))
+      throw new Error('Repeated header has no independent source chain')
+    if ((repeated.get(key)?.text ?? '') !== normalize(expected[owner]))
+      throw new Error(`Repeated printed header differs: ${owner}`)
+  }
   return {
     pages: pages.length,
     sourceChains: Object.keys(expected).length,

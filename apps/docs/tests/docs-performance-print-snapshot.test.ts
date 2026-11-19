@@ -42,6 +42,12 @@ it('captures exact cell identity through real clip styles and ignores empty prun
     expect(captured.snapshot.regions.filter((region) => region.owner !== 'body')).toEqual([
       { page: 0, owner: 'T:0:1', role: 'body', rect: { x: 7.5, y: 90, width: 150, height: 270 } },
     ])
+    const paper = document.querySelector<HTMLElement>('.pv-page')!
+    paper.getBoundingClientRect = () => new DOMRect(0, 0, 799.98575, 998)
+    expect(capturePrintSourceSnapshot().snapshot.pages[0].width).toBe(600)
+    paper.getBoundingClientRect = () => new DOMRect(0, 0, 810, 998)
+    expect(capturePrintSourceSnapshot).toThrow('Authored print paper geometry is missing or scaled')
+    paper.getBoundingClientRect = () => new DOMRect(0, 0, 800, 998)
     source.version = 2
     expect(capturePrintSourceSnapshot).toThrow('Current print source diagnostics')
     source.version = 1

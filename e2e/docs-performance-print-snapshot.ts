@@ -42,7 +42,8 @@ export function capturePrintSourceSnapshot() {
     const origin = box(paper)
     const width = parseFloat(paper.style.width),
       height = parseFloat(paper.style.height)
-    if (!(width > 0 && height > 0) || Math.abs(origin.width - width) > 0.01)
+    // Qt print-media trial:793.733px authored→793.71875px layout (0.01425px quantization).
+    if (!(width > 0 && height > 0) || Math.abs(origin.width - width) > 0.02)
       throw new Error('Authored print paper geometry is missing or scaled')
     snapshot.pages.push({ width: width * 0.75, height: height * 0.75 })
     const visible = (element: HTMLElement): PdfRect | null => {

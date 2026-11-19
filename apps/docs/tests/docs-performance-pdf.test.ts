@@ -1,10 +1,14 @@
 // @vitest-environment node
 import { expect, it } from 'vitest'
-import { verifyPositionedPdf, readPositionedPdf } from '../../../e2e/docs-performance-pdf'
+import {
+  verifyPositionedPdf,
+  readPositionedPdf,
+  type PdfSourceSnapshot,
+} from '../../../e2e/docs-performance-pdf'
 import { PDFDocument, degrees } from 'pdf-lib'
 
 const rect = (x: number, y: number, width: number, height: number) => ({ x, y, width, height })
-const snapshot = {
+const snapshot: PdfSourceSnapshot = {
   pages: [
     { width: 600, height: 800 },
     { width: 600, height: 800 },
@@ -20,6 +24,7 @@ const snapshot = {
 }
 const item = (text: string, x: number, y: number) => ({
   text,
+  baselineY: y + 12,
   rect: rect(x, y, text.length * 5, 12),
 })
 const pages = [
@@ -95,6 +100,7 @@ it('reads real PDF text in page-relative top-left points and refuses an unaccoun
   const text = actual[0].items.find((item) => item.text === 'Cell source')!
   expect(text.rect.x).toBeCloseTo(20)
   expect(text.rect.y).toBeCloseTo(38)
+  expect(text.baselineY).toBeCloseTo(50)
   page.setRotation(degrees(90))
   await expect(readPositionedPdf(await pdf.save())).rejects.toThrow(
     'Unsupported PDF page coordinate conditions',
@@ -113,6 +119,70 @@ it('allows only the documented Qt paper-size deviation without widening source-r
   )
   qt[0].items[1].rect.x = 49.5
   expect(() => verifyPositionedPdf(expected, snapshot, qt, 'qt')).toThrow(
+    'Printed text has no source geometry',
+  )
+})
+
+it('requires a configured visible repeated header even when its entire PDF text disappears', () => {
+  const repeated = structuredClone(snapshot)
+  repeated.regions.push(
+    { page: 0, owner: 'header-cell', role: 'body', rect: rect(40, 82, 80, 14) },
+    { page: 1, owner: 'header-cell', role: 'repeat', rect: rect(40, 20, 80, 14) },
+  )
+  const output = structuredClone(pages)
+  output[0].items.splice(1, 0, item('Heading', 45, 83))
+  output[1].items.unshift(item('Heading', 45, 21))
+  const source = { ...expected, 'header-cell': 'Heading' }
+  expect(() => verifyPositionedPdf(source, repeated, output)).not.toThrow()
+  output[1].items.shift()
+  expect(() => verifyPositionedPdf(source, repeated, output)).toThrow(
+    'Repeated printed header differs',
+  )
+})
+
+it('rejects inverted and vertically sheared text matrices on an otherwise upright real PDF page', async () => {
+  for (const options of [{ rotate: degrees(180) }, { xSkew: degrees(12) }]) {
+    const pdf = await PDFDocument.create()
+    pdf
+      .addPage([300, 400])
+      .drawText('Unsupported transform', { x: 100, y: 200, size: 12, ...options })
+    await expect(readPositionedPdf(await pdf.save())).rejects.toThrow(
+      'Unsupported rotated or sheared PDF text',
+    )
+  }
+})
+
+it('preserves the measured baseline and horizontal advance of real synthetic-italic PDF text', async () => {
+  const pdf = await PDFDocument.create()
+  pdf.addPage([300, 400]).drawText('Synthetic italic', {
+    x: 20,
+    y: 350,
+    size: 12,
+    ySkew: degrees((Math.atan(0.25) * 180) / Math.PI),
+  })
+  const actual = await readPositionedPdf(await pdf.save())
+  expect(actual[0].items[0].baselineY).toBeCloseTo(50)
+  expect(actual[0].items[0].rect.x).toBeCloseTo(20)
+  expect(actual[0].items[0].rect.width).toBeGreaterThan(60)
+  expect(() =>
+    verifyPositionedPdf(
+      { body: 'Synthetic italic' },
+      {
+        pages: [{ width: 300, height: 400 }],
+        regions: [{ page: 0, owner: 'body', role: 'body', rect: rect(19, 49.8, 100, 1) }],
+      },
+      actual,
+    ),
+  ).not.toThrow()
+})
+
+it('uses measured PDF baselines and the full horizontal span when an em box crosses a legitimate clip', () => {
+  const output = structuredClone(pages)
+  output[1].items[0].rect.y = 48.8
+  output[1].items[0].baselineY = 60.8
+  expect(() => verifyPositionedPdf(expected, snapshot, output)).not.toThrow()
+  output[1].items[0].baselineY = 49
+  expect(() => verifyPositionedPdf(expected, snapshot, output)).toThrow(
     'Printed text has no source geometry',
   )
 })

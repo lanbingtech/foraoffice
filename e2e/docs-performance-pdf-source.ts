@@ -16,6 +16,7 @@ interface SourceTable {
     rowIndex: number
     cells: Array<{
       gridGap: boolean
+      colspan?: number
       sourceCell?: { table: string; row: number; cell: number } | null
     }>
   }>
@@ -49,6 +50,11 @@ const children = (element: SourceElement, local: string) =>
   elements(element.children, element.scope).filter(
     (child) => wml.has(child.namespace) && child.local === local,
   )
+const wmlAttribute = (element: SourceElement, local: string) =>
+  Object.entries(element.attributes).find(([name]) => {
+    const [prefix, attribute] = name.slice(2).split(':')
+    return attribute === local && wml.has(element.scope[prefix])
+  })?.[1]
 
 /** Raw archive XML supplies text; model identity supplies only the source address, never expected text. */
 export function sourcePrintChains(
@@ -130,21 +136,54 @@ export function sourcePrintChains(
       if (row.rowIndex !== r) throw new Error('Source model row address differs')
       const cells = children(rows[r], 'tc'),
         mapped = new Set<number>()
+      const edge = (local: string) => {
+        const node = children(rows[r], 'trPr').flatMap((pr) => children(pr, local))[0]
+        if (!node) return 0
+        const value = Number(wmlAttribute(node, 'val'))
+        if (!Number.isSafeInteger(value) || value < 0) throw new Error('Invalid authored grid edge')
+        return value
+      }
+      const before = edge('gridBefore'),
+        after = edge('gridAfter')
+      // parse.ts inserts one placeholder slot per authored edge, even for multiple columns.
+      const offset = before > 0 ? 1 : 0
+      const addresses = new Set<number>()
+      const edges = new Set<number>()
       for (const cell of row.cells) {
-        if (cell.gridGap) throw new Error('Unsupported grid-gap source mapping')
         const address = cell.sourceCell
         if (
           !address ||
           address.table !== table.sourceTable ||
           address.row !== r ||
           !Number.isInteger(address.cell) ||
-          !cells[address.cell] ||
-          mapped.has(address.cell)
+          addresses.has(address.cell)
         )
           throw new Error('Source cell address is missing or ambiguous')
-        mapped.add(address.cell)
-        expected[`${address.table}:${r}:${address.cell}`] = cellText(cells[address.cell])
+        addresses.add(address.cell)
+        const edgeColumns =
+          address.cell === 0 && before > 0
+            ? before
+            : address.cell === cells.length + offset && after > 0
+              ? after
+              : 0
+        if (edgeColumns) {
+          if (!cell.gridGap || (cell.colspan ?? 1) !== edgeColumns)
+            throw new Error('Authored grid edge differs from model placeholder')
+          edges.add(address.cell)
+          continue
+        }
+        const ordinal = address.cell - offset
+        const raw = cells[ordinal]
+        if (!raw || mapped.has(ordinal))
+          throw new Error('Source cell address is missing or ambiguous')
+        if (cell.gridGap) {
+          if (!continuation(raw) || cellText(raw))
+            throw new Error('Unsupported grid-gap source mapping')
+        } else expected[`${address.table}:${r}:${address.cell}`] = cellText(raw)
+        mapped.add(ordinal)
       }
+      if ((before > 0 && !edges.has(0)) || (after > 0 && !edges.has(cells.length + offset)))
+        throw new Error('Authored grid edge placeholder is missing')
       cells.forEach((cell, c) => {
         if (mapped.has(c)) return
         if (!continuation(cell)) throw new Error('Unmapped source cell')

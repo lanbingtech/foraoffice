@@ -45,7 +45,7 @@ it('derives cell and non-table body chains from independent archive XML using di
   })
 })
 
-it('rejects missing source cells, invented source XML, grid gaps and a nonempty hidden merge continuation', () => {
+it('rejects missing source cells, invented source XML, invented grid gaps and a nonempty hidden merge continuation', () => {
   const missing = structuredClone(tables)
   missing[0].rows[1].cells = []
   expect(() => sourcePrintChains(xml(), missing, bindings)).toThrow('Unmapped source cell')
@@ -66,4 +66,52 @@ it('rejects missing source cells, invented source XML, grid gaps and a nonempty 
   expect(() => sourcePrintChains(xml(tableXml + tableXml), tables, bindings)).toThrow(
     'Source table coverage differs',
   )
+})
+
+it('maps authored leading/trailing grid gaps as one model slot each and never aliases their real first cell', () => {
+  const raw =
+    '<w:tbl><w:tr><w:trPr><w:gridBefore w:val="2"/><w:gridAfter w:val="1"/></w:trPr>' +
+    cell('Real first') +
+    cell('Real second') +
+    '</w:tr></w:tbl>'
+  const model = [
+    {
+      docxIndex: 1,
+      sourceTable: 'T',
+      rows: [
+        {
+          rowIndex: 0,
+          cells: [
+            { ...source(0, 0), gridGap: true, colspan: 2 },
+            source(0, 1),
+            source(0, 2),
+            { ...source(0, 3), gridGap: true, colspan: 1 },
+          ],
+        },
+      ],
+    },
+  ]
+  const archive = [{ docxIndex: 1, originalXml: raw }]
+  expect(sourcePrintChains(xml(raw), model, archive)).toEqual({
+    body: 'BeforeTail',
+    'T:0:1': 'Realfirst',
+    'T:0:2': 'Realsecond',
+  })
+  const aliased = structuredClone(model)
+  aliased[0].rows[0].cells[1].sourceCell.cell = 0
+  expect(() => sourcePrintChains(xml(raw), aliased, archive)).toThrow('Source cell address')
+  const absent = structuredClone(model)
+  absent[0].rows[0].cells.shift()
+  expect(() => sourcePrintChains(xml(raw), absent, archive)).toThrow('Authored grid edge')
+})
+
+it('keeps an empty uncovered merge-continuation gap distinct from an authored edge gap', () => {
+  const model = structuredClone(tables)
+  model[0].rows[1].cells.unshift({ ...source(1, 0), gridGap: true })
+  expect(sourcePrintChains(xml(), model, bindings)).toEqual({
+    body: 'BeforeTail',
+    'T:0:0': 'Merged',
+    'T:0:1': 'Topright',
+    'T:1:1': 'Bottomright',
+  })
 })
