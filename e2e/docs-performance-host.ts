@@ -247,16 +247,16 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
           return pdf
         },
         async close() {
-          await app
-            .evaluate(({ dialog }) => {
-              dialog.showMessageBox = (async () => ({
-                response: 1,
-                checkboxChecked: false,
-              })) as typeof dialog.showMessageBox
-            })
-            .catch(() => {})
           const timer = setTimeout(() => app.process().kill(), 10_000)
           try {
+            await app
+              .evaluate(({ dialog }) => {
+                dialog.showMessageBox = (async () => ({
+                  response: 1,
+                  checkboxChecked: false,
+                })) as typeof dialog.showMessageBox
+              })
+              .catch(() => {})
             await app.close()
           } finally {
             clearTimeout(timer)

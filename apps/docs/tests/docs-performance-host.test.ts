@@ -102,3 +102,55 @@ it('closes Electron when window acquisition or bootstrap fails after launching i
     await rm(workspace, { recursive: true, force: true })
   }
 })
+
+it('starts the Electron close watchdog before an unresponsive main-process prompt callback', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'docs-perf-host-'))
+  vi.useFakeTimers()
+  try {
+    await mkdir(join(workspace, 'node_modules/electron'), { recursive: true })
+    await writeFile(join(workspace, 'package.json'), '{}')
+    await writeFile(
+      join(workspace, 'node_modules/electron/index.js'),
+      'module.exports=process.execPath',
+    )
+    let release!: (reason: Error) => void
+    const child = {
+      exitCode: null as number | null,
+      signalCode: null,
+      kill: vi.fn(() => {
+        child.exitCode = 1
+        release(new Error('owned process terminated'))
+      }),
+    }
+    launches.electron.mockResolvedValue({
+      firstWindow: async () => ({}),
+      evaluate: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ chrome: 'test' })
+        .mockImplementationOnce(
+          () =>
+            new Promise((_, reject) => {
+              release = reject
+            }),
+        ),
+      process: () => child,
+      close: vi.fn().mockResolvedValue(undefined),
+    })
+    const session = await launchPerformanceHost({
+      kind: 'electron',
+      workspace,
+      document: '',
+      sdk: '',
+      electronApp: workspace,
+      qtExecutable: '',
+    })
+    const closing = session.close()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(child.kill).toHaveBeenCalledOnce()
+    await closing
+  } finally {
+    vi.useRealTimers()
+    await rm(workspace, { recursive: true, force: true })
+  }
+})

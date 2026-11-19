@@ -168,7 +168,9 @@ async function waitForLayout(
             environment: {
               viewport: [innerWidth, innerHeight],
               devicePixelRatio,
-              theme: document.documentElement.dataset.theme,
+              theme: document.documentElement.dataset.theme ?? 'system/default',
+              prefersDark: matchMedia('(prefers-color-scheme: dark)').matches,
+              documentDarkPage: !!pm?.closest('.page-dark'),
               zoom: '',
               spellcheck: pm?.spellcheck,
             },
