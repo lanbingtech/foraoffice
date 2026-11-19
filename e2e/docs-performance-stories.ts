@@ -24,7 +24,7 @@ const inScope = (node: Record<string, unknown>, inherited: Record<string, string
 }
 
 /** A common main-story projection, independent of the consumer's unknown Requires profile. */
-export function mainStoryOracle(xml: string) {
+export function mainStoryOracle(xml: string, options: { allowEmpty?: boolean } = {}) {
   const parsed = parseXml(xml)
   const project = (nodes: Xml, inherited: Record<string, string>): Token[] =>
     nodes.flatMap((node) => {
@@ -91,8 +91,9 @@ export function mainStoryOracle(xml: string) {
       for (const paragraph of open) paragraph.text += token.value
     }
   }
-  const tail = paragraphs.filter((paragraph) => paragraph.text).at(-1)?.text
-  if (!tail) throw new Error('Main story requires a nonempty final paragraph')
+  const tail = paragraphs.filter((paragraph) => paragraph.text).at(-1)?.text ?? ''
+  if (!tail && !options.allowEmpty)
+    throw new Error('Main story requires a nonempty final paragraph')
   return { textRuns, paragraphs, tail }
 }
 
