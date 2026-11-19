@@ -63,6 +63,20 @@ it('maps displayed merged cells to exact source cells and rejects a replaced mod
     expect(rowSplits[0].rules[0].clipTop).toBe(12)
     editor.commands.setContent(blocksToPmDoc(parsed.blocks) as never)
     expect(diagnostic().modelCurrent).toBe(false)
+    expect(diagnostic().tables).toEqual([])
+    diagnostic.dispose()
+    const descriptor = Object.getOwnPropertyDescriptor(editor.view, 'state')!
+    Object.defineProperty(editor.view, 'state', {
+      get: () => {
+        throw new Error('Retired view accessed')
+      },
+      configurable: true,
+    })
+    try {
+      expect(diagnostic()).toMatchObject({ disposed: true, tables: [], blocks: [], rowSplits: [] })
+    } finally {
+      Object.defineProperty(editor.view, 'state', descriptor)
+    }
   } finally {
     editor.destroy()
   }

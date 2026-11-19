@@ -8,11 +8,25 @@ export function createDocumentStoryDiagnostic(
     document: { hash: string; blocks: readonly Block[] } | null
   },
 ) {
+  let readCurrent: typeof current | null = current
   return {
+    dispose() {
+      readCurrent = null
+    },
     snapshot() {
-      const state = current()
+      if (!readCurrent)
+        return {
+          version: 1,
+          disposed: true,
+          documentHash: null,
+          documentGeneration: null,
+          layoutGeneration: null,
+          blocks: [],
+        }
+      const state = readCurrent()
       return {
         version: 1,
+        disposed: false,
         documentGeneration: state.documentGeneration,
         layoutGeneration: state.layoutGeneration,
         documentHash: state.document?.hash ?? null,
@@ -34,4 +48,14 @@ export function createDocumentStoryDiagnostic(
       }
     },
   }
+}
+
+export function disposeOwnedDiagnostic(
+  target: Record<string, unknown> | undefined,
+  key: string,
+  owned: unknown,
+  dispose: () => void,
+) {
+  dispose()
+  if (target && target[key] === owned) delete target[key]
 }

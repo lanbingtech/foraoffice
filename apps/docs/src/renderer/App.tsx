@@ -12,7 +12,7 @@ import { scriptFontHtml } from './editor/script-fonts'
 import { carryDocSeen } from './ai/tools'
 import { DOC_CSS_COMMITTED_EVENT, WRAP_WIDTHS_COMMITTED_EVENT } from './editor/cjk-punct-shrink'
 import { paginationActivity, trackPaginationActivity } from './pagination-activity'
-import { createDocumentStoryDiagnostic } from './document-story-diagnostic'
+import { createDocumentStoryDiagnostic, disposeOwnedDiagnostic } from './document-story-diagnostic'
 import { observePaginationFonts } from './pagination-fonts'
 import { justifyShrinkPluginKey } from './editor/justify-shrink'
 import { tabReflowMeta } from './editor/decoration-extensions'
@@ -2294,18 +2294,6 @@ export function App({
 
   /** App state bundle for the extracted file actions (file-actions.ts); refreshed every render. */
   const fileCtxRef = useRef<FileActionContext>(null as unknown as FileActionContext)
-  const storyDiagnostic = useMemo(
-    () =>
-      createDocumentStoryDiagnostic(() => {
-        const current = fileCtxRef.current.doc
-        return {
-          documentGeneration: currentDocGeneration(),
-          layoutGeneration: paginationActivity.snapshot().generation,
-          document: current ? { hash: current.hash, blocks: current.parsed.blocks } : null,
-        }
-      }),
-    [],
-  )
   // style-pane previews patch the parsed styles; a font-settle rebuild must keep them
   const liveStylesRef = useRef<{ parsed: ParsedDocFull; styles: Map<string, StyleInfo> } | null>(
     null,
@@ -4147,6 +4135,14 @@ export function App({
     let slices: PageSlice[] = []
     let timer: number | null = null
     const activity = trackPaginationActivity()
+    const storyDiagnostic = createDocumentStoryDiagnostic(() => {
+      const current = fileCtxRef.current.doc
+      return {
+        documentGeneration: currentDocGeneration(),
+        layoutGeneration: paginationActivity.snapshot().generation,
+        document: current ? { hash: current.hash, blocks: current.parsed.blocks } : null,
+      }
+    })
     let rowFillSig = ''
     // passes a pass schedules for itself (widths / suppression applied late);
     // a document whose column widths never settle must not paginate forever
@@ -5989,6 +5985,12 @@ export function App({
     return () => {
       disposed = true
       activity.dispose()
+      disposeOwnedDiagnostic(
+        (window as unknown as Record<string, Record<string, unknown>>).__pageDebug,
+        'sourceStories',
+        storyDiagnostic.snapshot,
+        storyDiagnostic.dispose,
+      )
       flushPaginationRef.current = () => {}
       if (timer) window.clearTimeout(timer)
       if (hfTimer) window.clearTimeout(hfTimer)
@@ -6041,7 +6043,6 @@ export function App({
     balloonMode,
     delSectBreaks,
     pendingWatermarkImage,
-    storyDiagnostic,
   ])
 
   // section at the cursor: the target the Layout tab acts on

@@ -3,7 +3,10 @@ import { DOMSerializer } from '@tiptap/pm/model'
 import { parseDocx, type Block } from '@genoffice/docx-engine'
 import { buildDocx } from '../../../packages/docx-engine/tests/helpers/build-docx'
 import { renderTextboxSpec } from '../src/renderer/editor/protected-render'
-import { createDocumentStoryDiagnostic } from '../src/renderer/document-story-diagnostic'
+import {
+  createDocumentStoryDiagnostic,
+  disposeOwnedDiagnostic,
+} from '../src/renderer/document-story-diagnostic'
 
 const shape = (id: string, body: string) =>
   '<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">' +
@@ -123,6 +126,23 @@ it('reads only on request and binds the current document and layout generation w
     documentHash: null,
     blocks: [],
   })
+  current = { ...current, document: { hash: 'still-live-private-source', blocks } }
+  diagnostic.dispose()
+  const readsBeforeRetiredCall = reads
+  expect(diagnostic.snapshot()).toMatchObject({ disposed: true, documentHash: null, blocks: [] })
+  expect(reads).toBe(readsBeforeRetiredCall)
+})
+
+it('retires only the owning global diagnostic method when another instance has replaced it', () => {
+  const current = () => ({ documentGeneration: 1, layoutGeneration: 1, document: null })
+  const old = createDocumentStoryDiagnostic(current)
+  const newer = createDocumentStoryDiagnostic(current)
+  const target: Record<string, unknown> = { sourceStories: newer.snapshot }
+  disposeOwnedDiagnostic(target, 'sourceStories', old.snapshot, old.dispose)
+  expect(target.sourceStories).toBe(newer.snapshot)
+  expect(old.snapshot()).toMatchObject({ disposed: true, blocks: [] })
+  disposeOwnedDiagnostic(target, 'sourceStories', newer.snapshot, newer.dispose)
+  expect(target).not.toHaveProperty('sourceStories')
 })
 
 it('serializes untrusted shape identity as attribute data without creating markup', () => {

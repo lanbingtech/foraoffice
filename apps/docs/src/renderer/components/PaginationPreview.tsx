@@ -92,6 +92,7 @@ import {
 } from '../editor/hf-dom'
 import { HeaderFooterArea } from './HeaderFooterArea'
 import { createPrintSourceDiagnostic } from '../print-source-diagnostic'
+import { disposeOwnedDiagnostic } from '../document-story-diagnostic'
 
 const twipsToPx = (twips: number) => (twips / 1440) * 96
 
@@ -1074,6 +1075,16 @@ export function PaginationPreview({
       .contentWidth
 
   useEffect(() => {
+    let sourceCells: ReturnType<typeof createPrintSourceDiagnostic> | undefined
+    const releaseSources = () => {
+      if (sourceCells)
+        disposeOwnedDiagnostic(
+          (window as unknown as Record<string, Record<string, unknown>>).__previewDebug,
+          'sourceCells',
+          sourceCells,
+          sourceCells.dispose,
+        )
+    }
     const pm = document.querySelector('.editor-scroll .ProseMirror') as HTMLElement | null
     if (!pm) return
     // before the gaps go: a pending canvas pass runs now and rebuilds its
@@ -1436,7 +1447,7 @@ export function PaginationPreview({
       setSlices(computed)
       // read-only snapshot for e2e: the cuts the sheets print and the shadow's verdict
       ;(window as unknown as Record<string, unknown>).__previewDebug = {
-        sourceCells: createPrintSourceDiagnostic(documentView, blocks, rowSplits),
+        sourceCells: (sourceCells = createPrintSourceDiagnostic(documentView, blocks, rowSplits)),
         slices: computed,
         shadowed,
         previewCutMismatch: previewCutDiag.length,
@@ -1519,10 +1530,14 @@ export function PaginationPreview({
         setCloneKids(null)
         setHtml(Array.from(pm.children, (c) => cloneBlockHtml(c as HTMLElement)).join(''))
       }
+    } catch (error) {
+      releaseSources()
+      throw error
     } finally {
       if (measureNeutralize) pm.classList.remove('measuring-columns')
       if (zoomHost) zoomHost.style.zoom = savedZoom
     }
+    return releaseSources
     // snapshot: measure once on open; deps intentionally empty
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
