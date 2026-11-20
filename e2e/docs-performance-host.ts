@@ -139,7 +139,7 @@ async function activateOwnedCaption(
     ],
     {
       windowsHide: true,
-      // The Qt script bounds its native waits and must finish restoring the layer.
+      // The Qt script bounds its waits and verifies its normal Z-order band.
       ...(raiseOwnedWindow ? {} : { timeout: 12_000 }),
       encoding: 'utf8',
     },
@@ -251,7 +251,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
           rendering: 'normal-window',
           debuggerVersion,
           nativeFocusProbe: 'persistent-win32-inspection',
-          nativeFocusActivation: 'guarded-owned-caption',
+          nativeFocusActivation: 'guarded-owned-caption-normal-band',
           exportMethod: 'existing-product-exportPdf-callback-with-native-save-picker',
         },
         open: () =>

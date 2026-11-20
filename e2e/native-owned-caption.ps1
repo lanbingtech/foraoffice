@@ -25,7 +25,6 @@ public static class GuardedTitleClick {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x,int y);
   [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key);
   private delegate bool EnumWindowCallback(IntPtr window, IntPtr data);
-  [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
   [DllImport("user32.dll", SetLastError=true)] private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr data);
   [DllImport("user32.dll", SetLastError=true)] private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
   [DllImport("user32.dll", SetLastError=true, ExactSpelling=true)] private static extern IntPtr GetWindowLongPtrW(IntPtr window, int index);
@@ -55,21 +54,26 @@ public static class GuardedTitleClick {
     if (style == 0 && error != 0) throw new Win32Exception(error);
     return (style & TopmostStyle) != 0;
   }
-  public static void RequireIndependentWindow(IntPtr window) {
-    const uint Owner = 4;
-    if (GetWindow(window, Owner) != IntPtr.Zero)
-      throw new InvalidOperationException("The test window has a native owner");
-    bool hasOwnedWindow = false;
+  public static void RequireOwnedWindowGroup(IntPtr window, uint processId) {
+    const uint RootOwner = 3;
+    IntPtr group = GetAncestor(window, RootOwner);
+    uint groupPid;
+    if (group == IntPtr.Zero || GetWindowThreadProcessId(group, out groupPid) == 0 || groupPid != processId)
+      throw new InvalidOperationException("The test window has a foreign native owner");
+    bool hasForeignWindow = false;
     if (!EnumWindows((candidate, _) => {
-      if (GetWindow(candidate, Owner) == window) hasOwnedWindow = true;
+      uint candidatePid;
+      if (GetAncestor(candidate, RootOwner) == group &&
+          (GetWindowThreadProcessId(candidate, out candidatePid) == 0 || candidatePid != processId))
+        hasForeignWindow = true;
       return true;
     }, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
-    if (hasOwnedWindow) throw new InvalidOperationException("The test window owns another top-level window");
+    if (hasForeignWindow) throw new InvalidOperationException("The test window group contains a foreign native window");
   }
-  public static void RequestTopmost(IntPtr window, bool topmost) {
+  public static void RequestRaiseWithinBand(IntPtr window) {
     const uint NoSize = 0x0001, NoMove = 0x0002, NoActivate = 0x0010, NoOwnerZOrder = 0x0200, AsyncWindowPos = 0x4000;
-    var layer = new IntPtr(topmost ? -1 : -2); // HWND_TOPMOST / HWND_NOTOPMOST
-    if (!SetWindowPos(window, layer, 0, 0, 0, 0, NoSize | NoMove | NoActivate | NoOwnerZOrder | AsyncWindowPos))
+    // HWND_TOP preserves the current topmost or non-topmost band.
+    if (!SetWindowPos(window, IntPtr.Zero, 0, 0, 0, 0, NoSize | NoMove | NoActivate | NoOwnerZOrder | AsyncWindowPos))
       throw new Win32Exception(Marshal.GetLastWin32Error());
   }
   public sealed class ClickReceipt {
@@ -149,43 +153,43 @@ function Find-OwnedCaption {
     }
   }
 }
-function Request-OwnedLayer([bool]$Topmost) {
-  Assert-OwnedWindow
-  # Win32 propagates topmost transitions along owner relationships.
-  [GuardedTitleClick]::RequireIndependentWindow($window)
-  Assert-OwnedWindow
-  [GuardedTitleClick]::RequestTopmost($window,$Topmost)
-}
-function Confirm-OwnedLayer([bool]$Topmost) {
-  $timer=[System.Diagnostics.Stopwatch]::StartNew()
-  do {
-    Assert-OwnedWindow
-    if ([GuardedTitleClick]::IsTopmost($window) -eq $Topmost) {return}
-    Start-Sleep -Milliseconds 20
-  } while ($timer.ElapsedMilliseconds -lt 2000)
-  throw 'Native test window layer change was not observed'
-}
 Assert-OwnedWindow -RequireVisible
 $before=[GuardedTitleClick]::GetForegroundWindow() -eq $window
 $submitted=0
 $cursor='not moved'
 $originalTopmost=$null
-$restoredTopmost=$null
-$layerRequested=$false
+$observedTopmost=$null
+$raiseRequested=$false
 $owned=@(Find-OwnedCaption)
 try {
   if ($RaiseOwnedWindow -and !$before -and !$owned.Count -and ![GuardedTitleClick]::Held()) {
     Assert-OwnedWindow -RequireVisible
     $originalTopmost=[GuardedTitleClick]::IsTopmost($window)
     if (!$originalTopmost) {
-      Request-OwnedLayer $true
-      $layerRequested=$true
-      Confirm-OwnedLayer $true
-      $owned=@(Find-OwnedCaption)
+      [GuardedTitleClick]::RequireOwnedWindowGroup($window,[uint32]$ProcessId)
+      Assert-OwnedWindow -RequireVisible
+      if ([GuardedTitleClick]::IsTopmost($window) -or [GuardedTitleClick]::Held()) {
+        throw 'Owned test window or input state changed before the raise'
+      }
+      [GuardedTitleClick]::RequestRaiseWithinBand($window)
+      $raiseRequested=$true
+      $timer=[System.Diagnostics.Stopwatch]::StartNew()
+      do {
+        Assert-OwnedWindow -RequireVisible
+        if ([GuardedTitleClick]::IsTopmost($window) -ne $originalTopmost) {
+          throw 'Owned test window left its original Z-order band'
+        }
+        $owned=@(Find-OwnedCaption)
+        if ($owned.Count -or [GuardedTitleClick]::Held()) {break}
+        Start-Sleep -Milliseconds 20
+      } while ($timer.ElapsedMilliseconds -lt 2000)
     }
   }
   if (!$before -and $owned.Count -and [GuardedTitleClick]::GetForegroundWindow() -ne $window) {
     Assert-OwnedWindow -RequireVisible
+    if ($raiseRequested -and [GuardedTitleClick]::IsTopmost($window) -ne $originalTopmost) {
+      throw 'Owned test window left its original Z-order band'
+    }
     $click=[GuardedTitleClick]::SendOwnedTitleClick($window,[uint32]$ProcessId,$owned[0])
     $submitted=$click.Submitted
     $cursor=$click.Cursor
@@ -193,13 +197,9 @@ try {
   }
 } finally {
   if ($null -ne $originalTopmost) {
-    if ($layerRequested) {
-      # Undo the request even if its stage timed out before the new layer was observed.
-      Request-OwnedLayer $originalTopmost
-    }
-    Confirm-OwnedLayer $originalTopmost
-    $restoredTopmost=[GuardedTitleClick]::IsTopmost($window)
-    if ($restoredTopmost -ne $originalTopmost) {throw 'Failed to restore the owned test window layer'}
+    Assert-OwnedWindow
+    $observedTopmost=[GuardedTitleClick]::IsTopmost($window)
+    if ($observedTopmost -ne $originalTopmost) {throw 'Owned test window left its original Z-order band'}
   }
 }
-@{ownedBefore=$before;ownedAfter=[GuardedTitleClick]::GetForegroundWindow() -eq $window;safeTitlePoints=$owned.Count;submittedInputs=$submitted;cursor=$cursor;heldInput=[GuardedTitleClick]::Held();originalTopmost=$originalTopmost;restoredTopmost=$restoredTopmost}|ConvertTo-Json -Compress
+@{ownedBefore=$before;ownedAfter=[GuardedTitleClick]::GetForegroundWindow() -eq $window;safeTitlePoints=$owned.Count;submittedInputs=$submitted;cursor=$cursor;heldInput=[GuardedTitleClick]::Held();raiseRequested=$raiseRequested;originalTopmost=$originalTopmost;observedTopmost=$observedTopmost}|ConvertTo-Json -Compress
