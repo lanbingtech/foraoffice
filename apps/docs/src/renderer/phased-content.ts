@@ -139,6 +139,7 @@ export function setContentPhased(
   }
   let index = PHASE1_BLOCKS
   let chunkSize = PHASE_CHUNK_BLOCKS
+  let previous: { finished: number; dispatchMs: number; count: number } | undefined
   // a refused chunk remounted the whole document: whatever the user typed
   // before is gone with it, and an undo must not bring the truncated
   // pre-remount document back
@@ -159,6 +160,17 @@ export function setContentPhased(
   const appendChunk = () => {
     if (my !== token) return
     if (host.isDestroyed()) return finish()
+    if (previous) {
+      // Layout and painting can happen after dispatch. Size the next append
+      // against dispatch work and any delay beyond the intentional timer wait.
+      const late = Math.max(0, now() - previous.finished - PAINTED_FRAME_FALLBACK_MS)
+      const scale = PHASE_APPEND_BUDGET_MS / Math.max(0.1, previous.dispatchMs + late)
+      chunkSize = Math.min(
+        PHASE_CHUNK_BLOCKS,
+        chunkSize * 2,
+        Math.max(PHASE_MIN_CHUNK_BLOCKS, Math.floor(previous.count * scale)),
+      )
+    }
     const chunk = content.slice(index, index + chunkSize)
     index += chunk.length
     for (const node of chunk) {
@@ -172,18 +184,8 @@ export function setContentPhased(
     try {
       const started = now()
       host.appendNodes(chunk)
-      const elapsed = now() - started
-      // Appends are indivisible editor transactions. Scale the next one by
-      // measured cost, limiting growth so a light paragraph group cannot
-      // immediately make the next table/image group monopolize the frame.
-      chunkSize = Math.min(
-        PHASE_CHUNK_BLOCKS,
-        chunkSize * 2,
-        Math.max(
-          PHASE_MIN_CHUNK_BLOCKS,
-          Math.floor((chunk.length * PHASE_APPEND_BUDGET_MS) / Math.max(0.1, elapsed)),
-        ),
-      )
+      const finished = now()
+      previous = { finished, dispatchMs: finished - started, count: chunk.length }
     } catch {
       // a refused chunk falls back to the one-pass mount instead of leaving the file truncated
       remounted = true

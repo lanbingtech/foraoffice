@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { PmNode } from '../src/renderer/editor/convert'
 import {
   PHASED_CONTENT_SETTLED_EVENT,
+  PAINTED_FRAME_FALLBACK_MS,
   PHASE1_BLOCKS,
   PHASE_CHUNK_BLOCKS,
   PHASED_MIN_BLOCKS,
@@ -137,6 +138,33 @@ describe('setContentPhased', () => {
       Array.from({ length: total }, (_, i) => i),
     )
     await expect(waitForFullContent()).resolves.toBeUndefined()
+  })
+
+  it.each([
+    { delay: PAINTED_FRAME_FALLBACK_MS, reduced: false },
+    { delay: 850, reduced: true },
+  ])('sizes the next append after a $delay ms frame wait', ({ delay, reduced }) => {
+    const { host, state } = makeHost()
+    const scheduler = makeScheduler()
+    let now = 0
+    const append = host.appendNodes
+    host.appendNodes = (nodes) => {
+      append(nodes)
+      now += 5
+    }
+    setContentPhased(
+      host,
+      docOf(PHASE1_BLOCKS + PHASE_CHUNK_BLOCKS * 3),
+      scheduler.schedule,
+      () => now,
+    )
+    scheduler.drain()
+    now += delay
+    scheduler.drain()
+    const appends = state.events.filter((event) => event.startsWith('append:'))
+    expect(appends[0]).toBe(`append:${PHASE_CHUNK_BLOCKS}`)
+    expect(Number(appends[1].split(':')[1]) < PHASE_CHUNK_BLOCKS).toBe(reduced)
+    cancelPhasedContent()
   })
 
   it('cancelPhasedContent drops the pending tail and releases the save gate', async () => {

@@ -4189,7 +4189,6 @@ export function App({
     // The continuous paper and sheet grid use different scroll coordinates.
     // Endnotes may also create provisional pages beyond the mounted body.
     const trackStreamingCoverage = !multipageMode && endnoteItems.length === 0
-    const sourceSectionEnds = new Set(sections.slice(0, -1).map((s) => s.lastBlockIndex))
     let selfScheduled = false
     // set by the cleanup: document.fonts.ready and other promise callbacks of
     // this run can still fire after the effect was re-created (zoom change)
@@ -6101,21 +6100,10 @@ export function App({
         firstChanged !== null &&
         firstChanged >= transaction.before.childCount &&
         transaction.doc.childCount > transaction.before.childCount
-      let sectionBoundaryArrived = false
-      if (appendedTail) {
-        for (let i = transaction.before.childCount; i < transaction.doc.childCount; i++) {
-          const index: unknown = transaction.doc.child(i).attrs.docxIndex
-          if (typeof index === 'number' && sourceSectionEnds.has(index)) {
-            sectionBoundaryArrived = true
-            break
-          }
-        }
-      }
-      onUpdate(
-        singleInlineEditIndex(transaction),
-        firstChanged,
-        appendedTail && !sectionBoundaryArrived ? 'append' : 'change',
-      )
+      // Still-unmounted originals already participate in section resolution.
+      // Mounting their break nodes is an append, so the existing page coverage
+      // decides when the newly mounted range needs layout.
+      onUpdate(singleInlineEditIndex(transaction), firstChanged, appendedTail ? 'append' : 'change')
     }
     editor?.on('update', onDocUpdate)
     // justify-shrink re-decides via decoration-only transactions that move the

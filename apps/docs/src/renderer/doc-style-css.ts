@@ -411,6 +411,7 @@ export function docStyleCss(parsed: ParsedDocFull): string {
   const SB = spaceBeforeProp(additive)
   const autoPt = autoSpacingPt(additive)
   const listGroups = listGroupSelectors(parsed)
+  const styledListItems = { before: [] as string[], after: [] as string[] }
   const liCollapse = (item: string, side: 'before' | 'after', important = ''): void => {
     for (const g of listGroups) {
       rules.push(
@@ -1109,11 +1110,11 @@ export function docStyleCss(parsed: ParsedDocFull): string {
     if (d.spaceAfterAuto || d.spaceBeforeAuto) {
       const sa = `[data-style="${CSS.escape(info.styleId)}"]`
       if (d.spaceAfterAuto) {
-        liCollapse(sa, 'after')
+        styledListItems.after.push(sa)
         rules.push(`${CELL_BLOCK}${sa}${CELL_LAST} { margin-bottom:0 }`)
       }
       if (d.spaceBeforeAuto) {
-        liCollapse(sa, 'before')
+        styledListItems.before.push(sa)
         rules.push(`${docFirstBlockSel(sa)} { ${SB}:0 }`)
         rules.push(`${CELL_BLOCK}${sa}${CELL_FIRST} { ${SB}:0 }`)
       }
@@ -1201,6 +1202,27 @@ export function docStyleCss(parsed: ParsedDocFull): string {
           `${rowClosing(':is(p, .doc-li):not([data-style], .ctx-sp-off)')} { margin-bottom:0 !important }`,
         )
       }
+    }
+  }
+  // List membership and style eligibility are independent. Keep the adjacent
+  // and across-widget selectors separate so each retains its specificity.
+  for (const side of ['before', 'after'] as const) {
+    const items = styledListItems[side]
+    if (items.length === 0) continue
+    if (items.length === 1) {
+      liCollapse(items[0], side)
+      continue
+    }
+    const property = side === 'before' ? SB : 'margin-bottom'
+    for (const widget of [false, true]) {
+      const adjacency = listGroups.map((group) => {
+        const member = `.doc-li${group}`
+        if (side === 'before')
+          return widget ? acrossWidget(member, member) : `${member} + ${member}`
+        const next = widget ? acrossWidget('', member) : `+ ${member}`
+        return `${member}:has(${next})`
+      })
+      rules.push(`.doc-page :is(${adjacency.join(',')}):is(${items.join(',')}) { ${property}:0 }`)
     }
   }
   // .doc-cs gate: an rtl run reads the Cs size of its chain (w:szCs, paraCsFormat),
