@@ -490,6 +490,7 @@ export async function parseDocx(
     themeColors: theme.colors,
     themeFonts: theme.fonts,
     mediaByRid,
+    olePreviewSizes: uniqueOlePreviewSizes(documentXml),
     externalTxbxByRid,
     referenceOnlyComments,
     sectionAt,
@@ -757,6 +758,7 @@ interface BuildContext {
   themeFonts?: ThemeFonts | null
   /** pre-resolved a:blip rId -> data/external URL for pictures inside w:tbl (extractCell is sync, media reads are async) */
   mediaByRid?: Map<string, string>
+  olePreviewSizes?: Map<string, { width: number; height: number }>
   /** pre-fetched external textbox parts (wps:txbx r:txbx -> word/txbx*.xml content; extractTextboxes is sync) */
   externalTxbxByRid?: Map<string, string>
   /** comment ids anchored only by a bare w:commentReference (no range markers anywhere in document.xml, LibreOffice style) */
@@ -5088,17 +5090,9 @@ function buildRun(
         const dataUrl = rId ? mediaByRid.get(rId) : undefined
         if (dataUrl) {
           image = { dataUrl, xml: pictXml }
-          const style = /<v:shape [^>]*style="([^"]*)"/.exec(pictXml)?.[1] ?? ''
-          const w = parseFloat(/(?:^|;)width:([\d.]+)pt/.exec(style)?.[1] ?? '')
-          const h = parseFloat(/(?:^|;)height:([\d.]+)pt/.exec(style)?.[1] ?? '')
-          // w:object declares its size in twips when the v:shape style is absent
-          const objAttrs = /<w:object\b[^>]*>/.exec(pictXml)?.[0] ?? ''
-          const wTw = parseInt(/w:dxaOrig="(\d+)"/.exec(objAttrs)?.[1] ?? '', 10)
-          const hTw = parseInt(/w:dyaOrig="(\d+)"/.exec(objAttrs)?.[1] ?? '', 10)
-          if (w > 0) image.widthPx = Math.round((w / 72) * 96)
-          else if (wTw > 0) image.widthPx = Math.round(wTw / 15)
-          if (h > 0) image.heightPx = Math.round((h / 72) * 96)
-          else if (hTw > 0) image.heightPx = Math.round(hTw / 15)
+          const size = vmlObjectPreviewSize(pictXml)
+          if (size.width !== undefined) image.widthPx = size.width
+          if (size.height !== undefined) image.heightPx = size.height
           break
         }
         const hrRect = /<v:rect\b[^>]*\bo:hr="t"[^>]*>/.exec(pictXml)?.[0]
@@ -8959,11 +8953,17 @@ async function mediaDataUrl(
   rels: Map<string, RelInfo>,
   rId: string,
   sourcePath = 'word/document.xml',
+  previewSize?: { width: number; height: number },
 ): Promise<string | null> {
   const rel = rels.get(rId)
   if (!rel || rel.targetMode === 'External') return null
   const partPath = resolveRelationshipTargetPath(sourcePath, rel.target)
-  return partPath ? mediaPartDataUrl(zip, partPath) : null
+  if (!partPath) return null
+  // A sized preview is local to its relationship use. Other references to
+  // the same ZIP part must not inherit its raster dimensions.
+  return previewSize
+    ? readMediaPartDataUrl(zip, partPath, previewSize)
+    : mediaPartDataUrl(zip, partPath)
 }
 
 /** one string per media part: a picture anchored on thousands of paragraphs
@@ -8981,12 +8981,19 @@ function mediaPartDataUrl(zip: JSZip, partPath: string): Promise<string | null> 
   return pending
 }
 
-async function readMediaPartDataUrl(zip: JSZip, partPath: string): Promise<string | null> {
+async function readMediaPartDataUrl(
+  zip: JSZip,
+  partPath: string,
+  previewSize?: { width: number; height: number },
+): Promise<string | null> {
   const file = zip.file(partPath)
   if (!file) return null
   const mime = await imagePartMime(zip, partPath)
   if (!mime) return null
-  if (isMetafileMime(mime)) return metafileToDataUrl(await file.async('arraybuffer'), mime)
+  if (isMetafileMime(mime))
+    return metafileToDataUrl(await file.async('arraybuffer'), mime, {
+      placeableWmfPreview: previewSize,
+    })
   if (isTiffMime(mime)) return tiffToDataUrlAsync(await file.async('arraybuffer'))
   return mediaPartSrc(zip, file, partPath, mime)
 }
@@ -9146,6 +9153,7 @@ async function resolveBlipMedia(xml: string, ctx: BuildContext): Promise<void> {
       ctx.rels,
       rId,
       ctx.sourcePath ?? 'word/document.xml',
+      ctx.olePreviewSizes?.get(rId),
     )
     if (dataUrl) media.set(rId, dataUrl)
   }
@@ -9524,6 +9532,43 @@ async function extractDiagramDrawing(
   return shapes.length > 0 ? { widthPx, heightPx, shapes } : null
 }
 
+/** Existing VML display geometry: points first, then the OLE object's original twips. */
+function vmlObjectPreviewSize(xml: string): { width?: number; height?: number } {
+  const style = /<v:shape [^>]*style="([^"]*)"/.exec(xml)?.[1] ?? ''
+  const wPt = parseFloat(/(?:^|;)width:([\d.]+)pt/.exec(style)?.[1] ?? '')
+  const hPt = parseFloat(/(?:^|;)height:([\d.]+)pt/.exec(style)?.[1] ?? '')
+  const objAttrs = /<w:object\b[^>]*>/.exec(xml)?.[0] ?? ''
+  const wTw = parseInt(/w:dxaOrig="(\d+)"/.exec(objAttrs)?.[1] ?? '', 10)
+  const hTw = parseInt(/w:dyaOrig="(\d+)"/.exec(objAttrs)?.[1] ?? '', 10)
+  return {
+    width: wPt > 0 ? Math.round((wPt / 72) * 96) : wTw > 0 ? Math.round(wTw / 15) : undefined,
+    height: hPt > 0 ? Math.round((hPt / 72) * 96) : hTw > 0 ? Math.round(hTw / 15) : undefined,
+  }
+}
+
+function uniqueOlePreviewSizes(
+  xml: string,
+): Map<string, { width: number; height: number }> | undefined {
+  if (!xml.includes('<w:object')) return undefined
+  const sizes = new Map<string, { width: number; height: number }>()
+  for (const [obj] of xml.matchAll(/<w:object\b[^>]*>[\s\S]*?<\/w:object>/g)) {
+    const images = [...obj.matchAll(/<v:imagedata\b[^>]*\br:id\s*=\s*["']([^"']+)["']/g)]
+    if (images.length !== 1 || obj.indexOf('<w:object', 1) !== -1) continue
+    const { width, height } = vmlObjectPreviewSize(obj)
+    if (width && height) sizes.set(images[0][1], { width, height })
+  }
+  if (sizes.size === 0) return undefined
+  // The inline media cache is keyed by relationship ID. A shared ID can be
+  // displayed at different sizes, so leave all of its usages unscaled here.
+  const seen = new Set<string>()
+  for (const [, rId] of xml.matchAll(/\br:(?:id|embed|link)\s*=\s*["']([^"']+)["']/g)) {
+    if (!sizes.has(rId)) continue
+    if (seen.has(rId)) sizes.delete(rId)
+    else seen.add(rId)
+  }
+  return sizes
+}
+
 /**
  * OLE embed degrade: the original packages a preview picture
  * (v:imagedata) and declares its kind (o:OLEObject ProgID) — surface both
@@ -9541,30 +9586,25 @@ async function oleDisplay(
   > = {}
   const progId = /<o:OLEObject[^>]*ProgID="([^"]+)"/.exec(xml)?.[1]
   if (progId) out.oleProgId = progId
+  // Word draws the preview at the declared size — v:shape style (pt), falling
+  // back to w:object dxaOrig/dyaOrig (twips). Without it the metafile preview's
+  // intrinsic pixels (2x dpiScale) blow up to the full content width.
+  const { width, height } = vmlObjectPreviewSize(xml)
+  if (width !== undefined) out.imageWidthPx = width
+  if (height !== undefined) out.imageHeightPx = height
   const path = relPartPath(ctx, /<v:imagedata[^>]*r:id="([^"]+)"/.exec(xml)?.[1])
   const file = path ? ctx.zip.file(path) : null
   if (file && path) {
     const mime = await imagePartMime(ctx.zip, path)
     if (isMetafileMime(mime)) {
-      const converted = await metafileToDataUrl(await file.async('arraybuffer'), mime)
+      const converted = await metafileToDataUrl(await file.async('arraybuffer'), mime, {
+        placeableWmfPreview: { width: out.imageWidthPx ?? 0, height: out.imageHeightPx ?? 0 },
+      })
       if (converted) out.imageDataUrl = converted
     } else if (mime) {
       out.imageDataUrl = await mediaPartSrc(ctx.zip, file, path, mime)
     }
   }
-  // Word draws the preview at the declared size — v:shape style (pt), falling
-  // back to w:object dxaOrig/dyaOrig (twips). Without it the metafile preview's
-  // intrinsic pixels (2x dpiScale) blow up to the full content width.
-  const style = /<v:shape [^>]*style="([^"]*)"/.exec(xml)?.[1] ?? ''
-  const wPt = parseFloat(/(?:^|;)width:([\d.]+)pt/.exec(style)?.[1] ?? '')
-  const hPt = parseFloat(/(?:^|;)height:([\d.]+)pt/.exec(style)?.[1] ?? '')
-  const objAttrs = /<w:object\b[^>]*>/.exec(xml)?.[0] ?? ''
-  const wTw = parseInt(/w:dxaOrig="(\d+)"/.exec(objAttrs)?.[1] ?? '', 10)
-  const hTw = parseInt(/w:dyaOrig="(\d+)"/.exec(objAttrs)?.[1] ?? '', 10)
-  const w = wPt > 0 ? (wPt / 72) * 96 : wTw > 0 ? wTw / 15 : 0
-  const h = hPt > 0 ? (hPt / 72) * 96 : hTw > 0 ? hTw / 15 : 0
-  if (w > 0) out.imageWidthPx = Math.round(w)
-  if (h > 0) out.imageHeightPx = Math.round(h)
   const jc = /<w:jc w:val="([^"]+)"/.exec(xml)?.[1]
   if (jc === 'center') out.imageAlign = 'center'
   else if (jc === 'right' || jc === 'end') out.imageAlign = 'right'
