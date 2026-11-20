@@ -4,6 +4,8 @@ import {
   SettledParagraphCache,
   measureNatural,
   noteFloatTransaction,
+  topLevelBlockDom,
+  type ReuseNoOpWhile,
 } from '../src/renderer/editor/settled-measure'
 import type { EditorView } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
@@ -196,6 +198,61 @@ describe('SettledParagraphCache', () => {
     expect(fn).toHaveBeenCalledTimes(4)
   })
 
+  it('reuses a style-excluded no-op without hiding gaps and remeasures after its style changes', () => {
+    const el = document.createElement('p')
+    el.style.cssText = 'display: block; float: none; position: static; writing-mode: horizontal-tb'
+    const gap = Object.assign(document.createElement('span'), { className: 'page-gap-inline' })
+    el.append(gap)
+    const view = fakeView(el)
+    view.dom.append(el)
+    document.body.append(view.dom)
+    sized(el, () => ({ width: 100, height: 20 }))
+    el.getBoundingClientRect = () => ({ width: 100 }) as DOMRect
+    const cache = new SettledParagraphCache<number[]>(shiftAll, (result) => result.length === 0)
+    const fn = vi.fn((paragraph: HTMLElement, reuseWhile: ReuseNoOpWhile) => {
+      const excluded = (style: CSSStyleDeclaration) => style.textAlign !== 'justify'
+      if (!excluded(getComputedStyle(paragraph))) return [1]
+      reuseWhile(excluded)
+      return []
+    })
+    const gapSearch = vi.spyOn(el, 'querySelectorAll')
+    const pass = () => {
+      cache.beginPass(view)
+      return cache.measure(view, node, 1, fn, el)
+    }
+
+    expect(pass()).toEqual([])
+    expect(pass()).toEqual([])
+    expect(gapSearch).toHaveBeenCalledTimes(1)
+    expect(fn).toHaveBeenCalledTimes(1)
+    el.style.textAlign = 'justify'
+    expect(pass()).toEqual([1])
+    expect(gapSearch).toHaveBeenCalledTimes(2)
+    expect(fn).toHaveBeenCalledTimes(2)
+    view.dom.remove()
+  })
+
+  it('keeps natural-layout retries when a previously style-excluded paragraph becomes hidden', () => {
+    const el = document.createElement('p')
+    el.style.cssText = 'display: block; float: none; position: static; writing-mode: horizontal-tb'
+    const view = fakeView(el)
+    view.dom.append(el)
+    let width = 100
+    sized(el, () => ({ width, height: 20 }))
+    el.getBoundingClientRect = () => ({ width }) as DOMRect
+    const cache = new SettledParagraphCache<number[]>(shiftAll, (result) => result.length === 0)
+    const fn = (_: HTMLElement, reuseWhile: ReuseNoOpWhile) => {
+      if (!width) return null
+      reuseWhile(() => true)
+      return []
+    }
+    cache.beginPass(view)
+    expect(cache.measure(view, node, 1, fn, el)).toEqual([])
+    width = 0
+    cache.beginPass(view)
+    expect(cache.measure(view, node, 1, fn, el)).toBeNull()
+  })
+
   it('prunes paragraphs a pass does not visit (deleted nodes)', () => {
     const el = document.createElement('p')
     const view = fakeView(el)
@@ -230,7 +287,7 @@ describe('SettledParagraphCache', () => {
     ;(pb as unknown as { pmViewDesc: unknown }).pmViewDesc = { node: b }
     const widget = document.createElement('span') // no desc node
     view.dom.append(pa, widget, pb, document.createTextNode('x'))
-    const map = SettledParagraphCache.topLevelDom(view)
+    const map = topLevelBlockDom(view)
     expect(map.get(a)).toBe(pa)
     expect(map.get(b)).toBe(pb)
     expect(map.size).toBe(2)
@@ -239,7 +296,39 @@ describe('SettledParagraphCache', () => {
     const fn = vi.fn<(el: HTMLElement) => number[]>(() => [1])
     cache.beginPass(view)
     cache.measure(view, a, 1, fn, pa)
-    expect(fn).toHaveBeenCalledWith(pa)
+    expect(fn).toHaveBeenCalledWith(pa, expect.any(Function))
+  })
+
+  it('omits model nodes with more than one top-level view descriptor', () => {
+    const first = document.createElement('p')
+    const duplicate = document.createElement('p')
+    const unique = document.createElement('p')
+    const sharedNode = {} as ProseMirrorNode
+    const uniqueNode = {} as ProseMirrorNode
+    Object.assign(first, { pmViewDesc: { node: sharedNode } })
+    Object.assign(duplicate, { pmViewDesc: { node: sharedNode } })
+    Object.assign(unique, { pmViewDesc: { node: uniqueNode } })
+    const view = fakeView(first)
+    view.dom.append(
+      first,
+      duplicate,
+      unique,
+      Object.assign(first.cloneNode(), { pmViewDesc: { node: sharedNode } }),
+    )
+
+    expect(topLevelBlockDom(view)).toEqual(new Map([[uniqueNode, unique]]))
+  })
+
+  it('measures distinct DOM occurrences of one model node separately', () => {
+    const first = document.createElement('p')
+    const duplicate = document.createElement('p')
+    const view = fakeView(first)
+    const cache = new SettledParagraphCache<number[]>(shiftAll, () => true)
+    const measure = (el: HTMLElement) => (el === first ? [1] : [10])
+
+    cache.beginPass(view)
+    expect(cache.measure(view, node, 1, measure, first)).toEqual([1])
+    expect(cache.measure(view, node, 4, measure, duplicate)).toEqual([10])
   })
 
   it('scans for floats once per editor state and only again after a node insert', () => {

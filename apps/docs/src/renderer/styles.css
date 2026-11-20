@@ -3209,7 +3209,7 @@ th[data-rev-fmt] {
    paragraph re-wraps naturally and every gapAbove/gapAccum read consistently
    sees zero-height gaps, so the virtual coordinates stay gapless by layout
    instead of by arithmetic. */
-.editor-scroll .doc-page.measuring-natural .page-gap-inline {
+.editor-scroll .doc-page .page-gap-inline.measuring-natural {
   display: none !important;
 }
 
@@ -3219,7 +3219,7 @@ th[data-rev-fmt] {
    and every block below shifted by the difference — a different amount
    wherever the previous pass had cut, so passes disagreed and page counts
    oscillated. Hidden, the flow measures exactly as it would without pages. */
-.editor-scroll .doc-page.measuring-natural .page-gap:not(.page-gap-inline) {
+.editor-scroll .doc-page .page-gap.measuring-natural:not(.page-gap-inline) {
   display: none !important;
 }
 
@@ -3229,7 +3229,7 @@ th[data-rev-fmt] {
    every later row a column right (cells collapse to 0 width, text wraps per
    character, the ballooned heights get stamped as split-row fills). Collapse
    removes the height but keeps the row in the grid. */
-.editor-scroll .doc-page.measuring-natural tr.page-gap-inline {
+.editor-scroll .doc-page tr.page-gap-inline.measuring-natural {
   display: table-row !important;
   visibility: collapse;
 }
@@ -5781,13 +5781,13 @@ th[data-rev-fmt] {
    the previous page: display-only, the measuring pass keeps the declared margin (else a
    natural lead fits back, loses the gap, overflows again). !important beats the inline
    spacing style; otherwise unscoped so pv clones and direct print match */
-.page-break-lead:not(.measuring-natural *) {
+.page-break-lead:not(.measuring-natural) {
   margin-top: 0 !important;
 }
 
 /* the lead's own break keeps the part of its space before that exceeds the
    previous paragraph's space after (the rest fell at the page bottom) */
-.page-break-lead-trim:not(.measuring-natural *) {
+.page-break-lead-trim:not(.measuring-natural) {
   margin-top: var(--lead-mt) !important;
 }
 

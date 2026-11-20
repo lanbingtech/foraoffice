@@ -38,8 +38,12 @@ export const PHASED_CONTENT_SETTLED_EVENT = 'genoffice:phased-content-settled'
 
 /** blocks in the first synchronous mount: overfills the first screens at any zoom */
 export const PHASE1_BLOCKS = 64
-/** blocks appended per scheduled chunk while the tail streams in */
+/** maximum blocks appended in one scheduled chunk */
 export const PHASE_CHUNK_BLOCKS = 128
+/** Reserve part of the pagination task budget for painting and queued input.
+ * Keep a lower bound because every append also updates the existing editor. */
+const PHASE_APPEND_BUDGET_MS = 24
+const PHASE_MIN_CHUNK_BLOCKS = 16
 /** documents at or below this many top-level blocks mount in one pass as before */
 export const PHASED_MIN_BLOCKS = 192
 
@@ -94,6 +98,7 @@ export function setContentPhased(
   host: PhasedContentHost,
   pmDoc: PmNode,
   schedule: (cb: () => void) => void = nextPaintedFrame,
+  now: () => number = () => performance.now(),
 ): void {
   cancelPhasedContent()
   const content = pmDoc.content ?? []
@@ -111,6 +116,7 @@ export function setContentPhased(
     settle()
   }
   let index = PHASE1_BLOCKS
+  let chunkSize = PHASE_CHUNK_BLOCKS
   // a refused chunk remounted the whole document: whatever the user typed
   // before is gone with it, and an undo must not bring the truncated
   // pre-remount document back
@@ -130,11 +136,24 @@ export function setContentPhased(
   const appendChunk = () => {
     if (my !== token) return
     if (host.isDestroyed()) return finish()
-    const chunk = content.slice(index, index + PHASE_CHUNK_BLOCKS)
+    const chunk = content.slice(index, index + chunkSize)
     index += chunk.length
     const wasDirty = host.getDirty()
     try {
+      const started = now()
       host.appendNodes(chunk)
+      const elapsed = now() - started
+      // Appends are indivisible editor transactions. Scale the next one by
+      // measured cost, limiting growth so a light paragraph group cannot
+      // immediately make the next table/image group monopolize the frame.
+      chunkSize = Math.min(
+        PHASE_CHUNK_BLOCKS,
+        chunkSize * 2,
+        Math.max(
+          PHASE_MIN_CHUNK_BLOCKS,
+          Math.floor((chunk.length * PHASE_APPEND_BUDGET_MS) / Math.max(0.1, elapsed)),
+        ),
+      )
     } catch {
       // a refused chunk falls back to the one-pass mount instead of leaving the file truncated
       remounted = true

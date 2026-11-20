@@ -3,7 +3,12 @@ import { Plugin, PluginKey, type EditorState } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { rangeSlot } from '../dom-range'
-import { SettledParagraphCache, noteFloatTransaction } from './settled-measure'
+import {
+  SettledParagraphCache,
+  noteFloatTransaction,
+  topLevelBlockDom,
+  type ReuseNoOpWhile,
+} from './settled-measure'
 import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
 import { DOC_CSS_COMMITTED_EVENT, WRAP_WIDTHS_COMMITTED_EVENT } from './cjk-punct-shrink'
 
@@ -378,13 +383,13 @@ class JustifyShrinkView {
     const shrinks: MeasuredShrink[] = []
     let measurable = paras.length === 0
     this.results.beginPass(view)
-    const topLevel = SettledParagraphCache.topLevelDom(view)
+    const topLevel = topLevelBlockDom(view)
     for (const para of paras) {
       const measured = this.results.measure(
         view,
         para.node,
         para.pos,
-        (el) => this.measureParagraph(para.node, para.pos, el),
+        (el, reuseNoOpWhile) => this.measureParagraph(para.node, para.pos, el, reuseNoOpWhile),
         topLevel.get(para.node),
       )
       if (!measured) continue
@@ -425,13 +430,19 @@ class JustifyShrinkView {
     node: ProseMirrorNode,
     pos: number,
     el: HTMLElement,
+    reuseNoOpWhile: ReuseNoOpWhile,
   ): MeasuredShrink[] | null {
     const { view } = this
     if (el.offsetWidth === 0) return null
     const rect = el.getBoundingClientRect()
     if (rect.width === 0) return null
     const cs = window.getComputedStyle(el)
-    if (cs.direction === 'rtl' || cs.textAlign !== 'justify') return []
+    const excluded = (style: CSSStyleDeclaration) =>
+      style.direction === 'rtl' || style.textAlign !== 'justify'
+    if (excluded(cs)) {
+      reuseNoOpWhile(excluded)
+      return []
+    }
     // content-box width (layout px): capacity reference for the ragged last
     // line and for break-ended lines, whose rendered extent is their own
     // natural width. Read off the used style, not the integer clientWidth:

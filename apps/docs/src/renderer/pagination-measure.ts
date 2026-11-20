@@ -53,6 +53,29 @@ function scrapeFlags(
 import { additiveParagraphSpacing, autoLineMultOf } from './line-metrics'
 import { appliedFloatShift } from './editor/layout-health'
 
+/** Switch only pagination-owned widgets and lead overrides to the natural
+ * flow. Changing a class on the editor root invalidates descendant selectors
+ * across the document, including blocks that have no pagination decorations. */
+export function enterNaturalFlow(view: Pick<EditorView, 'dom'>): () => void {
+  const elements = view.dom.querySelectorAll(
+    '.page-gap, .page-gap-inline, .page-break-lead, .page-break-lead-trim',
+  )
+  const observer = (view as { domObserver?: { stop(): void; start(): void } }).domObserver
+  const set = (measuring: boolean) => {
+    if (elements.length === 0) return
+    // Lead classes live on editable DOM. These temporary display changes must
+    // never be read back as authored paragraph mutations by ProseMirror.
+    observer?.stop()
+    try {
+      elements.forEach((element) => element.classList.toggle('measuring-natural', measuring))
+    } finally {
+      observer?.start()
+    }
+  }
+  set(true)
+  return () => set(false)
+}
+
 /**
  * Collect the editor's top-level block boxes (relative to the content-area top,
  * converted back to 100% zoom). origin is the content-area top's screen Y (page
@@ -107,8 +130,20 @@ const ZERO_SLOT_PX = 0.05
  * are never looked up. Bucket lists keep document order, matching what the
  * per-block scans returned.
  */
-function bucketByBlock(pm: HTMLElement, selector: string): Map<HTMLElement, HTMLElement[]> {
+function bucketByBlock(
+  pm: HTMLElement,
+  selector: string,
+  start: number,
+): Map<HTMLElement, HTMLElement[]> {
   const byOwner = new Map<HTMLElement, HTMLElement[]>()
+  if (start > 0) {
+    for (let i = start; i < pm.children.length; i++) {
+      const child = pm.children[i] as HTMLElement
+      const matches = child.querySelectorAll<HTMLElement>(selector)
+      if (matches.length > 0) byOwner.set(child, Array.from(matches))
+    }
+    return byOwner
+  }
   for (const hit of pm.querySelectorAll(selector)) {
     let owner = hit.parentElement
     while (owner && owner.parentElement !== pm) owner = owner.parentElement
@@ -282,30 +317,88 @@ export function measureBlocks(
    *  decoration spec); plan-less blocks read the spacer element */
   carryOf?: (pos: number) => number | undefined,
 ): MeasuredContent {
-  const blocks: BlockBox[] = []
+  return readBlockFlow(pm, origin, zoomFactor, planOf, shadow, carryOf)
+}
+
+interface FlowCursor {
+  blocks: number
+  sectionBreaks: number
+  totalHeight: number
+  gapAccum: number
+  carryApplied: number
+  lastZeroTop: number
+}
+
+/** The natural measurements, before neighbour spacing and page metrics mutate them. */
+interface FlowSnapshot {
+  checkpoints: FlowCursor[]
+  blocks: BlockBox[]
+  sectionBreaks: number[]
+}
+
+const startOfFlow: FlowCursor = {
+  blocks: 0,
+  sectionBreaks: 0,
+  totalHeight: 0,
+  gapAccum: 0,
+  carryApplied: 0,
+  lastZeroTop: -Infinity,
+}
+
+const copyFlowBlock = (block: BlockBox): BlockBox => ({
+  ...block,
+  ...(block.shadowScrape ? { shadowScrape: { ...block.shadowScrape } } : {}),
+})
+
+function readBlockFlow(
+  pm: HTMLElement,
+  origin: number,
+  zoomFactor: number,
+  planOf: PlanOf | undefined,
+  shadow: boolean,
+  carryOf: ((pos: number) => number | undefined) | undefined,
+  prefix?: { count: number; snapshot: FlowSnapshot },
+  capture?: (snapshot: FlowSnapshot | null) => void,
+): MeasuredContent {
+  const start = prefix?.count ?? 0
+  const cursor = prefix?.snapshot.checkpoints[start] ?? startOfFlow
+  const checkpoints = prefix?.snapshot.checkpoints.slice(0, start) ?? []
+  const blocks = prefix?.snapshot.blocks.slice(0, cursor.blocks).map(copyFlowBlock) ?? []
   const floats: FloatBox[] = []
-  const sectBreaks = new Set<number>()
-  let totalHeight = 0
-  let gapAccum = 0
+  const sectBreaks = new Set(prefix?.snapshot.sectionBreaks.slice(0, cursor.sectionBreaks))
+  let { totalHeight, gapAccum, carryApplied, lastZeroTop } = cursor
   // float-carry spacer (split floating table): real flow space that moves the
   // anchor paragraph beside the last portion, so it is not a gap; its height
   // is reported on the block it precedes
-  let carryApplied = 0
   // consecutive zero-height break carriers collapse their margins onto one DOM
   // top; each gets its own virtual slot so its page can be told apart
-  let lastZeroTop = -Infinity
   const showDeleted = !!pm.closest('.rev-display-original')
-  const breaksByBlock = bucketByBlock(pm, '.doc-field-pagebreak, .doc-page-br')
-  const colBreaksByBlock = bucketByBlock(pm, '.doc-col-br')
-  const gapInlinesByBlock = bucketByBlock(pm, '.page-gap-inline')
-  const relImgsByBlock = bucketByBlock(pm, '.doc-inline-img-anchor > img[data-page-rel-v="1"]')
+  const breaksByBlock = bucketByBlock(pm, '.doc-field-pagebreak, .doc-page-br', start)
+  const colBreaksByBlock = bucketByBlock(pm, '.doc-col-br', start)
+  const gapInlinesByBlock = bucketByBlock(pm, '.page-gap-inline', start)
+  const relImgsByBlock = bucketByBlock(
+    pm,
+    '.doc-inline-img-anchor > img[data-page-rel-v="1"]',
+    start,
+  )
   const relXImgsByBlock = bucketByBlock(
     pm,
     '.doc-inline-img-anchor > img[data-page-rel-x="1"]:not([data-page-rel-v="1"])',
+    start,
   )
-  const imgsByBlock = bucketByBlock(pm, 'img')
-  const tablesByBlock = bucketByBlock(pm, 'table')
-  for (const el of Array.from(pm.children) as HTMLElement[]) {
+  const imgsByBlock = bucketByBlock(pm, 'img', start)
+  const tablesByBlock = bucketByBlock(pm, 'table', start)
+  const checkpoint = () => ({
+    blocks: blocks.length,
+    sectionBreaks: sectBreaks.size,
+    totalHeight,
+    gapAccum,
+    carryApplied,
+    lastZeroTop,
+  })
+  for (let i = start; i < pm.children.length; i++) {
+    if (capture) checkpoints.push(checkpoint())
+    const el = pm.children[i] as HTMLElement
     const rect = el.getBoundingClientRect()
     if (el.classList.contains('page-gap') || el.classList.contains('page-float-host')) {
       gapAccum += rect.height
@@ -744,6 +837,14 @@ export function measureBlocks(
     if (!floated) gapAccum += innerGap
     totalHeight = Math.max(totalHeight, top + height)
   }
+  if (capture) {
+    checkpoints.push(checkpoint())
+    capture(
+      floats.length === 0
+        ? { checkpoints, blocks: blocks.map(copyFlowBlock), sectionBreaks: [...sectBreaks] }
+        : null,
+    )
+  }
   // inter-block CSS margin (space after): rect height excludes it, but it occupies
   // vertical layout space. Attribute it to the previous block's spaceAfterPx and add
   // it to the height, so the engine's capacity bookkeeping matches Y coordinates and
@@ -765,7 +866,9 @@ export function measureBlocks(
   // (space-before semantics: counted before the block's own lines)
   const first = blocks[0]
   const firstIsTable =
-    !!first?.el && (first.el.matches('table') || !!tablesByBlock.get(first.el)?.length)
+    !!first?.el &&
+    (first.el.matches('table') ||
+      (start > 0 ? !!first.el.querySelector('table') : !!tablesByBlock.get(first.el)?.length))
   if (first && !firstIsTable) {
     // the plan's margin for a planned block, the DOM offset otherwise; what the
     // DOM adds beyond the plan is editor chrome (break indicator) and stays an
@@ -781,6 +884,138 @@ export function measureBlocks(
     }
   }
   return { blocks, totalHeight, floats, sectBreaks }
+}
+
+interface FlowRead {
+  origin: number
+  factor: number
+  width: number
+  allowReuse: boolean
+  /** Source child of the first model change. Some rule changes have no DOM mutation. */
+  firstChangedChild?: () => number
+  planOf?: PlanOf
+  shadow?: boolean
+  carryOf?: (pos: number) => number | undefined
+}
+
+// These boxes can affect earlier flow or gain geometry without a text/DOM edit.
+const NON_LOCAL_FLOW = [
+  '.doc-para-join-tail',
+  '.doc-para-frame-float',
+  '.doc-protected-floating',
+  '.doc-protected-textboxes',
+  '.doc-img-float',
+  '.doc-table-float-left',
+  '.doc-table-float-right',
+  '.doc-table-float-center',
+  '.doc-cell-boxes',
+  'img:not(.ProseMirror-separator)',
+].join(', ')
+
+function layoutClass(value: string | null): string {
+  return (value ?? '')
+    .split(/\s+/)
+    .filter((name) => name && name !== 'measuring-natural')
+    .join(' ')
+}
+
+/** Keep natural geometry before the first affected block. Observe the actual
+ * rendered flow as well as the editor's invalidation decision, since layout
+ * decorations and NodeViews can change without a document transaction. */
+export function createBlockMeasurer(pm: HTMLElement) {
+  let snapshot: FlowSnapshot | null = null
+  let width = NaN
+  let factor = NaN
+  let frontier = 0
+  let observing = false
+  let positions = new Map<Node, number>()
+  const invalidate = (records: MutationRecord[]) => {
+    if (!snapshot || frontier === 0) return
+    for (const record of records) {
+      const { target } = record
+      if (record.attributeName && target instanceof Element) {
+        const current = target.getAttribute(record.attributeName)
+        if (
+          current === record.oldValue ||
+          (record.attributeName === 'class' &&
+            layoutClass(current) === layoutClass(record.oldValue))
+        )
+          continue
+      }
+      if (target === pm) {
+        const preceding = record.previousSibling
+        frontier = Math.min(frontier, (preceding && positions.get(preceding)) || 0)
+      } else {
+        let owner: Node | null = target
+        while (owner && owner.parentNode !== pm) owner = owner.parentNode
+        // Margins and contextual spacing at the frontier affect its neighbour.
+        const index = owner ? positions.get(owner) : undefined
+        frontier = Math.min(frontier, index === undefined ? 0 : Math.max(0, index - 1))
+      }
+      if (frontier === 0) return
+    }
+  }
+  const observer = new MutationObserver(invalidate)
+  return {
+    measure(input: FlowRead): MeasuredContent {
+      invalidate(observer.takeRecords())
+      const linear = !pm.querySelector(NON_LOCAL_FLOW)
+      const count = Math.min(
+        frontier,
+        pm.children.length,
+        input.allowReuse && snapshot && linear && input.firstChangedChild
+          ? Math.max(0, input.firstChangedChild() - 1)
+          : Infinity,
+      )
+      const prefix =
+        input.allowReuse &&
+        snapshot &&
+        linear &&
+        width === input.width &&
+        factor === input.factor &&
+        count > 0 &&
+        positions.get(pm.children[count - 1]) === count - 1
+          ? { count, snapshot }
+          : undefined
+      if (!linear) snapshot = null
+      const result = readBlockFlow(
+        pm,
+        input.origin,
+        input.factor,
+        input.planOf,
+        input.shadow ?? false,
+        input.carryOf,
+        prefix,
+        linear
+          ? (value) => {
+              snapshot = value
+            }
+          : undefined,
+      )
+      positions = snapshot ? new Map(Array.from(pm.children, (child, i) => [child, i])) : new Map()
+      frontier = positions.size
+      width = input.width
+      factor = input.factor
+      if (Boolean(snapshot) !== observing) {
+        observing = Boolean(snapshot)
+        if (observing)
+          observer.observe(pm, {
+            attributes: true,
+            attributeOldValue: true,
+            childList: true,
+            subtree: true,
+            characterData: true,
+          })
+        else observer.disconnect()
+      }
+      return result
+    },
+    dispose() {
+      observer.disconnect()
+      snapshot = null
+      positions.clear()
+    },
+  }
 }
 
 /**

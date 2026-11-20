@@ -89,7 +89,13 @@ function startStreamingOpen(editor: Editor, blocks: number): Array<() => void> {
     getDirty: () => false,
     setDirty: () => {},
   }
-  setContentPhased(host, docOf(blocks) as never, (cb) => chunks.push(cb))
+  // Count the layout work for fixed-size batches independently of jsdom speed.
+  setContentPhased(
+    host,
+    docOf(blocks) as never,
+    (cb) => chunks.push(cb),
+    () => 0,
+  )
   return chunks
 }
 

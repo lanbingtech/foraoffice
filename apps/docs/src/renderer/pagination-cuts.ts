@@ -16,6 +16,7 @@ import {
   pageOfY,
   pinnedFloatPage,
   sectionFirstPages,
+  sliceStartsVisiblePage,
 } from './pagination-slices'
 import type {
   BlockBox,
@@ -243,6 +244,63 @@ export function pagePaperEdges(cuts: readonly PageCut[], firstMarginTop: number)
     })
   })
   return out
+}
+
+type VisiblePageBoundary = { y: number; page: number }
+
+function visiblePageAt(
+  boundaries: readonly VisiblePageBoundary[],
+  y: number,
+  first: number,
+  origin = 0,
+  factor = 1,
+): number {
+  let lo = 0
+  let hi = boundaries.length
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1
+    if (origin + boundaries[mid].y * factor > y) hi = mid
+    else lo = mid + 1
+  }
+  return lo === 0 ? first : boundaries[lo - 1].page
+}
+
+/** Visible page numbers for scroll probes. Build after the gap widgets' landed tops are learned. */
+export function buildPageLookup(
+  slices: readonly PageSlice[],
+  cuts: readonly PageCut[],
+  firstMarginTop: number,
+) {
+  let total = 0
+  const fromFlow: VisiblePageBoundary[] = []
+  const visiblePages = slices.map((slice, i) => {
+    if (sliceStartsVisiblePage(slice, slices[i - 1])) total++
+    if (i > 0 && !Number.isNaN(slice.start)) {
+      // pageAt takes the last qualifying slice in document order. A later slice
+      // with an equal or earlier start supersedes the old boundary at every Y.
+      while (fromFlow.length && fromFlow[fromFlow.length - 1].y >= slice.start) fromFlow.pop()
+      fromFlow.push({ y: slice.start, page: total })
+    }
+    return total
+  })
+  const first = visiblePages[0] ?? 0
+  const hasGaps = cuts.some((cut) => cut.gap)
+  let top = -Infinity
+  const fromPaper = pagePaperEdges(cuts, firstMarginTop).map((edge) => {
+    // The paper scan stops at the first gap below the probe, even if a later
+    // gap was pulled above it. All preceding tops must have been reached.
+    if (edge.gapTop > top) top = edge.gapTop
+    return { y: top, page: visiblePages[edge.page] ?? total }
+  })
+  return {
+    total,
+    // Keep the forward screen transform so a probe on a gap's exact top
+    // selects the page below it, even after zoom and scrolling.
+    fromCuts: (y: number, origin = 0, factor = 1) =>
+      hasGaps ? visiblePageAt(fromPaper, y, first, origin, factor) : null,
+    fromSlices: (yFromContentOrigin: number) =>
+      Number.isNaN(yFromContentOrigin) ? first : visiblePageAt(fromFlow, yFromContentOrigin, first),
+  }
 }
 
 /** page a floated block was pinned to (`floats`), or undefined */

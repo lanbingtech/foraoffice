@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { measureBlocks } from '../src/renderer/pagination'
+import { createBlockMeasurer, enterNaturalFlow } from '../src/renderer/pagination-measure'
 
 const rectOf = (top: number, height: number, width = 100) =>
   ({
@@ -25,6 +26,58 @@ function flowOf(specs: Array<{ top: number; height: number; inner: string; tag?:
   }
   return pm
 }
+
+describe('natural-flow measurement state', () => {
+  it('changes only pagination widgets and the margins of page-leading blocks', () => {
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <p id="one">ordinary</p>
+      <div id="two" class="page-gap"></div>
+      <p id="three" class="page-break-lead-trim">
+        <span id="four" class="page-gap-inline"></span>
+      </p>
+      <table><tbody><tr id="five" class="page-gap-inline"><td></td></tr></tbody></table>`
+    const restore = enterNaturalFlow({ dom: root })
+    const marked = () =>
+      Array.from(root.querySelectorAll('.measuring-natural'), (element) => element.id)
+    expect(root.classList.contains('measuring-natural')).toBe(false)
+    expect(marked()).toEqual(['two', 'three', 'four', 'five'])
+    restore()
+    expect(marked()).toEqual([])
+  })
+})
+
+describe('incremental flow measurement', () => {
+  it('measures the changed table and its flow neighbour while keeping an untouched prefix', () => {
+    const pm = flowOf([
+      { top: 0, height: 20, inner: 'first' },
+      { top: 20, height: 20, inner: 'second' },
+      { top: 40, height: 20, inner: 'neighbour' },
+      { top: 60, height: 40, tag: 'div', inner: '<table><tr><td>cell</td></tr></table>' },
+    ])
+    const cached = createBlockMeasurer(pm)
+    try {
+      const options = { origin: 0, factor: 1, width: 100, allowReuse: true }
+      cached.measure(options)
+      const stable = vi.spyOn(pm.children[0], 'getBoundingClientRect')
+      pm.querySelector('td')!.textContent = 'edited'
+      pm.children[3].getBoundingClientRect = () => rectOf(60, 65)
+      const afterEdit = cached.measure(options)
+      expect(stable).not.toHaveBeenCalled()
+      expect(afterEdit).toEqual(measureBlocks(pm, 0, 1))
+
+      stable.mockClear()
+      cached.measure({ ...options, firstChangedChild: () => 0 })
+      expect(stable).toHaveBeenCalled()
+
+      stable.mockClear()
+      cached.measure({ ...options, width: 110 })
+      expect(stable).toHaveBeenCalled()
+    } finally {
+      cached.dispose()
+    }
+  })
+})
 
 describe('measureBlocks — whole-flow break scan (genoffice#526 bucketing)', () => {
   it('a page-type break in a body paragraph forces the next block to a new page', () => {

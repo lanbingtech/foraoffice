@@ -173,7 +173,7 @@ import { PaginationPreview } from './components/PaginationPreview'
 import { imageParaPaginationMeta, paraPaginationMeta, tableWidowOff } from './editor/para-flags'
 import {
   comparePlanToBlocks,
-  planByElement,
+  createBlockPlanReader,
   planDiffHistogram,
   planPropsOf,
   type PlanOf,
@@ -190,6 +190,8 @@ import {
   carryStreamedSamples,
   endnotesAnchorY,
   createLineRectsCache,
+  createBlockMeasurer,
+  enterNaturalFlow,
   anchorElement,
   lineStartAnchor,
   liveSectionsForDocument,
@@ -201,6 +203,7 @@ import {
   type LineAnchor,
   hfPartWidthPx,
   buildPageCuts,
+  buildPageLookup,
   headingPagesOf,
   pageCutSignature,
   applyGapLedger,
@@ -3922,14 +3925,16 @@ export function App({
     () => (doc ? planPropsOf(doc.parsed, sections, revisionDisplay === 'original') : null),
     [doc, sections, revisionDisplay],
   )
-  // the BlockPlan of the current editor state keyed by rendered element; built
-  // per measure so a transaction between passes cannot leave it stale
+  const readBlockPlans = useMemo(
+    () => (planProps ? createBlockPlanReader(planProps) : null),
+    [planProps],
+  )
   const blockPlans = useCallback(
     (): PlanOf | undefined =>
-      editor && planProps
-        ? planByElement(editor.state.doc, editor.view, planProps, floatShiftsOf(editor.state))
+      editor && readBlockPlans
+        ? readBlockPlans(editor.state.doc, editor.view, floatShiftsOf(editor.state))
         : undefined,
-    [editor, planProps],
+    [editor, readBlockPlans],
   )
 
   // per-page footnote collection: the page of the referencing block → that page's footnote entries (number/text/estimated height)
@@ -4145,6 +4150,10 @@ export function App({
     const mixedPaper = sections.some((s) => pageLeftOf(s.settings) > 0.5)
     const contentH = twipsToPx(section.pageHeight) - effTopSingle - effBottomSingle
     let slices: PageSlice[] = []
+    let pageLookup: ReturnType<typeof buildPageLookup> | undefined
+    let scrollFrame = 0
+    let restoreNaturalFlow: (() => void) | undefined
+    let flowRead: { pm: HTMLElement; reader: ReturnType<typeof createBlockMeasurer> } | undefined
     let timer: number | null = null
     const activity = trackPaginationActivity()
     const storyDiagnostic = createDocumentStoryDiagnostic(() => {
@@ -4181,7 +4190,7 @@ export function App({
     const pmEl = () => document.querySelector('.editor-scroll .ProseMirror') as HTMLElement | null
     const locate = () => {
       const pm = pmEl()
-      if (!pm || slices.length === 0) return
+      if (!pm || !pageLookup) return
       const pmRect = pm.getBoundingClientRect()
       const scrollRect = scroller.getBoundingClientRect()
       const origin = pmRect.top + mTopPx * factor
@@ -4189,9 +4198,9 @@ export function App({
       // first content line instead of the viewport middle
       const mpIdx = multipageActiveRef.current
       const mpFrame = mpIdx == null ? null : mpFramesRef.current[mpIdx]
-      const wrapTop = pm.closest('.page-wrap')?.getBoundingClientRect().top ?? pmRect.top
       const midScreen = mpFrame
-        ? wrapTop + (mpFrame.top + mTopPx + 1) * factor
+        ? (pm.closest('.page-wrap')?.getBoundingClientRect().top ?? pmRect.top) +
+          (mpFrame.top + mTopPx + 1) * factor
         : Math.min(scrollRect.top + scrollRect.height / 2, pmRect.bottom)
       // slices use gapless virtual coordinates; subtract the page-gap height above the midpoint
       // (including mid-paragraph inline gaps and repeated-header clone rows, which carry
@@ -4202,7 +4211,7 @@ export function App({
       // only the former maps the midpoint onto the page shown there. Its
       // repeated-header clones are float content (the carry covers only the
       // gap bands; the continuation's page starts at the gap's bottom)
-      const fromDom = () => {
+      const flowY = () => {
         let gapAbove = 0
         // mixed-column pages pull their gap (and everything below) up over the
         // vacated stacked space: add that back to land in the gapless coordinates
@@ -4217,7 +4226,7 @@ export function App({
             pullUpAbove += Math.max(0, -parseFloat(gap.style.marginTop) || 0)
           }
         }
-        return pageAt(slices, (midScreen - origin - gapAbove) / factor + pullUpAbove)
+        return (midScreen - origin - gapAbove) / factor + pullUpAbove
       }
       // the page whose gap box starts at or above the midpoint (inside a gap band
       // the page below it is current, where the DOM sum lands too)
@@ -4230,16 +4239,25 @@ export function App({
         return page
       }
       // without gap widgets (web / read mode) the pages follow the flow Y alone
-      const shadowPage = pageReaderShadow.enabled ? fromDom() : null
-      const page = pageCuts.some((c) => c.gap) ? fromCuts() : fromDom()
-      if (shadowPage !== null && shadowPage !== page)
-        pageReaderShadow.report('locate', shadowPage, page)
-      // visible-page numbering so the status bar and F9 NUMPAGES agree with the gap widgets
-      const current = visiblePageCount(slices, page)
-      const total = visiblePageCount(slices)
+      const cutPage = pageLookup.fromCuts(midScreen, pmRect.top, factor)
+      const domY = cutPage === null || pageReaderShadow.enabled ? flowY() : undefined
+      if (pageReaderShadow.enabled && domY !== undefined && cutPage !== null) {
+        const shadowPage = pageAt(slices, domY)
+        const page = fromCuts()
+        if (shadowPage !== page) pageReaderShadow.report('locate', shadowPage, page)
+      }
+      const current = cutPage ?? pageLookup.fromSlices(domY ?? flowY())
+      const total = pageLookup.total
       setPageInfo((prev) =>
         prev.current === current && prev.total === total ? prev : { current, total },
       )
+    }
+    const onScroll = () => {
+      if (scrollFrame) return
+      scrollFrame = requestAnimationFrame(() => {
+        scrollFrame = 0
+        locate()
+      })
     }
     let lastPassAt = 0
     let lastPassMs = 0
@@ -4468,7 +4486,8 @@ export function App({
         lastPassMs = performance.now() - lastPassAt
         // a pass that threw between the add and the pre-setPageGaps remove
         // must not leave the gap widgets hidden
-        pmEl()?.classList.remove('measuring-natural')
+        restoreNaturalFlow?.()
+        restoreNaturalFlow = undefined
       }
     }
     const remeasurePass = (dirty: number | null) => {
@@ -4548,7 +4567,7 @@ export function App({
       // cut-anchor resolution below see the natural wrap; removed before
       // setPageGaps so widget building and later display-state reads (strip
       // alignment, cut overlays, locate) run against the real layout.
-      pm.classList.add('measuring-natural')
+      restoreNaturalFlow = enterNaturalFlow(editor.view)
       // joined paragraphs align against the natural flow (gap widgets hidden)
       alignJoinedParagraphs(pm, factor, editor.view)
       // a columned canvas measures + slices in the single-flow measuring state (fillLineBoxes
@@ -4556,15 +4575,38 @@ export function App({
       // reads like gap positioning happen outside the measuring state
       const measured = measureSingleFlow(pm, () => {
         const t0 = performance.now()
-        const origin = pm.getBoundingClientRect().top + mTopPx * factor
-        const { blocks, totalHeight, floats } = measureBlocks(
-          pm,
-          origin,
-          factor,
-          planOf,
-          true,
-          floatCarriesOf(editor.state),
-        )
+        const rect = pm.getBoundingClientRect()
+        const origin = rect.top + mTopPx * factor
+        const carryOf = floatCarriesOf(editor.state)
+        const linearFlow = colMode === 'none' && !hasVertical && !hasVAlign && !mirrorMargins
+        if (linearFlow && flowRead?.pm !== pm) {
+          flowRead?.reader.dispose()
+          flowRead = { pm, reader: createBlockMeasurer(pm) }
+        }
+        const { blocks, totalHeight, floats } =
+          linearFlow && flowRead
+            ? flowRead.reader.measure({
+                origin,
+                width: rect.width,
+                factor,
+                allowReuse: dirty !== null && document.fonts?.status === 'loaded',
+                firstChangedChild: () => {
+                  const model = editor.state.doc
+                  if (dirty === null) return 0
+                  if (dirty >= model.childCount) return pm.children.length
+                  let pos = 0
+                  for (let i = 0; i < dirty; i++) pos += model.child(i).nodeSize
+                  let el = editor.view.nodeDOM(pos)
+                  while (el && el.parentNode !== pm) el = el.parentNode
+                  return el instanceof Element
+                    ? Math.max(0, Array.from(pm.children).indexOf(el))
+                    : 0
+                },
+                planOf,
+                shadow: true,
+                carryOf,
+              })
+            : measureBlocks(pm, origin, factor, planOf, true, carryOf)
         if (hasVertical)
           for (const b of blocks) if (b.el && !b.floated) b.inlineExtraPx = blockInlineExtraPx(b.el)
         planDiff = planOf
@@ -4711,6 +4753,13 @@ export function App({
         oversizeClips,
         cuts,
       } = measured
+      // These physical margins are independent of natural-flow vertical spacing.
+      // Read them while the measured flow is still installed, before changing
+      // gap visibility or committing block decorations.
+      const secWSpecs =
+        viewMode === 'print' && !readMode && secList && hfHs
+          ? sectionWidthSpecs(blocks, secList, sectionGeoms(secList, hfHs), paperWPx)
+          : []
       slices = measured.s
       pageCuts = cuts
       lastBlocks = blocks
@@ -4764,6 +4813,7 @@ export function App({
       }
       // A pristine open keeps the file's caches. A refresh on edit updates
       // the model for save and remains outside the user's undo history.
+      let refreshToc: (() => void) | undefined
       if (editor && dirtyRef.current && slices.length > 0) {
         const byEl = new Map(blocks.filter((b) => b.el).map((b) => [b.el as HTMLElement, b.top]))
         const headings = collectHeadings(editor.state.doc, editor.storage.listNumbering?.styles)
@@ -4775,9 +4825,14 @@ export function App({
         if (applyTocPageDisplays(editor.state.doc, tr, headings, displays, tocPageTextOf)) {
           tr.setMeta('addToHistory', false)
           const before = editor.state.doc
-          editor.view.dispatch(tr)
-          // a field refresh is not a user edit: keep the AI freshness baseline
-          carryDocSeen(editor, before)
+          // The model transaction can rebuild node views. Keep the measured DOM
+          // stable through cut anchors and finish the layout before applying it.
+          refreshToc = () => {
+            if (editor.state.doc !== before) return
+            editor.view.dispatch(tr)
+            // A field refresh is not a user edit: keep the AI freshness baseline.
+            carryDocSeen(editor, before)
+          }
         }
       }
       // M4 always-on pagination in the canvas: render page gaps before page-leading blocks
@@ -5547,7 +5602,8 @@ export function App({
         const ledgered = cuts.some((c) => c.gap)
         setFloatVShifts(editor.view, floatVEls, layoutBatch)
         stage('floatV')
-        pm.classList.remove('measuring-natural')
+        restoreNaturalFlow?.()
+        restoreNaturalFlow = undefined
         setPageGaps(editor.view, gaps, firstPageFloats, layoutBatch)
         stage('pageGaps')
         // mixed-column canvas: paint the engine's regions via per-block width/translate decorations
@@ -5563,11 +5619,6 @@ export function App({
         const vaSpecs =
           viewMode === 'print' && !readMode && secList && hfHs
             ? vAlignShiftSpecs(blocks, slices, secList, sectionGeoms(secList, hfHs))
-            : []
-        // sections whose content width differs from the canvas section: per-block wrap widths
-        const secWSpecs =
-          viewMode === 'print' && !readMode && secList && hfHs
-            ? sectionWidthSpecs(blocks, secList, sectionGeoms(secList, hfHs), paperWPx)
             : []
         // sections disagreeing on the typed docGrid pitch: per-block pitch vars
         const gridSpecs =
@@ -5862,7 +5913,9 @@ export function App({
           return gapIds
         })
       }
+      pageLookup = buildPageLookup(slices, pageCuts, mTopPx)
       setLayoutRev((v) => v + 1)
+      refreshToc?.()
     }
     const onUpdate = (
       fastIndex: number | null = null,
@@ -5911,8 +5964,6 @@ export function App({
       window.clearTimeout(timer)
       remeasure()
     }
-    if (isPhasedContentPending()) onUpdate()
-    else remeasure()
     // async @font-face loading triggers a full reflow (line-break points change); pagination
     // must be remeasured, and cached line samples invalidated (block heights may not change)
     // header/footer strips probed under a fallback face re-measure too
@@ -5943,7 +5994,7 @@ export function App({
     }
     // the epoch bump re-runs this effect; an already-settled ready promise must not re-probe
     const stopFonts = observePaginationFonts(document.fonts, onFontsChanged)
-    scroller.addEventListener('scroll', locate, { passive: true })
+    scroller.addEventListener('scroll', onScroll, { passive: true })
     const onDocUpdate = ({ transaction }: { transaction: Transaction }) => {
       resetWidthPassHistory(colWidthPass)
       onUpdate(singleInlineEditIndex(transaction), firstChangedTopLevelIndex(transaction))
@@ -5983,8 +6034,13 @@ export function App({
       }
     }
     editor?.on('transaction', onShrinkTr)
+    // Even the initial pass can update generated fields. Observe those model
+    // changes before measuring so their new wrapping schedules a fresh pass.
+    if (isPhasedContentPending()) onUpdate()
+    else remeasure()
     return () => {
       disposed = true
+      flowRead?.reader.dispose()
       activity.dispose()
       disposeOwnedDiagnostic(
         (window as unknown as Record<string, Record<string, unknown>>).__pageDebug,
@@ -5996,12 +6052,14 @@ export function App({
       if (timer) window.clearTimeout(timer)
       if (hfTimer) window.clearTimeout(hfTimer)
       stopFonts()
-      scroller.removeEventListener('scroll', locate)
+      if (scrollFrame) cancelAnimationFrame(scrollFrame)
+      scroller.removeEventListener('scroll', onScroll)
       editor?.off('update', onDocUpdate)
       editor?.off('transaction', onShrinkTr)
     }
   }, [
     doc,
+    docCss,
     section,
     sections,
     zoom,

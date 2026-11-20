@@ -1074,7 +1074,7 @@ describe('page-break-lead margin drop', () => {
   )
   it('is display-only: the measuring pass still sees the declared space-before', () => {
     expect(css).toMatch(
-      /\.page-break-lead:not\(\.measuring-natural \*\)\s*\{\s*margin-top: 0 !important;/,
+      /\.page-break-lead:not\(\.measuring-natural\)\s*\{\s*margin-top: 0 !important;/,
     )
     expect(css).not.toMatch(/\n\.page-break-lead\s*\{/)
   })

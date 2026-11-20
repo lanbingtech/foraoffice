@@ -86,6 +86,7 @@ export function measureNatural<T>(el: HTMLElement, fn: () => T): T {
 interface Entry<T> {
   /** paragraph start when measured; results are stored at that offset */
   pos: number
+  el: HTMLElement
   /** position-independent identity of the result */
   key: string
   rectKey: string
@@ -93,9 +94,13 @@ interface Entry<T> {
   settled: boolean
   /** distinct results seen so far */
   rounds: number
+  /** An empty result caused by style eligibility, independently of line layout. */
+  excludedByStyle?: (style: CSSStyleDeclaration) => boolean
   /** last pass that visited the paragraph (unvisited entries are pruned) */
   gen: number
 }
+
+export type ReuseNoOpWhile = (excludedByStyle: (style: CSSStyleDeclaration) => boolean) => void
 
 /**
  * A paragraph whose compression re-wraps its own lines can answer differently
@@ -147,37 +152,44 @@ export class SettledParagraphCache<T> {
     this.floatBands = floatBandsOf(view)
   }
 
-  /**
-   * Top-level block nodes → their DOM, read off ProseMirror's view descriptors
-   * in one walk; view.nodeDOM(pos) descends through every top-level block for
-   * each call, which made a pass over N paragraphs cost N².
-   */
-  static topLevelDom(view: EditorView): Map<ProseMirrorNode, HTMLElement> {
-    const map = new Map<ProseMirrorNode, HTMLElement>()
-    for (const child of Array.from(view.dom.childNodes)) {
-      const desc = (child as { pmViewDesc?: { node?: ProseMirrorNode } }).pmViewDesc
-      if (desc?.node && child instanceof HTMLElement) map.set(desc.node, child)
-    }
-    return map
-  }
-
   measure(
     view: EditorView,
     node: ProseMirrorNode,
     pos: number,
-    measureParagraph: (el: HTMLElement) => T | null,
+    measureParagraph: (el: HTMLElement, reuseNoOpWhile: ReuseNoOpWhile) => T | null,
     dom?: HTMLElement,
   ): T | null {
     const el = dom ?? view.nodeDOM(pos)
     if (!(el instanceof HTMLElement)) return null
-    return measureNatural(el, () => this.measureEl(node, pos, el, measureParagraph))
+    const entry = this.results.get(node)
+    let prev = entry?.el === el ? entry : undefined
+    if (prev) prev.gen = this.gen
+    if (prev?.excludedByStyle) {
+      const style = getComputedStyle(el)
+      // Alignment and direction do not depend on an inline page-gap's display.
+      if (!prev.excludedByStyle(style)) prev = undefined
+      else if (
+        el.parentElement === view.dom &&
+        style.display === 'block' &&
+        style.cssFloat === 'none' &&
+        style.writingMode === 'horizontal-tb' &&
+        (style.position === 'static' || style.position === 'relative') &&
+        // The gap does not set a normal-flow block's width. Still check the
+        // drawn box so hidden paragraphs go through the natural-layout retry.
+        el.offsetWidth > 0 &&
+        el.getBoundingClientRect().width > 0
+      )
+        return this.resultAt(prev, pos)
+    }
+    return measureNatural(el, () => this.measureEl(node, pos, el, measureParagraph, prev))
   }
 
   private measureEl(
     node: ProseMirrorNode,
     pos: number,
     el: HTMLElement,
-    measureParagraph: (el: HTMLElement) => T | null,
+    measureParagraph: (el: HTMLElement, reuseNoOpWhile: ReuseNoOpWhile) => T | null,
+    prev: Entry<T> | undefined,
   ): T | null {
     // layout px: a page-zoom transform changes no line break
     let rectKey = `${el.offsetHeight}:${el.offsetWidth}`
@@ -186,12 +198,10 @@ export class SettledParagraphCache<T> {
       if (this.floatBands.some(([top, bottom]) => r.top < bottom && r.bottom > top))
         rectKey = `${r.top}:${rectKey}`
     }
-    const prev = this.results.get(node)
-    if (prev) prev.gen = this.gen
-    if (prev?.settled && prev.rectKey === rectKey) {
-      return prev.pos === pos ? prev.result : this.shift(prev.result, pos - prev.pos)
-    }
-    const result = measureParagraph(el)
+    if (prev?.settled && prev.rectKey === rectKey) return this.resultAt(prev, pos)
+
+    let excludedByStyle: Entry<T>['excludedByStyle']
+    const result = measureParagraph(el, (check) => (excludedByStyle = check))
     if (result === null) {
       this.results.delete(node)
       return null
@@ -200,6 +210,7 @@ export class SettledParagraphCache<T> {
     const rounds = (prev?.rounds ?? 0) + 1
     this.results.set(node, {
       pos,
+      el,
       key,
       rectKey,
       result,
@@ -208,8 +219,30 @@ export class SettledParagraphCache<T> {
         this.stableNow(result) ||
         rounds >= MAX_PARA_ROUNDS,
       rounds,
+      excludedByStyle,
       gen: this.gen,
     })
     return result
   }
+
+  private resultAt(entry: Entry<T>, pos: number): T {
+    return entry.pos === pos ? entry.result : this.shift(entry.result, pos - entry.pos)
+  }
+}
+
+/**
+ * Top-level block nodes → their DOM, read off ProseMirror's view descriptors
+ * in one walk; view.nodeDOM(pos) descends through every top-level block for
+ * each call, which made a pass over N paragraphs cost N².
+ */
+export function topLevelBlockDom(view: Pick<EditorView, 'dom'>): Map<ProseMirrorNode, HTMLElement> {
+  const map = new Map<ProseMirrorNode, HTMLElement>()
+  const duplicates = new Set<ProseMirrorNode>()
+  for (const child of Array.from(view.dom.childNodes)) {
+    const node = (child as { pmViewDesc?: { node?: ProseMirrorNode } }).pmViewDesc?.node
+    if (!node || !(child instanceof HTMLElement) || duplicates.has(node)) continue
+    if (map.delete(node)) duplicates.add(node)
+    else map.set(node, child)
+  }
+  return map
 }

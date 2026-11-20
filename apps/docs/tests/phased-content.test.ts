@@ -97,6 +97,30 @@ describe('setContentPhased', () => {
     expect(state.dirty).toBe(false)
   })
 
+  it('reduces the next append workload after a slow batch without dropping content', async () => {
+    const { host, state } = makeHost()
+    const scheduler = makeScheduler()
+    const total = PHASE1_BLOCKS + PHASE_CHUNK_BLOCKS * 3
+    let now = 0
+    const append = host.appendNodes
+    host.appendNodes = (nodes) => {
+      append(nodes)
+      now += nodes.length / 2
+    }
+    setContentPhased(host, docOf(total), scheduler.schedule, () => now)
+    scheduler.drain()
+    scheduler.drain()
+    const appends = state.events.filter((event) => event.startsWith('append:'))
+    expect(appends[0]).toBe(`append:${PHASE_CHUNK_BLOCKS}`)
+    expect(Number(appends[1].split(':')[1])).toBeLessThan(PHASE_CHUNK_BLOCKS)
+    expect(state.loading).toBe(true)
+    while (scheduler.pending() > 0) scheduler.drain()
+    expect(state.mounted.map((node) => node.attrs?.docxIndex)).toEqual(
+      Array.from({ length: total }, (_, i) => i),
+    )
+    await expect(waitForFullContent()).resolves.toBeUndefined()
+  })
+
   it('cancelPhasedContent drops the pending tail and releases the save gate', async () => {
     const blocks = PHASE1_BLOCKS + PHASE_CHUNK_BLOCKS * 3
     const { host, state } = makeHost()

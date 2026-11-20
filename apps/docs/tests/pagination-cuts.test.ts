@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   applyGapLedger,
   buildPageCuts,
+  buildPageLookup,
   flowOffsetAt,
   learnGapFlowTops,
   headingPagesOf,
@@ -353,5 +354,57 @@ describe('gap ledger on the cuts', () => {
     expect(flowOffsetAt(cuts, [], 405)).toBe(0)
     expect(flowOffsetAt(cuts, [], 410)).toBe(220)
     expect(learnGapFlowTops(cuts, [410])).toBe(false)
+  })
+
+  it('indexes the landed gap tops, preserving the earlier boundary before a pulled-up gap', () => {
+    const slices = [slice(0, 400), slice(400, 800), slice(800, 1200), slice(1200, 1600)]
+    const cuts = buildPageCuts([], slices, [geom(400)], [])
+    applyGapLedger(cuts, [entry(1), entry(2), entry(3, { kind: 'cut', heightPx: 0 })])
+    expect(learnGapFlowTops(cuts, [410, 385])).toBe(true)
+
+    const lookup = buildPageLookup(slices, cuts, 96)
+    expect(lookup.total).toBe(4)
+    expect(lookup.fromCuts(96 + 409.99)).toBe(1)
+    expect(lookup.fromCuts(96 + 410)).toBe(3)
+    expect(lookup.fromCuts(96 + 1200 + 440)).toBe(4)
+  })
+
+  it('counts blank pages and collapses same-start continuations in gapless flow', () => {
+    const slices = [
+      slice(0, 400),
+      slice(400, 800),
+      slice(400, 800),
+      slice(800, 800),
+      slice(800, 1200),
+    ]
+    const lookup = buildPageLookup(slices, [], 96)
+
+    expect(lookup.total).toBe(4)
+    expect(lookup.fromCuts(500)).toBeNull()
+    expect(lookup.fromSlices(399.99)).toBe(1)
+    expect(lookup.fromSlices(400)).toBe(2)
+    expect(lookup.fromSlices(800)).toBe(4)
+  })
+
+  it('keeps the last qualifying slice in document order when flow starts overlap', () => {
+    const lookup = buildPageLookup([slice(0, 400), slice(400, 800), slice(300, 800)], [], 96)
+
+    expect(lookup.fromSlices(299.99)).toBe(1)
+    expect(lookup.fromSlices(300)).toBe(3)
+    expect(lookup.fromSlices(400)).toBe(3)
+  })
+
+  it('includes the next page when its zoomed gap top equals the screen probe', () => {
+    const slices = [slice(0, 400), slice(400, 800)]
+    const cuts = buildPageCuts([], slices, [geom(400)], [])
+    applyGapLedger(cuts, [entry(1)])
+    expect(learnGapFlowTops(cuts, [100.875])).toBe(true)
+    const lookup = buildPageLookup(slices, cuts, 0)
+    const editorTop = -36258.375
+    const factor = 0.88
+    const gapTop = editorTop + 100.875 * factor
+
+    expect(lookup.fromCuts(gapTop - 0.000001, editorTop, factor)).toBe(1)
+    expect(lookup.fromCuts(gapTop, editorTop, factor)).toBe(2)
   })
 })

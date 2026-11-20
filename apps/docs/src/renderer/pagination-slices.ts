@@ -2874,22 +2874,16 @@ export function pageOfY(slices: ReadonlyArray<{ start: number }>, top: number, t
   return pageAt(slices, top + tol) - 1
 }
 
-/**
- * Pages the user can see: an even/odd-section parity blank shares its start with the
- * neighbouring slice and draws no page, so NUMPAGES, the status bar, and the gap
- * header/footer widgets all count only distinct slice starts (up to `upTo` slices).
- */
+/** A same-start continuation shares a page. A zero-height predecessor is a deliberate blank page. */
+export function sliceStartsVisiblePage(slice: PageSlice, previous: PageSlice | undefined): boolean {
+  return !previous || slice.start !== previous.start || previous.end === previous.start
+}
+
+/** Visible pages up to `upTo` slices, shared by NUMPAGES, the status bar and gap widgets. */
 export function visiblePageCount(slices: PageSlice[], upTo = slices.length): number {
   let n = 0
   for (let i = 0; i < Math.min(upTo, slices.length); i++) {
-    // a zero-height predecessor is a deliberate blank page (leading/double w:br,
-    // even/odd parity): the page after it is still its own visible page
-    if (
-      i === 0 ||
-      slices[i].start !== slices[i - 1].start ||
-      slices[i - 1].end === slices[i - 1].start
-    )
-      n++
+    if (sliceStartsVisiblePage(slices[i], slices[i - 1])) n++
   }
   return n
 }
