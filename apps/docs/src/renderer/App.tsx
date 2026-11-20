@@ -537,7 +537,12 @@ import {
   type PendingPdfExport,
 } from './file-actions'
 import { BlockIndex } from './pagination-index'
-import { isPhasedContentPending } from './phased-content'
+import {
+  isPhasedContentPending,
+  PHASED_CONTENT_SETTLED_EVENT,
+  waitForFullContent,
+} from './phased-content'
+import { PHASED_APPEND } from './editor/streaming-tail-guard'
 import { sameSectionInfos } from './pagination-sections'
 import {
   blocksKeepSlicing,
@@ -545,7 +550,7 @@ import {
   singleInlineEditIndex,
   type FastPassBlock,
 } from './editor/pagination-fast-path'
-import { FollowUpChain } from './pagination-loop'
+import { FollowUpChain, StreamingPageCoverage } from './pagination-loop'
 import { tabLayoutDiag } from './editor/decoration-extensions'
 import { layoutHealth } from './editor/layout-health'
 
@@ -4168,6 +4173,13 @@ export function App({
     // passes a pass schedules for itself (widths / suppression applied late);
     // a document whose column widths never settle must not paginate forever
     const chain = new FollowUpChain()
+    const streamingCoverage = new StreamingPageCoverage()
+    let completePaperEnd = 0
+    let viewportHeight = 0
+    // The continuous paper and sheet grid use different scroll coordinates.
+    // Endnotes may also create provisional pages beyond the mounted body.
+    const trackStreamingCoverage = !multipageMode && endnoteItems.length === 0
+    const sourceSectionEnds = new Set(sections.slice(0, -1).map((s) => s.lastBlockIndex))
     let selfScheduled = false
     // set by the cleanup: document.fonts.ready and other promise callbacks of
     // this run can still fire after the effect was re-created (zoom change)
@@ -4181,19 +4193,26 @@ export function App({
       retrigger.push(why)
       if (chain.request(why, dirtyIndex) !== 'run') return
       selfScheduled = true
-      onUpdate(null, dirtyIndex, true)
+      onUpdate(null, dirtyIndex, 'follow-up')
     }
     const followUp = (why: string) => followUpAt(why, null)
     let secWidthSig = ''
     let charSpaceSig = ''
     const colWidthPass = newWidthPassState()
     const pmEl = () => document.querySelector('.editor-scroll .ProseMirror') as HTMLElement | null
-    const locate = () => {
+    const locate = (publishCoverage = false) => {
       const pm = pmEl()
       if (!pm || !pageLookup) return
       const pmRect = pm.getBoundingClientRect()
       const scrollRect = scroller.getBoundingClientRect()
       const origin = pmRect.top + mTopPx * factor
+      viewportHeight = scrollRect.height
+      if (publishCoverage && trackStreamingCoverage && isPhasedContentPending()) {
+        streamingCoverage.publish(
+          lastPassChildCount,
+          scroller.scrollTop + pmRect.top + completePaperEnd * factor - scrollRect.top,
+        )
+      }
       // Multiple Pages: the active page is the one under the live window, probe its
       // first content line instead of the viewport middle
       const mpIdx = multipageActiveRef.current
@@ -4257,6 +4276,7 @@ export function App({
       scrollFrame = requestAnimationFrame(() => {
         scrollFrame = 0
         locate()
+        requestVisibleStreamLayout()
       })
     }
     let lastPassAt = 0
@@ -4477,7 +4497,7 @@ export function App({
           const dbg = (window as unknown as Record<string, Record<string, unknown>>).__pageDebug
           if (dbg) dbg.fastPasses = fastPasses
         }
-        locate()
+        locate(true)
       } catch (error) {
         activity.update({ error: String(error) })
         throw error
@@ -5776,6 +5796,7 @@ export function App({
         // extend the canvas to that page's paper bottom, measured from the last gap
         const bands = pagePaperEdges(cuts, mTopPx).filter((e) => e.gap.kind !== 'cut')
         const lastBand = bands[bands.length - 1]
+        completePaperEnd = lastBand?.prevBottom ?? mTopPx + (slices.at(-2)?.end ?? 0)
         if (lastBand && slices.length > 1) {
           const last = slices[slices.length - 1]
           const lastSec = secList?.[last.section]?.settings ?? section
@@ -5917,10 +5938,19 @@ export function App({
       setLayoutRev((v) => v + 1)
       refreshToc?.()
     }
+    const streamNeedsLayout = () =>
+      streamingCoverage.needsLayout(
+        editor?.state.doc.childCount ?? 0,
+        scrollPosRef.current.top + viewportHeight,
+      )
+    const requestVisibleStreamLayout = () => {
+      if (trackStreamingCoverage && isPhasedContentPending() && streamNeedsLayout())
+        onUpdate(null, lastPassChildCount, 'append')
+    }
     const onUpdate = (
       fastIndex: number | null = null,
       dirtyIndex: number | null = fastIndex,
-      isFollowUp = false,
+      trigger: 'change' | 'follow-up' | 'append' = 'change',
     ) => {
       if (disposed) return
       if (fastIndex === null) fastEdits = null
@@ -5930,6 +5960,7 @@ export function App({
       // would either never fire (dense chunks) or pay a whole-document pass
       // per chunk (sparse ones); keep the pass already due and pace new ones
       if (isPhasedContentPending()) {
+        if (trigger === 'append' && trackStreamingCoverage && !streamNeedsLayout()) return
         if (timer) return
         // a whole-document pass grows with the streamed content; keep it to a
         // fraction of the streaming time so the tail lands sooner
@@ -5949,7 +5980,7 @@ export function App({
       // edit arriving after a follow-up re-arms the timer with the edit delay.
       timer = window.setTimeout(
         remeasure,
-        isFollowUp
+        trigger === 'follow-up'
           ? FOLLOW_UP_PASS_DELAY_MS
           : Math.min(EDIT_PASS_DEBOUNCE_MAX_MS, Math.max(300, lastPassMs * EDIT_PASS_DUTY)),
       )
@@ -5960,8 +5991,10 @@ export function App({
     // open quadratic, so the paced scheduler takes it (the last chunk's update
     // still lands a full pass once the tail has settled)
     flushPaginationRef.current = () => {
-      if (timer === null) return
-      window.clearTimeout(timer)
+      const unlaidTail =
+        isPhasedContentPending() && (editor?.state.doc.childCount ?? 0) > lastPassChildCount
+      if (timer === null && !unlaidTail) return
+      if (timer !== null) window.clearTimeout(timer)
       remeasure()
     }
     // async @font-face loading triggers a full reflow (line-break points change); pagination
@@ -5995,9 +6028,37 @@ export function App({
     // the epoch bump re-runs this effect; an already-settled ready promise must not re-probe
     const stopFonts = observePaginationFonts(document.fonts, onFontsChanged)
     scroller.addEventListener('scroll', onScroll, { passive: true })
+    const streamResize = new ResizeObserver(() => {
+      if (!isPhasedContentPending()) return
+      viewportHeight = scroller.getBoundingClientRect().height
+      requestVisibleStreamLayout()
+    })
+    if (trackStreamingCoverage) streamResize.observe(scroller)
+    const onContentSettled = () => onUpdate()
+    document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, onContentSettled)
     const onDocUpdate = ({ transaction }: { transaction: Transaction }) => {
       resetWidthPassHistory(colWidthPass)
-      onUpdate(singleInlineEditIndex(transaction), firstChangedTopLevelIndex(transaction))
+      const firstChanged = firstChangedTopLevelIndex(transaction)
+      const appendedTail =
+        transaction.getMeta(PHASED_APPEND) &&
+        firstChanged !== null &&
+        firstChanged >= transaction.before.childCount &&
+        transaction.doc.childCount > transaction.before.childCount
+      let sectionBoundaryArrived = false
+      if (appendedTail) {
+        for (let i = transaction.before.childCount; i < transaction.doc.childCount; i++) {
+          const index: unknown = transaction.doc.child(i).attrs.docxIndex
+          if (typeof index === 'number' && sourceSectionEnds.has(index)) {
+            sectionBoundaryArrived = true
+            break
+          }
+        }
+      }
+      onUpdate(
+        singleInlineEditIndex(transaction),
+        firstChanged,
+        appendedTail && !sectionBoundaryArrived ? 'append' : 'change',
+      )
     }
     editor?.on('update', onDocUpdate)
     // justify-shrink re-decides via decoration-only transactions that move the
@@ -6054,12 +6115,15 @@ export function App({
       stopFonts()
       if (scrollFrame) cancelAnimationFrame(scrollFrame)
       scroller.removeEventListener('scroll', onScroll)
+      streamResize.disconnect()
+      document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, onContentSettled)
       editor?.off('update', onDocUpdate)
       editor?.off('transaction', onShrinkTr)
     }
   }, [
     doc,
     docCss,
+    multipageMode,
     section,
     sections,
     zoom,
@@ -8212,7 +8276,23 @@ export function App({
     onReadMode: setReadMode,
     onShowGrid: setShowGrid,
     onSplitView: setSplitView,
-    onPagePreview: () => setShowPagePreview(true),
+    onPagePreview: () => {
+      const generation = currentDocGeneration()
+      const current = fileCtxRef.current.doc
+      if (!isPhasedContentPending()) {
+        setShowPagePreview(true)
+        return
+      }
+      void waitForFullContent().then(() => {
+        if (
+          current &&
+          fileCtxRef.current.doc === current &&
+          currentDocGeneration() === generation &&
+          !isPhasedContentPending()
+        )
+          setShowPagePreview(true)
+      })
+    },
   })
 
   // the panel closes; Contextual cards stay unless the panel was the List view itself

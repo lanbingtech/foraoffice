@@ -18,6 +18,23 @@ const MAX_SAME_REASON = 3
 
 export type FollowUpVerdict = 'run' | 'repeat' | 'cap'
 
+/** During progressive open, only appends needed by the viewport extend the
+ * published pages. The content-settled event requests the complete layout. */
+export class StreamingPageCoverage {
+  private published?: { mountedBlocks: number; paperEnd: number }
+
+  publish(mountedBlocks: number, paperEnd: number): void {
+    this.published = { mountedBlocks, paperEnd }
+  }
+
+  needsLayout(mountedBlocks: number, viewportBottom: number): boolean {
+    return (
+      !this.published ||
+      (mountedBlocks > this.published.mountedBlocks && viewportBottom >= this.published.paperEnd)
+    )
+  }
+}
+
 export class FollowUpChain {
   /** reasons across the whole chain, in request order */
   readonly log: string[] = []

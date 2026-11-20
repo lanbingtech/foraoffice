@@ -1,5 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import { FollowUpChain, MAX_FOLLOW_UP_PASSES } from '../src/renderer/pagination-loop'
+import {
+  FollowUpChain,
+  MAX_FOLLOW_UP_PASSES,
+  StreamingPageCoverage,
+} from '../src/renderer/pagination-loop'
+
+describe('streamed page coverage', () => {
+  it('only extends already laid pages when the viewport needs the appended content', () => {
+    const coverage = new StreamingPageCoverage()
+    expect(coverage.needsLayout(64, 0)).toBe(true)
+    coverage.publish(64, 900)
+    expect(coverage.needsLayout(128, 0)).toBe(false)
+    expect(coverage.needsLayout(128, 899)).toBe(false)
+    expect(coverage.needsLayout(128, 900)).toBe(true)
+    expect(coverage.needsLayout(64, 900)).toBe(false)
+    coverage.publish(128, 2500)
+    expect(coverage.needsLayout(256, 910)).toBe(false)
+  })
+})
 
 describe('FollowUpChain', () => {
   it('runs distinct reasons and a reason that re-fires a few times', () => {
