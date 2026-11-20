@@ -1204,8 +1204,8 @@ export function docStyleCss(parsed: ParsedDocFull): string {
       }
     }
   }
-  // List membership and style eligibility are independent. Keep the adjacent
-  // and across-widget selectors separate so each retains its specificity.
+  // Match the list item before inspecting either set of alternatives. Keep
+  // adjacent and across-widget rules separate to preserve their specificity.
   for (const side of ['before', 'after'] as const) {
     const items = styledListItems[side]
     if (items.length === 0) continue
@@ -1217,12 +1217,16 @@ export function docStyleCss(parsed: ParsedDocFull): string {
     for (const widget of [false, true]) {
       const adjacency = listGroups.map((group) => {
         const member = `.doc-li${group}`
-        if (side === 'before')
-          return widget ? acrossWidget(member, member) : `${member} + ${member}`
+        if (side === 'before') {
+          const target = group || '*'
+          return widget ? acrossWidget(member, target) : `${member} + ${target}`
+        }
         const next = widget ? acrossWidget('', member) : `+ ${member}`
-        return `${member}:has(${next})`
+        return `${group}:has(${next})`
       })
-      rules.push(`.doc-page :is(${adjacency.join(',')}):is(${items.join(',')}) { ${property}:0 }`)
+      rules.push(
+        `.doc-page .doc-li:is(${adjacency.join(',')}):is(${items.join(',')}) { ${property}:0 }`,
+      )
     }
   }
   // .doc-cs gate: an rtl run reads the Cs size of its chain (w:szCs, paraCsFormat),

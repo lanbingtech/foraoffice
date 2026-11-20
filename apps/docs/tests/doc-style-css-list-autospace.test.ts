@@ -114,6 +114,7 @@ describe('docStyleCss list auto-spacing collapse', () => {
       .split('\n')
       .filter((rule) => rule.includes('data-num=') && rule.includes('data-style="ListStyle0"'))
     expect(styleAdjacency).toHaveLength(4)
+    expect(styleAdjacency.every((rule) => rule.startsWith('.doc-page .doc-li:is('))).toBe(true)
     expect(css.length).toBeLessThan(500_000)
   })
 })
