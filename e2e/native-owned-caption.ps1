@@ -185,8 +185,15 @@ public static class GuardedTitleClick {
       return true;
     }
     public int Count { get { return original.Count; } }
-    public bool InBand(bool topmost) {
-      return AllInBand(RequireUnchangedFamily(), topmost);
+    public sealed class BandReceipt {
+      public bool RootTopmost { get; set; }
+      public int TopmostCount { get; set; }
+    }
+    public BandReceipt ObserveBand() {
+      var current = RequireUnchangedFamily();
+      var observed = new BandReceipt { RootTopmost = current[root].Topmost };
+      foreach (var member in current.Values) if (member.Topmost) observed.TopmostCount++;
+      return observed;
     }
     public void RequestBand(bool topmost) {
       var current = RequireUnchangedFamily();
@@ -277,10 +284,14 @@ function Find-OwnedCaption {
 function Confirm-FamilyBand($Family,[bool]$Topmost) {
   $timer=[System.Diagnostics.Stopwatch]::StartNew()
   do {
-    if ($Family.InBand($Topmost)) {return}
+    $observed=$Family.ObserveBand()
+    if (($Topmost -and $observed.RootTopmost) -or (!$Topmost -and $observed.TopmostCount -eq 0)) {
+      return $observed
+    }
     Start-Sleep -Milliseconds 20
   } while ($timer.ElapsedMilliseconds -lt 2000)
-  throw 'Native test window family layer change was not observed'
+  $stage=if($Topmost){'root promotion'}else{'whole-family restoration'}
+  throw "Native test window ${stage} was not observed after 2000 ms (topmost family members: $($observed.TopmostCount)/$($Family.Count), root topmost: $($observed.RootTopmost))"
 }
 Assert-OwnedWindow -RequireVisible
 $before=[GuardedTitleClick]::GetForegroundWindow() -eq $window
@@ -292,6 +303,8 @@ $raiseRequested=$false
 $family=$null
 $promotionRequested=$false
 $familyRestored=$false
+$promotionObserved=$null
+$restorationObserved=$null
 $owned=@(Find-OwnedCaption)
 try {
   if ($RaiseOwnedWindow -and !$before -and !$owned.Count -and ![GuardedTitleClick]::Held()) {
@@ -320,7 +333,7 @@ try {
         $family=[GuardedTitleClick+OwnedWindowFamily]::new($window,[uint32]$ProcessId,$StartUtc)
         $family.RequestBand($true)
         $promotionRequested=$true
-        Confirm-FamilyBand $family $true
+        $promotionObserved=Confirm-FamilyBand $family $true
         $owned=@(Find-OwnedCaption)
       }
     }
@@ -328,7 +341,7 @@ try {
   if (!$before -and $owned.Count -and [GuardedTitleClick]::GetForegroundWindow() -ne $window) {
     Assert-OwnedWindow -RequireVisible
     if ($promotionRequested) {
-      if (!$family.InBand($true)) {throw 'Owned test window family changed band before the caption click'}
+      if (!$family.ObserveBand().RootTopmost) {throw 'Owned test root changed band before the caption click'}
     } elseif ($raiseRequested -and [GuardedTitleClick]::IsTopmost($window) -ne $originalTopmost) {
       throw 'Owned test window left its original Z-order band'
     }
@@ -346,7 +359,7 @@ try {
     Assert-OwnedWindow
     # Undo the queued promotion even if its confirmation failed.
     $family.RequestBand($false)
-    Confirm-FamilyBand $family $false
+    $restorationObserved=Confirm-FamilyBand $family $false
     $familyRestored=$true
   }
   if ($null -ne $originalTopmost) {
@@ -355,4 +368,4 @@ try {
     if ($observedTopmost -ne $originalTopmost) {throw 'Owned test window left its original Z-order band'}
   }
 }
-@{ownedBefore=$before;ownedAfter=[GuardedTitleClick]::GetForegroundWindow() -eq $window;safeTitlePoints=$owned.Count;submittedInputs=$submitted;cursor=$cursor;heldInput=[GuardedTitleClick]::Held();physicalPixelProbe=[bool]$RaiseOwnedWindow;raiseRequested=$raiseRequested;originalTopmost=$originalTopmost;observedTopmost=$observedTopmost;promotionRequested=$promotionRequested;promotedFamilySize=if($family){$family.Count}else{0};familyRestored=$familyRestored}|ConvertTo-Json -Compress
+@{ownedBefore=$before;ownedAfter=[GuardedTitleClick]::GetForegroundWindow() -eq $window;safeTitlePoints=$owned.Count;submittedInputs=$submitted;cursor=$cursor;heldInput=[GuardedTitleClick]::Held();physicalPixelProbe=[bool]$RaiseOwnedWindow;raiseRequested=$raiseRequested;originalTopmost=$originalTopmost;observedTopmost=$observedTopmost;promotionRequested=$promotionRequested;promotedFamilySize=if($family){$family.Count}else{0};promotionObserved=$promotionObserved;restorationObserved=$restorationObserved;familyRestored=$familyRestored}|ConvertTo-Json -Compress
