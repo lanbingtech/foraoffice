@@ -1,12 +1,13 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   GAP_BAND,
   gapLedgerOf,
   alignGapHfStrips,
   canvasZoomOf,
+  setPageGaps,
   alignTableGapFills,
   makeGapEl,
   pageFramesFromGaps,
@@ -32,6 +33,111 @@ import { buildDocx } from '../../../packages/docx-engine/tests/helpers/build-doc
 import { blocksToPmDoc } from '../src/renderer/editor/convert'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { setFloatingWrap } from '../src/renderer/editor/floating-z-order'
+
+describe('page gap widget identity', () => {
+  it('updates header and note content in place without a document view transaction', () => {
+    const editor = new Editor({
+      element: document.createElement('div'),
+      extensions: editorExtensions,
+      content: {
+        type: 'doc',
+        content: [{ type: 'docParagraph', content: [{ type: 'text', text: 'body' }] }],
+      },
+    })
+    try {
+      const gap = {
+        pos: 2,
+        metrics: { marginTop: 20, marginBottom: 35, marginLeft: 40, marginRight: 40 },
+      }
+      const label = (text: string) => {
+        const element = document.createElement('div')
+        element.textContent = text
+        return element
+      }
+      const before = label('Page 1 of 3')
+      const note = label('Note 1')
+      setPageGaps(editor.view, [
+        { ...gap, notes: note, notesKey: 'note', hf: { key: '3', render: () => [before] } },
+      ])
+      const shell = editor.view.dom.querySelector('.page-gap')!
+      const dispatch = vi.spyOn(editor.view, 'dispatch')
+      const renderUnchanged = vi.fn(() => [label('Page 1 of 3')])
+      setPageGaps(editor.view, [
+        { ...gap, notes: note, notesKey: 'note', hf: { key: '3', render: renderUnchanged } },
+      ])
+      expect(renderUnchanged).not.toHaveBeenCalled()
+      expect(Array.from(shell.children)).toEqual([note, before])
+      const after = label('Page 1 of 4')
+      setPageGaps(editor.view, [{ ...gap, hf: { key: '4', render: () => [after] } }])
+      expect(editor.view.dom.querySelector('.page-gap')).toBe(shell)
+      expect(Array.from(shell.children)).toEqual([after])
+      expect(dispatch).not.toHaveBeenCalled()
+    } finally {
+      editor.destroy()
+    }
+  })
+
+  it('reuses the same DOM after a flow-coordinate change and refreshes actual paper geometry', () => {
+    const editor = new Editor({
+      element: document.createElement('div'),
+      extensions: editorExtensions,
+      content: {
+        type: 'doc',
+        content: [{ type: 'docParagraph', content: [{ type: 'text', text: 'body' }] }],
+      },
+    })
+    try {
+      const gap = {
+        pos: 2,
+        metrics: {
+          marginTop: 20,
+          marginBottom: 35,
+          marginLeft: 40,
+          marginRight: 40,
+          pageLeft: 12,
+          pageWidth: 700,
+        },
+      }
+      const first = { ...gap, boundaryY: 1000 }
+      setPageGaps(editor.view, [first])
+      const widget = editor.view.dom.querySelector<HTMLElement>('.page-gap')!
+      expect(widget.style.getPropertyValue('--gap-page-w')).toBe('700px')
+      const moved = { ...gap, boundaryY: 1050 }
+      setPageGaps(editor.view, [moved])
+      expect(editor.view.dom.querySelector('.page-gap')).toBe(widget)
+      const dispatch = vi.spyOn(editor.view, 'dispatch')
+      setPageGaps(editor.view, [
+        {
+          ...moved,
+          metrics: { ...gap.metrics, pageWidth: 600, bodyPad: 12 },
+          pullUp: 24,
+        },
+      ])
+      expect(
+        editor.view.dom
+          .querySelector<HTMLElement>('.page-gap')
+          ?.style.getPropertyValue('--gap-page-w'),
+      ).toBe('600px')
+      const resized = editor.view.dom.querySelector<HTMLElement>('.page-gap')!
+      expect(resized).toBe(widget)
+      expect(resized.dataset.bodyPad).toBe('12.0')
+      expect(resized.style.marginTop).toBe('-24px')
+      setPageGaps(editor.view, [{ ...moved, metrics: { ...gap.metrics, pageWidth: undefined } }])
+      expect(resized.style.getPropertyValue('--gap-page-w')).toBe('')
+      expect(resized.dataset.bodyPad).toBeUndefined()
+      expect(resized.style.marginTop).toBe('')
+      expect(dispatch).not.toHaveBeenCalled()
+      editor.view.dispatch(editor.state.tr.insertText('X', 1))
+      const mapped = { ...moved, pos: 3, metrics: { ...gap.metrics, pageWidth: 600 } }
+      setPageGaps(editor.view, [mapped])
+      expect(editor.view.dom.querySelector('.page-gap')).toBe(resized)
+      setPageGaps(editor.view, [{ ...mapped, pos: 4 }])
+      expect(editor.view.dom.querySelector('.page-gap')).not.toBe(resized)
+    } finally {
+      editor.destroy()
+    }
+  })
+})
 
 const rowOf = (cells: number): HTMLTableRowElement => {
   const tr = document.createElement('tr')

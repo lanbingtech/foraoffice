@@ -78,6 +78,13 @@ describe('live pending section boundaries', () => {
       pendingBreakId: id,
     })
 
+  it('preserves a boundary waiting to mount and merges a boundary the user deleted', () => {
+    const sections = [section(0, 1), section(2, 3), section(4, 5)]
+    const doc = schema.node('doc', null, [paragraph(0), paragraph(2)])
+    const preserved = liveSectionsForDocument(sections, doc, undefined, (i) => i >= 3)
+    expect(preserved).toEqual([{ ...sections[1], firstBlockIndex: 0 }, sections[2]])
+  })
+
   it('keeps an empty first section and routes its closing break separately from following content', () => {
     const first = pendingInfo('first', 0, -1)
     const last = section(0, 1)

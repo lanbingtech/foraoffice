@@ -32,6 +32,7 @@ const key = new PluginKey<DecorationSet>('paginationGaps')
  */
 export class LayoutBatch {
   private readonly metas: Array<[PluginKey | string, unknown]> = []
+  private readonly before: Array<() => void> = []
   private readonly after: Array<() => void> = []
 
   constructor(private readonly view: EditorView) {}
@@ -40,12 +41,18 @@ export class LayoutBatch {
     this.metas.push([key, value])
   }
 
+  /** Update retained presentation DOM before an optional editor view update. */
+  beforeDispatch(fn: () => void): void {
+    this.before.push(fn)
+  }
+
   /** DOM-only work that must follow the dispatch */
   then(fn: () => void): void {
     this.after.push(fn)
   }
 
   commit(): void {
+    for (const fn of this.before) fn()
     if (this.metas.length > 0) {
       let tr = this.view.state.tr.setMeta('addToHistory', false)
       for (const [k, v] of this.metas) tr = tr.setMeta(k, v)
@@ -102,7 +109,11 @@ interface GapWidgetSpec {
   /** a block gap drawn mid-paragraph (its page-leading paragraph was joined
    *  into the one before) */
   inlineDOM?: () => HTMLElement
+  contents?: GapWidgetContents
+  shellKey?: string
 }
+
+let nextGapInstance = 0
 
 /** deleted characters around a break beyond which it is left to the next pass */
 const KEEP_GAP_MAX_DELETED = 200
@@ -623,31 +634,56 @@ export function gapLedgerOf(
   return out
 }
 
-export function makeGapEl(m: GapMetrics, kind: GapKind, cols?: number): HTMLElement {
-  const gap = document.createElement(kind === 'table' ? 'tr' : 'div')
-  gap.contentEditable = 'false'
-  if (m.pageLeft !== undefined && m.pageWidth !== undefined) {
-    gap.style.setProperty('--gap-page-x', `${m.pageLeft}px`)
-    gap.style.setProperty('--gap-page-w', `${m.pageWidth}px`)
+function applyGapMetrics(gap: HTMLElement, kind: GapKind, m: GapMetrics, pullUp = 0): void {
+  const set = (name: string, value: string) => {
+    if (gap.style.getPropertyValue(name) !== value) gap.style.setProperty(name, value)
   }
-  if (kind === 'cut') {
-    // in-row table break cut point: zero-height dashed marker (takes no layout height, coordinate bookkeeping unchanged)
-    gap.className = 'page-gap-cut'
-    return gap
+  const stamp = (name: 'bodyPad' | 'bodyHeight', value: number | undefined) => {
+    if (value) {
+      const formatted = value.toFixed(1)
+      if (gap.dataset[name] !== formatted) gap.dataset[name] = formatted
+    } else if (gap.dataset[name] !== undefined) delete gap.dataset[name]
   }
-  gap.style.height = `${m.marginBottom + GAP_BAND + m.marginTop}px`
-  gap.style.setProperty('--gap-mb', `${m.marginBottom}px`)
-  gap.style.setProperty('--gap-body-mb', `${m.bodyMarginBottom ?? m.marginBottom}px`)
-  if (m.bodyPad) gap.dataset.bodyPad = m.bodyPad.toFixed(1)
-  if (m.bodyHeight) gap.dataset.bodyHeight = m.bodyHeight.toFixed(1)
-  gap.style.setProperty('--gap-mt', `${m.marginTop}px`)
+  const hasPageBox = m.pageLeft !== undefined && m.pageWidth !== undefined
+  set('--gap-page-x', hasPageBox ? `${m.pageLeft}px` : '')
+  set('--gap-page-w', hasPageBox ? `${m.pageWidth}px` : '')
+  if (kind === 'cut') return
+  set('height', `${m.marginBottom + GAP_BAND + m.marginTop}px`)
+  set('--gap-mb', `${m.marginBottom}px`)
+  set('--gap-body-mb', `${m.bodyMarginBottom ?? m.marginBottom}px`)
+  stamp('bodyPad', m.bodyPad)
+  stamp('bodyHeight', m.bodyHeight)
+  set('--gap-mt', `${m.marginTop}px`)
   // the next page's own section side margins: a section whose margins differ from
   // the canvas' first section gets its header/footer strips placed on ITS text
   // column (alignGapHfStrips), not the cover's margin-less one. Every gap kind
   // carries them — inline/cell gaps' marginLeft is the host block's paper offset
   // (indent included), which is the wrong place for a strip
-  gap.style.setProperty('--gap-ml', `${m.sectionMarginLeft ?? m.marginLeft}px`)
-  gap.style.setProperty('--gap-mr', `${m.sectionMarginRight ?? m.marginRight}px`)
+  set('--gap-ml', `${m.sectionMarginLeft ?? m.marginLeft}px`)
+  set('--gap-mr', `${m.sectionMarginRight ?? m.marginRight}px`)
+  if (kind === 'table') return
+  set('margin-left', `${-m.marginLeft}px`)
+  set('margin-right', `${-m.marginRight}px`)
+  set('margin-top', pullUp ? `${-pullUp}px` : '')
+  // Inline-block avoids splitting the paragraph into anonymous boxes. Its
+  // negative margins don't widen it, so the width explicitly adds the bleed.
+  if (kind !== 'block') set('width', `calc(100% + ${m.marginLeft + m.marginRight}px)`)
+}
+
+export function makeGapEl(
+  m: GapMetrics,
+  kind: GapKind,
+  cols?: number,
+  pullUp?: number,
+): HTMLElement {
+  const gap = document.createElement(kind === 'table' ? 'tr' : 'div')
+  gap.contentEditable = 'false'
+  applyGapMetrics(gap, kind, m, pullUp)
+  if (kind === 'cut') {
+    // in-row table break cut point: zero-height dashed marker (takes no layout height)
+    gap.className = 'page-gap-cut'
+    return gap
+  }
   if (kind === 'table') {
     // A real spanning cell is required here. Chromium's collapsed-border table
     // painting can leak the neighboring row's border/fill through a cell-less
@@ -674,12 +710,6 @@ export function makeGapEl(m: GapMetrics, kind: GapKind, cols?: number): HTMLElem
       : kind === 'inline'
         ? 'page-gap page-gap-paper page-gap-inline'
         : 'page-gap page-gap-paper'
-  gap.style.marginLeft = `-${m.marginLeft}px`
-  gap.style.marginRight = `-${m.marginRight}px`
-  // inline-block (not block-level): avoids block-in-inline anonymous-box splitting,
-  // which would re-apply text-indent/alignment on continuation lines and drift line
-  // breaks; negative margins don't widen an inline-block, so width explicitly adds the bleed
-  if (kind !== 'block') gap.style.width = `calc(100% + ${m.marginLeft + m.marginRight}px)`
   return gap
 }
 
@@ -689,9 +719,8 @@ export type PageGapSpec = {
   /** Previous page's bottom footnote area (a ready-made positioned/sized element) and its content signature (change triggers rebuild) */
   notes?: HTMLElement
   notesKey?: string
-  /** Previous page's footer / next page's header (ready-made positioned .page-gap-hf elements) and their content signature */
-  hfEls?: HTMLElement[]
-  hfKey?: string
+  /** Previous page's footer / next page's header, materialized when their presentation changes. */
+  hf?: { key: string; render: () => HTMLElement[] }
   /** w:tblHeader repetition: cloned header rows rendered right after a table gap
    *  (the slicing engine already reserved their height on the new page) */
   repeatHeaderEls?: HTMLElement[]
@@ -705,9 +734,6 @@ export type PageGapSpec = {
   /** mixed-column page above: pull the gap (and everything below) up over the
    *  vacated stacked-column space (negative margin-top, neutralized while measuring) */
   pullUp?: number
-  /** slice boundary (gapless flow px) this gap opens: part of the widget key,
-   *  so a reused widget never keeps a stale boundary */
-  boundaryY?: number
   /** index of the page this gap opens (gap ledger, applyGapLedger) */
   page?: number
   /** rendered height of the repeated header clones below a table gap */
@@ -727,7 +753,63 @@ export type PageGapSpec = {
   | { pos: number; kind?: Exclude<GapKind, 'block'> }
 )
 
-/** Rebuild all page gaps (an empty list clears them); each gap carries its own margins (sections differ) */
+/** The widget owns its paper geometry, header/footer strips and notes.
+ * ProseMirror manages the shell's placement in the editable document. */
+class GapWidgetContents {
+  private el: HTMLElement | null = null
+  private kind: GapKind | undefined
+  private paper: HTMLElement | null = null
+  private notes?: HTMLElement
+  private notesKey?: string
+  private strips?: HTMLElement[]
+  private stripsKey?: string
+
+  private metrics: GapMetrics
+  private pullUp?: number
+
+  constructor(gap: PageGapSpec) {
+    this.metrics = gap.metrics
+    this.update(gap)
+  }
+
+  build(kind: GapKind, cols?: number): HTMLElement {
+    const el = makeGapEl(this.metrics, kind, cols, this.pullUp)
+    this.el = el
+    this.kind = kind
+    const paper = el.classList.contains('page-gap-paper')
+      ? el
+      : el.querySelector<HTMLElement>('.page-gap-paper')
+    this.paper = paper
+    if (paper) {
+      if (this.notes) paper.appendChild(this.notes)
+      for (const strip of this.strips ?? []) paper.appendChild(strip)
+    }
+    return el
+  }
+
+  update(gap: PageGapSpec): void {
+    this.metrics = gap.metrics
+    this.pullUp = gap.pullUp
+    if (this.el && this.kind) applyGapMetrics(this.el, this.kind, gap.metrics, gap.pullUp)
+    if (
+      this.notesKey !== gap.notesKey ||
+      (gap.notesKey === undefined && this.notes !== gap.notes)
+    ) {
+      this.notes?.remove()
+      this.notes = gap.notes
+      this.notesKey = gap.notesKey
+      if (this.notes) this.paper?.prepend(this.notes)
+    }
+    if (this.stripsKey !== gap.hf?.key) {
+      const strips = gap.hf?.render()
+      for (const strip of this.strips ?? []) strip.remove()
+      this.strips = strips
+      this.stripsKey = gap.hf?.key
+      if (this.paper) for (const strip of this.strips ?? []) this.paper.appendChild(strip)
+    }
+  }
+}
+
 export function setPageGaps(
   view: EditorView,
   gaps: PageGapSpec[],
@@ -739,6 +821,11 @@ export function setPageGaps(
 ): void {
   const positions = new TopLevelPositions(view)
   const decos: Decoration[] = []
+  const prev = key.getState(view.state)
+  const existing = new Map<string, GapWidgetSpec>()
+  for (const decoration of prev?.find(undefined, undefined, (spec) => spec.contents) ?? [])
+    existing.set(`${decoration.from}:${decoration.spec.shellKey}`, decoration.spec as GapWidgetSpec)
+  const refresh: Array<{ contents: GapWidgetContents; gap: PageGapSpec }> = []
   if (firstPageEls?.els.length) {
     decos.push(
       Decoration.widget(
@@ -757,7 +844,6 @@ export function setPageGaps(
   let ordinal = -1
   for (const gap of gaps) {
     ordinal++
-    const { metrics, notes, hfEls } = gap
     let pos: number
     let kind: GapKind
     if ('el' in gap) {
@@ -815,39 +901,28 @@ export function setPageGaps(
       pos = gap.pos
       kind = gap.kind ?? 'inline'
     }
-    // boundaryY in the key: a reused widget must not keep a stale boundary
-    // (cols too: a table-structure edit must rebuild the spanning cell)
-    const mKey = `${metrics.marginTop},${metrics.marginBottom},${metrics.bodyMarginBottom ?? -1},${metrics.marginLeft},${metrics.marginRight},${Math.round(gap.pullUp ?? 0)},${Math.round(gap.boundaryY ?? -1)},${gap.cols ?? 0},${Math.round(metrics.pageLeft ?? -1)}`
-    const build = (as: GapKind) => {
-      const el = makeGapEl(metrics, as, gap.cols)
-      // margins don't apply to table-rows and cuts are zero-height markers;
-      // tables inside mixed-column regions are out of scope anyway (v1)
-      if (gap.pullUp && as !== 'cut' && as !== 'table') el.style.marginTop = `-${gap.pullUp}px`
-      // notes and header/footer strips live on the gap's paper box; a zero-height
-      // cut marker has none and carries neither
-      const paper = el.classList.contains('page-gap-paper')
-        ? el
-        : el.querySelector('.page-gap-paper')
-      if (paper) {
-        if (notes) paper.appendChild(notes)
-        for (const hf of hfEls ?? []) paper.appendChild(hf)
+    const shellKey = `page-gap-${kind}-${ordinal}-${gap.cols ?? ''}`
+    const reuse = existing.get(`${pos}:${shellKey}`)
+    if (reuse?.contents) {
+      refresh.push({ contents: reuse.contents, gap })
+      decos.push(Decoration.widget(pos, reuse.toDOM, reuse))
+    } else {
+      const contents = new GapWidgetContents(gap)
+      const { cols } = gap
+      const toDOM = () => contents.build(kind, cols)
+      const spec: GapWidgetSpec = {
+        side: -1,
+        // A real relocation gets a new widget. Moving an active header/footer
+        // host out of and back into the editor loses its browser focus.
+        key: `${shellKey}@${++nextGapInstance}`,
+        shellKey,
+        gapKind: kind,
+        toDOM,
+        contents,
+        inlineDOM: kind === 'block' ? () => contents.build('inline') : undefined,
       }
-      return el
+      decos.push(Decoration.widget(pos, toDOM, spec))
     }
-    const toDOM = () => build(kind)
-    const spec: GapWidgetSpec = {
-      side: -1,
-      // keyed by page ordinal, NOT pos: edits above a gap shift its mapped
-      // position without changing the page, so an ordinal key lets sameGaps
-      // skip the dispatch entirely and lets PM reuse the widget DOM when a
-      // dispatch does happen
-      // full kind, not kind[0]: 'cut' and 'cell' would collide and skip the rebuild
-      key: `page-gap-${kind}-${ordinal}-${mKey}${gap.notesKey ? `-${gap.notesKey}` : ''}${gap.hfKey ? `-${gap.hfKey}` : ''}`,
-      gapKind: kind,
-      toDOM,
-      inlineDOM: kind === 'block' ? () => build('inline') : undefined,
-    }
-    decos.push(Decoration.widget(pos, toDOM, spec))
     // repeated header rows (w:tblHeader) directly after the table gap: one widget per
     // cloned tr, side 0 so they land between the gap (side -1) and the split row
     if (kind === 'table' && gap.repeatHeaderEls?.length) {
@@ -861,8 +936,14 @@ export function setPageGaps(
       })
     }
   }
+  if (refresh.length > 0) {
+    const updateContents = () => {
+      for (const { contents, gap } of refresh) contents.update(gap)
+    }
+    if (batch) batch.beforeDispatch(updateContents)
+    else updateContents()
+  }
   const next = DecorationSet.create(view.state.doc, decos)
-  const prev = key.getState(view.state)
   if (!prev || !sameGaps(prev, next)) {
     if (batch) batch.set(key, next)
     else view.dispatch(view.state.tr.setMeta(key, next).setMeta('addToHistory', false))
@@ -1519,7 +1600,7 @@ function sameGaps(a: DecorationSet, b: DecorationSet): boolean {
   const bf = b.find()
   return (
     af.length === bf.length &&
-    af.every((d, i) => d.from === bf[i].from && keyOf(d) === keyOf(bf[i]))
+    af.every((d, i) => d.from === bf[i].from && d.to === bf[i].to && keyOf(d) === keyOf(bf[i]))
   )
 }
 

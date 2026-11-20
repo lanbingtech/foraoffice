@@ -14,6 +14,7 @@ import type { Editor } from '@tiptap/core'
 import { commentEndpoints } from './editor/comment-endpoints'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { history } from '@tiptap/pm/history'
+import { Selection, type Transaction } from '@tiptap/pm/state'
 import { modelTextOf, type RedactableNode } from './ai/redact-view'
 import { hasActiveDocumentDraft } from './runtime/draft-landing'
 import {
@@ -519,6 +520,7 @@ export function appendStreamedNodes(editor: Editor, nodes: PmNode[]): void {
 /** binds the phased content streamer to the editor and App state behind ctx */
 function phasedHostFor(ctx: FileActionContext): PhasedContentHost {
   return {
+    owner: ctx.editor ?? undefined,
     // the remount after a refused chunk replaces the whole document: it must
     // pass the streaming tail guard like the appends do, and like them it is
     // not an edit to undo
@@ -530,6 +532,7 @@ function phasedHostFor(ctx: FileActionContext): PhasedContentHost {
         .setMeta(TABLE_TRAILING_SKIP, true)
         .setMeta(PHASED_APPEND, true)
         .setContent(doc as never)
+        .command(selectOpenedDocumentStart)
         .run(),
     appendNodes: (nodes) => {
       if (ctx.editor) appendStreamedNodes(ctx.editor, nodes)
@@ -546,11 +549,15 @@ function phasedHostFor(ctx: FileActionContext): PhasedContentHost {
   }
 }
 
-/** Word parity: a freshly opened or created document starts with the caret at
- *  its beginning — typing must work without a click into the page.
- *  Skipped when something else in this webContents already holds keyboard
- *  focus (e.g. the user clicked into the AI composer while the file parsed). */
-function focusDocumentStart(editor: Editor): void {
+function selectOpenedDocumentStart({ tr }: { tr: Transaction }): boolean {
+  // A wholesale replacement maps the old caret to the new tail. Place it
+  // inside the opened document before the view mounts or appends any content.
+  tr.setSelection(Selection.atStart(tr.doc))
+  return true
+}
+
+/** Make the opened document ready for typing if no other control owns focus. */
+function focusOpenedEditor(editor: Editor): void {
   const startedAt = performance.now()
   const attempt = (): void => {
     if (editor.isDestroyed) return
@@ -560,7 +567,7 @@ function focusDocumentStart(editor: Editor): void {
     // behind the opening screen the editor is display:none and DOM focus
     // silently drops — wait for it to be laid out, then focus once
     if (dom.isConnected && dom.offsetParent !== null) {
-      editor.commands.focus('start', { scrollIntoView: false })
+      editor.view.focus()
       if (document.activeElement !== document.body) return
     }
     if (performance.now() - startedAt < 10_000) requestAnimationFrame(attempt)
@@ -637,7 +644,7 @@ export async function loadFile(
       )
       commentEndpoints(ctx.editor!.view, parsed.blocks)
       resetEditorHistory(ctx.editor!)
-      if (tier !== 'readOnly') focusDocumentStart(ctx.editor!)
+      if (tier !== 'readOnly') focusOpenedEditor(ctx.editor!)
       noteDocumentSwapped()
       ctx.setDoc({
         parsed,
@@ -808,12 +815,14 @@ export async function newFile(ctx: FileActionContext): Promise<boolean | undefin
       ctx.editor!.storage.listNumbering.docDefaults = parsed.docDefaults
       ctx.editor!.storage.listNumbering.defs = parsed.numbering
       applyDocLayoutSettings(ctx.editor!, parsed)
-      ctx.editor!.commands.setContent(
-        blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)) as never,
-      )
+      ctx.editor!
+        .chain()
+        .setContent(blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)) as never)
+        .command(selectOpenedDocumentStart)
+        .run()
       commentEndpoints(ctx.editor!.view, parsed.blocks)
       resetEditorHistory(ctx.editor!)
-      focusDocumentStart(ctx.editor!)
+      focusOpenedEditor(ctx.editor!)
       noteDocumentSwapped()
       ctx.setDoc({
         parsed,

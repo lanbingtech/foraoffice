@@ -79,6 +79,8 @@ import {
   BLANK_BULLET_NUM_ID,
   BLANK_ORDERED_NUM_ID,
   DEFAULT_SECTION,
+  SECTION_PAGES_MARK,
+  TOTAL_PAGES_MARK,
   applyPageNumType,
   customLevelFromNumberingLevel,
   applySectionSettings,
@@ -540,6 +542,7 @@ import { BlockIndex } from './pagination-index'
 import {
   isPhasedContentPending,
   PHASED_CONTENT_SETTLED_EVENT,
+  unmountedSourceBlocksOf,
   waitForFullContent,
 } from './phased-content'
 import { PHASED_APPEND } from './editor/streaming-tail-guard'
@@ -562,6 +565,7 @@ const STREAMING_PASS_GAP_MAX_MS = 15_000
 /** after an edit, the pass waits this many times its own last duration (300 ms floor) */
 const EDIT_PASS_DUTY = 3
 const EDIT_PASS_DEBOUNCE_MAX_MS = 2000
+let nextHeaderFooterContentId = 0
 /** a pass re-running for its own late-applied widths / suppression: nobody is
  *  typing, so it only waits for the previous pass's DOM writes to commit */
 const FOLLOW_UP_PASS_DELAY_MS = 100
@@ -1648,7 +1652,12 @@ export function App({
   }, [editor, trackedDeletedSectBreaks, docVersion])
   const hfSections = useMemo(() => {
     if (!editor || sections.length <= 1) return sections
-    const next = liveSectionsForDocument(sections, editor.state.doc, delSectBreaks)
+    const next = liveSectionsForDocument(
+      sections,
+      editor.state.doc,
+      delSectBreaks,
+      unmountedSourceBlocksOf(editor),
+    )
     // every transaction re-runs this memo, and a streaming open appends a
     // chunk per frame: a fresh array per chunk re-ran the pagination effect
     // (a synchronous whole-document pass each) for every chunk. Unchanged
@@ -4170,6 +4179,7 @@ export function App({
       }
     })
     let rowFillSig = ''
+    let previousHeaderFooterContent = new Map<string, number>()
     // passes a pass schedules for itself (widths / suppression applied late);
     // a document whose column widths never settle must not paginate forever
     const chain = new FollowUpChain()
@@ -4645,10 +4655,16 @@ export function App({
         // liveSections: when a section-break block is deleted, that section merges into the next in real time (effective before saving)
         const secList =
           sections.length > 0
-            ? liveSectionsForDocument(sections, editor.state.doc, delSectBreaks)
+            ? liveSectionsForDocument(
+                sections,
+                editor.state.doc,
+                delSectBreaks,
+                unmountedSourceBlocksOf(editor),
+              )
             : null
         lastSecListRef.current = secList
         if (secList) assignSections(blocks, secList)
+        const mountedEndSection = blocks.at(-1)?.section ?? 0
         // the endnote area takes part in page slicing (placed together at the document end; overflows continue on later pages)
         const withEndnotes = appendEndnotesBlock(
           blocks,
@@ -4663,9 +4679,10 @@ export function App({
         const geoms: SectionGeom[] = secList
           ? colGeomsFor(sectionGeoms(secList, hfHs!, evenOddHf))
           : [{ contentHeight: contentH, forceBreak: false, ...singleVariantGeom }]
-        const lastSec = secList?.[secList.length - 1]?.settings ?? section
+        const endSection = isPhasedContentPending() ? mountedEndSection : geoms.length - 1
+        const lastSec = secList?.[endSection]?.settings ?? section
         const spillOverhangPx =
-          geoms[geoms.length - 1]?.marginBottomPx ?? (lastSec ? twipsToPx(lastSec.marginBottom) : 0)
+          geoms[endSection]?.marginBottomPx ?? (lastSec ? twipsToPx(lastSec.marginBottom) : 0)
         const flowWithFloats = appendFloatSpillBlock(
           blocks,
           withEndnotes?.totalHeight ?? totalHeight,
@@ -4889,17 +4906,25 @@ export function App({
               end === undefined ? -1 : hfSections.findIndex((s) => s.lastBlockIndex === end)
             return hfResolveAt(hsi >= 0 ? hsi : si, kind, variant)
           }
-          const pageHfOf = (
-            pageIdx: number,
-            kind: 'header' | 'footer',
-          ): {
+          const headerFooterContent = new Map<string, number>()
+          const variants = new Map<string, HfPageContent>()
+          interface HfPageContent {
             value: HeaderFooter | null
             images?: HfImage[]
             floats: HfImage[]
             section: number
             variant: HfView
             owner: number
-          } => {
+            contentId: number
+            usesTotalPages: boolean
+            usesSectionPages: boolean
+          }
+          const pageHfOf = (pageIdx: number, kind: 'header' | 'footer'): HfPageContent => {
+            const si = secList ? Math.min(slices[pageIdx].section, secList.length - 1) : 0
+            const variant: HfView = cuts[pageIdx].hf.variant
+            const variantKey = `${si}:${kind}:${variant}`
+            const cached = variants.get(variantKey)
+            if (cached) return cached
             // row-anchored logos render inside the strip (off their anchor row), not on the float layer
             const split = (imgs?: HfImage[] | null) => ({
               images: imgs?.filter((img) => !img.floating || hfImageHangsOnPara(img)),
@@ -4913,16 +4938,28 @@ export function App({
                 ) ?? []),
               ],
             })
-            const si = secList ? Math.min(slices[pageIdx].section, secList.length - 1) : 0
-            const variant: HfView = cuts[pageIdx].hf.variant
             const resolved = resolveLive(si, kind, variant)
-            return {
+            const images = split(resolved.images)
+            // Serialize every rich content variant once per pass, rather than
+            // copying its runs and image URLs into every page's widget key.
+            const content = JSON.stringify([resolved.value, images])
+            const contentId =
+              headerFooterContent.get(content) ??
+              previousHeaderFooterContent.get(content) ??
+              ++nextHeaderFooterContentId
+            headerFooterContent.set(content, contentId)
+            const result = {
               value: resolved.value,
-              ...split(resolved.images),
+              ...images,
               section: si,
               variant,
               owner: resolved.owner,
+              contentId,
+              usesTotalPages: content.includes(TOTAL_PAGES_MARK),
+              usesSectionPages: content.includes(SECTION_PAGES_MARK),
             }
+            variants.set(variantKey, result)
+            return result
           }
           /** reserved strip heights of the variant a page shows (capacity and gap band agree) */
           const hfOfPage = (idx: number): { headerPx: number; footerPx: number } => cuts[idx].hf
@@ -4965,8 +5002,6 @@ export function App({
             }
           }
           const pageNoTextOf = (pageIdx: number) => cuts[pageIdx].display
-          const hfSig = (v: HeaderFooter | null | undefined) =>
-            v ? `${v.text}·${v.pageNumber ? 1 : 0}·${v.paras?.length ?? 0}` : ''
           // identity + placement of floating header images: widget keys must change
           // when the watermark image or its position changes, not just its count
           // (dataUrl hashed over the edges only — enough to tell images apart
@@ -5024,17 +5059,6 @@ export function App({
           // page's own (mirrored) left margin
           const bodyLeftOf = (set: SectionSettings, pageIdx: number) =>
             pageLeftOf(set) + twipsToPx(pageMargins(set, cuts[pageIdx].pageNo, mirrorMargins).left)
-          // strip geometry baked in at creation (sizeGapHf, --hf-ml): the gap key's
-          // mKey carries the NEXT section's side margins only, while the footer strip
-          // is sized and inset by the PREVIOUS section — a left-margin edit on that
-          // section alone must not reuse the old footer widget at its stale inset
-          const stripGeomSig = (set: typeof canvasSet, pageIdx: number) => {
-            if (!set) return ''
-            const b = sectionPageBox(set)
-            return [bodyLeftOf(set, pageIdx), b.contentWidth, b.headerDist, b.footerDist]
-              .map((v) => v.toFixed(1))
-              .join(',')
-          }
           slices.slice(1).forEach((slice, k) => {
             // a same-start predecessor that is zero-height is a deliberate blank page
             // (leading/double w:br, even/odd parity): it needs its own gap band so the
@@ -5085,90 +5109,130 @@ export function App({
             // band), so the canvas shows headers/footers on every page like Word
             const gapFooter = pageHfOf(k, 'footer')
             const gapHeader = pageHfOf(k + 1, 'header')
-            const hfEls: HTMLElement[] = []
+            const hfRenderers: Array<() => HTMLElement> = []
+            const hfGeometry: unknown[] = [
+              metrics.marginTop,
+              mixedWidths,
+              mixedWidths ? 0 : canvasPaperW,
+            ]
             if (gapStripNeeded(gapFooter, edgeFooterHf)) {
               const box = sectionPageBox(prevSec)
-              const el = makeGapHfEl({
-                kind: 'footer',
-                value: gapFooter.value ?? { text: '' },
-                images: gapFooter.images,
-                pageNo: pageNoTextOf(k),
-                pageTotal: visiblePages,
-                sectionPages: sectionPages[k],
-                geom: {
-                  ...hfStripGeom(prevSec, legacyBands),
-                  stripLeft: gapStripLeft(prevSec, box, k),
-                  ...stripColumnW(gapFooter, 'footer'),
-                },
+              const geom = {
+                ...hfStripGeom(prevSec, legacyBands),
+                stripLeft: gapStripLeft(prevSec, box, k),
+                ...stripColumnW(gapFooter, 'footer'),
+              }
+              const left = bodyLeftOf(prevSec, k)
+              hfGeometry.push([
+                'footer',
+                geom,
+                left,
+                gapFooter.usesTotalPages ? visiblePages : null,
+                gapFooter.usesSectionPages ? sectionPages[k] : null,
+              ])
+              hfRenderers.push(() => {
+                const el = makeGapHfEl({
+                  kind: 'footer',
+                  value: gapFooter.value ?? { text: '' },
+                  images: gapFooter.images,
+                  pageNo: pageNoTextOf(k),
+                  pageTotal: visiblePages,
+                  sectionPages: sectionPages[k],
+                  geom,
+                })
+                Object.assign(el.dataset, {
+                  hfKind: 'footer',
+                  hfSection: String(gapFooter.section),
+                  hfVariant: gapFooter.variant,
+                  hfPageIdx: String(k),
+                  hfPage: pageNoTextOf(k),
+                })
+                el.style.top = 'auto'
+                el.style.bottom = `${GAP_BAND + metrics.marginTop + box.footerDist}px`
+                sizeGapHf(el, box)
+                // the footer belongs to the page ABOVE the gap: its own section's
+                // left margin, not the next section's (alignGapHfStrips)
+                el.style.setProperty('--hf-ml', `${left}px`)
+                return el
               })
-              Object.assign(el.dataset, {
-                hfKind: 'footer',
-                hfSection: String(gapFooter.section),
-                hfVariant: gapFooter.variant,
-                hfPageIdx: String(k),
-                hfPage: pageNoTextOf(k),
-                hfTotal: String(visiblePages),
-                hfSectionPages: String(sectionPages[k]),
-              })
-              el.style.top = 'auto'
-              el.style.bottom = `${GAP_BAND + metrics.marginTop + box.footerDist}px`
-              sizeGapHf(el, box)
-              // the footer belongs to the page ABOVE the gap: its own section's
-              // left margin, not the next section's (alignGapHfStrips)
-              el.style.setProperty('--hf-ml', `${bodyLeftOf(prevSec, k)}px`)
-              hfEls.push(el)
             }
             if (gapStripNeeded(gapHeader, edgeHeaderHf)) {
               const box = sectionPageBox(nextSec)
-              const el = makeGapHfEl({
-                kind: 'header',
-                value: gapHeader.value ?? { text: '' },
-                images: gapHeader.images,
-                pageNo: pageNoTextOf(k + 1),
-                pageTotal: visiblePages,
-                sectionPages: sectionPages[k + 1],
-                geom: {
-                  ...hfStripGeom(nextSec, legacyBands),
-                  stripLeft: gapStripLeft(nextSec, box, k + 1),
-                  ...stripColumnW(gapHeader, 'header'),
-                },
+              const geom = {
+                ...hfStripGeom(nextSec, legacyBands),
+                stripLeft: gapStripLeft(nextSec, box, k + 1),
+                ...stripColumnW(gapHeader, 'header'),
+              }
+              const left = bodyLeftOf(nextSec, k + 1)
+              hfGeometry.push([
+                'header',
+                geom,
+                left,
+                gapHeader.usesTotalPages ? visiblePages : null,
+                gapHeader.usesSectionPages ? sectionPages[k + 1] : null,
+              ])
+              hfRenderers.push(() => {
+                const el = makeGapHfEl({
+                  kind: 'header',
+                  value: gapHeader.value ?? { text: '' },
+                  images: gapHeader.images,
+                  pageNo: pageNoTextOf(k + 1),
+                  pageTotal: visiblePages,
+                  sectionPages: sectionPages[k + 1],
+                  geom,
+                })
+                Object.assign(el.dataset, {
+                  hfKind: 'header',
+                  hfSection: String(gapHeader.section),
+                  hfVariant: gapHeader.variant,
+                  hfPageIdx: String(k + 1),
+                  hfPage: pageNoTextOf(k + 1),
+                })
+                el.style.bottom = 'auto'
+                // the strip sits at w:headerDist even under a fixed top margin above it: Word lets
+                // the body overprint the header there (probe 2026-10-30), as the first page draws it
+                el.style.top = `calc(100% + ${box.headerDist - metrics.marginTop}px)`
+                sizeGapHf(el, box)
+                el.style.setProperty('--hf-ml', `${left}px`)
+                return el
               })
-              Object.assign(el.dataset, {
-                hfKind: 'header',
-                hfSection: String(gapHeader.section),
-                hfVariant: gapHeader.variant,
-                hfPageIdx: String(k + 1),
-                hfPage: pageNoTextOf(k + 1),
-                hfTotal: String(visiblePages),
-                hfSectionPages: String(sectionPages[k + 1]),
-              })
-              el.style.bottom = 'auto'
-              // the strip sits at w:headerDist even under a fixed top margin above it: Word lets
-              // the body overprint the header there (probe 2026-10-30), as the first page draws it
-              el.style.top = `calc(100% + ${box.headerDist - metrics.marginTop}px)`
-              sizeGapHf(el, box)
-              el.style.setProperty('--hf-ml', `${bodyLeftOf(nextSec, k + 1)}px`)
-              hfEls.push(el)
             }
             // next page's floating header images (picture watermarks): behind-text,
             // positioned from that page's origin (the gap's bottom edge is marginTop
             // above it), like PaginationPreview's per-page watermark layer
-            for (const img of gapHeader.floats) {
-              hfEls.push(
-                tagHfFloatEl(makeHfFloatImgEl(img, floatBoxOf(k + 1), 'gap'), gapHeader, k + 1),
-              )
+            if (gapHeader.floats.length > 0) {
+              const box = floatBoxOf(k + 1)
+              hfGeometry.push(box)
+              for (const img of gapHeader.floats) {
+                hfRenderers.push(() =>
+                  tagHfFloatEl(makeHfFloatImgEl(img, box, 'gap'), gapHeader, k + 1),
+                )
+              }
             }
             const hfProps =
-              hfEls.length > 0
+              hfRenderers.length > 0
                 ? {
-                    hfEls,
-                    // key must cover everything baked into the widgets (both pages'
-                    // formatted numbers + total count, both sections' strip geometry,
-                    // and the (section, variant) each strip edits — a Different First
-                    // Page / Odd & Even toggle can swap the variant behind identical
-                    // text), or stale PAGE/NUMPAGES / strip insets / edit targets
-                    // survive reuse
-                    hfKey: `${pageNoTextOf(k)}·${pageNoTextOf(k + 1)}·${visiblePages}·${sectionPages[k]}/${sectionPages[k + 1]}·${gapFooter.section}${gapFooter.variant[0]}·${gapHeader.section}${gapHeader.variant[0]}·${hfSig(gapFooter.value)}·${hfSig(gapHeader.value)}·f${floatSig(gapHeader.floats)}·g${mixedWidths ? 1 : 0}:${stripGeomSig(prevSec, k)}:${stripGeomSig(nextSec, k + 1)}`,
+                    hf: {
+                      // key must cover everything baked into the widgets (both pages'
+                      // formatted numbers + total count, both sections' strip geometry,
+                      // and the (section, variant) each strip edits — a Different First
+                      // Page / Odd & Even toggle can swap the variant behind identical
+                      // text), or stale PAGE/NUMPAGES / strip insets / edit targets
+                      // survive reuse
+                      key: JSON.stringify([
+                        k,
+                        pageNoTextOf(k),
+                        pageNoTextOf(k + 1),
+                        gapFooter.section,
+                        gapFooter.variant,
+                        gapHeader.section,
+                        gapHeader.variant,
+                        gapFooter.contentId,
+                        gapHeader.contentId,
+                        hfGeometry,
+                      ]),
+                      render: () => hfRenderers.map((render) => render()),
+                    },
                   }
                 : {}
             // previous page's footnotes: rendered into the top of the gap (page-bottom area), with the gap enlarged by the reserved height.
@@ -5186,15 +5250,14 @@ export function App({
                 prevSec.pageWidth - prevSec.marginLeft - prevSec.marginRight,
               )
               const notesLeft = bodyLeftOf(prevSec, k)
-              notes = makeGapNotesEl(
-                items,
-                notesLeft,
-                contentW,
-                fnH,
-                footnoteLineHeightPx(prevSec.docGrid),
-                (id) => editNote('footnote', id),
+              const lineHeight = footnoteLineHeightPx(prevSec.docGrid)
+              notes = makeGapNotesEl(items, notesLeft, contentW, fnH, lineHeight, (id) =>
+                editNote('footnote', id),
               )
-              notesKey = `${Math.round(fnH)}:${notesLeft.toFixed(1)}:${items.map((n) => `${n.no}${n.text}`).join('|')}`
+              // Block gaps place notes below the unused part of the closing page.
+              const notesTop = cut.lead.kind === 'block' && pad > 0 ? 5 + pad : null
+              if (notesTop !== null) notes.style.top = `${notesTop}px`
+              notesKey = JSON.stringify([notesLeft, notesTop, contentW, fnH, lineHeight, items])
               notesMetrics = {
                 ...notesMetrics,
                 marginBottom: metrics.marginBottom + fnH,
@@ -5216,12 +5279,9 @@ export function App({
                 missCut('block lead without element')
                 return
               }
-              // footnotes sit at the paper bottom (Word): shift past the padding
-              if (notes && pad > 0) notes.style.top = `${5 + pad}px`
               gaps.push({
                 el,
                 page: k + 1,
-                boundaryY: slice.start,
                 metrics:
                   pad > 0
                     ? {
@@ -5249,7 +5309,6 @@ export function App({
                   pos: editor.state.doc.content.size,
                   kind: 'inline',
                   page: k + 1,
-                  boundaryY: slice.start,
                   metrics:
                     pad > 0
                       ? {
@@ -5359,7 +5418,6 @@ export function App({
                         kind: 'table',
                         cols: gridCols,
                         page: k + 1,
-                        boundaryY: slice.start,
                         ...(fsplit ? { floatGap: true } : {}),
                         ...(repeatHeaderPx > 0 ? { repeatHeaderPx } : {}),
                         metrics:
@@ -5424,7 +5482,6 @@ export function App({
                   pos,
                   kind: 'cell',
                   page: k + 1,
-                  boundaryY: slice.start,
                   metrics: {
                     ...metrics,
                     // rect offsets from the paper edge already include the page margins
@@ -5457,7 +5514,6 @@ export function App({
             gaps.push({
               pos,
               page: k + 1,
-              boundaryY: slice.start,
               metrics: {
                 ...notesMetrics,
                 marginLeft: (elRect.left - pmRect.left) / factor - pageLeftOf(nextSec),
@@ -5501,6 +5557,7 @@ export function App({
             dirtyRef.current,
             tocBookmarksByIndex,
           )
+          previousHeaderFooterContent = headerFooterContent
         }
         tGapsBuild = performance.now() - tGaps0
         const tSet0 = performance.now()
@@ -6177,7 +6234,12 @@ export function App({
     const locateSection = () => {
       const { $head } = editor.state.selection
       const topIndex = $head.depth > 0 ? $head.index(0) : 0
-      const live = liveSectionsForDocument(sections, editor.state.doc, delSectBreaks)
+      const live = liveSectionsForDocument(
+        sections,
+        editor.state.doc,
+        delSectBreaks,
+        unmountedSourceBlocksOf(editor),
+      )
       const owner = live[sectionIndexAtBlock(editor.state.doc, live, topIndex)]
       setActiveSection(Math.max(0, sourceSectionIndex(sections, owner)))
       if (!mirrorMargins) return
@@ -7114,6 +7176,7 @@ export function App({
     const variant = (el.dataset.hfVariant as HfView | undefined) ?? 'default'
     const pageIdx = Number(el.dataset.hfPageIdx ?? 0)
     const page = el.dataset.hfPage ?? '1'
+    const pageSlices = pageLayoutRef.current?.slices ?? []
     const resolved = hfResolveAt(si, kind, variant)
     const value = resolved.value ?? { text: '' }
     let host = el
@@ -7125,8 +7188,8 @@ export function App({
       value,
       owner: editor ?? undefined,
       pageNo: page,
-      pageTotal: el.dataset.hfTotal ?? '1',
-      sectionPages: el.dataset.hfSectionPages,
+      pageTotal: String(visiblePageCount(pageSlices) || 1),
+      sectionPages: sectionPageCounts(pageSlices)[pageIdx]?.toString(),
       spellcheck: spellcheckActive,
       onCommit: (next) => {
         committed = true
@@ -7635,6 +7698,7 @@ export function App({
                   source,
                   active.state.doc,
                   aiHfFlagsRef.current.deletedBreaks,
+                  unmountedSourceBlocksOf(active),
                 ),
               }
             : state
@@ -7682,6 +7746,7 @@ export function App({
           ctx.sections,
           pmDoc,
           aiHfFlagsRef.current.deletedBreaks,
+          unmountedSourceBlocksOf(editor),
         )
         const ranges = live.map(() => ({ first: -1, last: -1 }))
         for (let i = 0; i < pmDoc.childCount; i++) {
@@ -7699,6 +7764,7 @@ export function App({
               aiPageCtxRef.current.sections,
               editor.state.doc,
               aiHfFlagsRef.current.deletedBreaks,
+              unmountedSourceBlocksOf(editor),
             )[index]
           : undefined,
       set: (index, resolved) => {
@@ -7709,6 +7775,7 @@ export function App({
               ctx.sections,
               editor.state.doc,
               aiHfFlagsRef.current.deletedBreaks,
+              unmountedSourceBlocksOf(editor),
             )
           : []
         const target = live[index]
@@ -7756,6 +7823,7 @@ export function App({
           ctx.sections,
           pmDoc,
           aiHfFlagsRef.current.deletedBreaks,
+          unmountedSourceBlocksOf(editor),
         )
         const ownerSection = live[sectionIndexAtBlock(pmDoc, live, Math.max(afterBlockIndex, 0))]
         const ownerIdx = sourceSectionIndex(ctx.sections, ownerSection)
@@ -8130,7 +8198,12 @@ export function App({
     onSection: (next: SectionSettings) => {
       if (!editor) return
       const ctx = aiPageCtxRef.current
-      const live = liveSectionsForDocument(ctx.sections, editor.state.doc, delSectBreaks)
+      const live = liveSectionsForDocument(
+        ctx.sections,
+        editor.state.doc,
+        delSectBreaks,
+        unmountedSourceBlocksOf(editor),
+      )
       const index = sourceSectionIndex(live, ctx.sections[activeSection])
       const error = aiPageSetupAccess.set(index, { settings: next })
       if (error) setStatus(error)

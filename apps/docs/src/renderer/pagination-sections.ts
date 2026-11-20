@@ -979,6 +979,7 @@ export function liveSectionsForDocument(
   sections: SectionInfo[],
   doc: ProseMirrorNode,
   trackedDeleted?: Set<number>,
+  isUnmounted?: (index: number) => boolean,
 ): SectionInfo[] {
   const present: Array<{ docxIndex: number }> = []
   const removed = new Set(trackedDeleted)
@@ -996,7 +997,10 @@ export function liveSectionsForDocument(
     present.push({ docxIndex: index })
     if (node.attrs.sectionBoundary === false) removed.add(index)
   })
-  return liveSections(sections, present as BlockBox[], undefined, removed, pending)
+  const awaiting = isUnmounted
+    ? new Set(sections.filter((s) => isUnmounted(s.lastBlockIndex)).map((s) => s.lastBlockIndex))
+    : undefined
+  return liveSections(sections, present as BlockBox[], awaiting, removed, pending)
 }
 
 /** Match a derived live section to its authoritative entry, including merged originals. */

@@ -8,6 +8,7 @@ import {
   cancelPhasedContent,
   isPhasedContentPending,
   setContentPhased,
+  unmountedSourceBlocksOf,
   waitForFullContent,
   type PhasedContentHost,
 } from '../src/renderer/phased-content'
@@ -63,6 +64,23 @@ function makeScheduler() {
 }
 
 describe('setContentPhased', () => {
+  it('tracks unmounted source blocks for the owning editor across appends and cancellation', () => {
+    const { host } = makeHost()
+    const owner = {}
+    const other = {}
+    const scheduler = makeScheduler()
+    setContentPhased({ ...host, owner }, docOf(PHASED_MIN_BLOCKS + 20), scheduler.schedule, () => 0)
+    expect(unmountedSourceBlocksOf(owner)?.(PHASE1_BLOCKS - 1)).toBe(false)
+    expect(unmountedSourceBlocksOf(owner)?.(PHASE1_BLOCKS)).toBe(true)
+    expect(unmountedSourceBlocksOf(other)).toBeUndefined()
+    scheduler.drain()
+    expect(unmountedSourceBlocksOf(owner)?.(PHASE1_BLOCKS)).toBe(false)
+    expect(unmountedSourceBlocksOf(owner)?.(PHASE1_BLOCKS + PHASE_CHUNK_BLOCKS)).toBe(true)
+    cancelPhasedContent()
+    expect(unmountedSourceBlocksOf(owner)).toBeUndefined()
+    scheduler.drain()
+  })
+
   it('mounts small documents in one pass without the loading flag', () => {
     const { host, state } = makeHost()
     const s = makeScheduler()

@@ -14,6 +14,11 @@ import {
   type FileActionContext,
 } from '../src/renderer/file-actions'
 import type { DocState } from '../src/renderer/doc-state'
+import {
+  cancelPhasedContent,
+  PHASED_MIN_BLOCKS,
+  waitForFullContent,
+} from '../src/renderer/phased-content'
 import { installDocsHost, type DocsEditorServices } from '../src/renderer/host/docs-host'
 import { createDocsRuntime, type RuntimeDocument } from '../src/renderer/runtime/docs-runtime'
 
@@ -201,6 +206,34 @@ it('commits a new blank document and clears prior document metadata before compl
     trackChanges: false,
     removePersonalInfo: false,
   })
+})
+
+it('opens a streamed document with the caret in its first paragraph while preserving external focus', async () => {
+  const { editor, ctx } = await fixture()
+  cleanups.push(cancelPhasedContent)
+  editor.commands.setTextSelection(4)
+  const focused = document.activeElement
+  const bytes = await buildDocx({
+    bodyXml: Array.from(
+      { length: PHASED_MIN_BLOCKS + 1 },
+      (_, i) => `<w:p><w:r><w:t>Paragraph ${i}</w:t></w:r></w:p>`,
+    ).join(''),
+  })
+  expect(
+    await loadFile(ctx, {
+      path: '/streamed.docx',
+      name: 'Streamed.docx',
+      hash: 'streamed',
+      dataUrl: '',
+      data: bytes.slice().buffer as ArrayBuffer,
+    }),
+  ).toBe('ok')
+  expect(editor.state.selection.toJSON()).toEqual({ type: 'text', anchor: 1, head: 1 })
+  expect(document.activeElement).toBe(focused)
+  await waitForFullContent()
+  expect(editor.state.doc.childCount).toBe(PHASED_MIN_BLOCKS + 1)
+  expect(editor.state.selection.toJSON()).toEqual({ type: 'text', anchor: 1, head: 1 })
+  expect(document.activeElement).toBe(focused)
 })
 
 it('commits the saved baseline before the save promise resolves', async () => {

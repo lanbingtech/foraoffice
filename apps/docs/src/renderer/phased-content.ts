@@ -20,6 +20,8 @@ import type { PmNode } from './editor/convert'
  *   meanwhile (their undo stack must survive).
  */
 export interface PhasedContentHost {
+  /** The editor whose source indices this stream owns. */
+  owner?: object
   /** full replace (Tiptap setContent) */
   setContent(doc: PmNode): void
   /** append top-level nodes at the document end, outside undo history */
@@ -52,6 +54,12 @@ let token = 0
 let settled: Promise<void> = Promise.resolve()
 /** clears the loading flag / resolves settled when a load is cancelled mid-stream */
 let cancelPending: (() => void) | null = null
+let unmountedSource: { owner: object; has: (index: number) => boolean } | null = null
+
+/** Absence from the mounted editor does not imply deletion while loading. */
+export function unmountedSourceBlocksOf(owner: object): ((index: number) => boolean) | undefined {
+  return unmountedSource?.owner === owner ? unmountedSource.has : undefined
+}
 
 /** Resolves when the streaming tail has fully landed (immediately when none is pending). */
 export function waitForFullContent(): Promise<void> {
@@ -66,6 +74,7 @@ export function isPhasedContentPending(): boolean {
 /** Any full content replacement outside the phased path must drop a pending tail. */
 export function cancelPhasedContent(): void {
   token++
+  unmountedSource = null
   cancelPending?.()
   cancelPending = null
 }
@@ -107,7 +116,20 @@ export function setContentPhased(
     host.setContent(pmDoc)
     return
   }
-  host.setContent({ ...pmDoc, content: content.slice(0, PHASE1_BLOCKS) })
+  const remaining = new Map<number, number>()
+  if (host.owner) {
+    for (let i = PHASE1_BLOCKS; i < content.length; i++) {
+      const index = content[i].attrs?.docxIndex
+      if (typeof index === 'number') remaining.set(index, (remaining.get(index) ?? 0) + 1)
+    }
+    unmountedSource = { owner: host.owner, has: (index) => remaining.has(index) }
+  }
+  try {
+    host.setContent({ ...pmDoc, content: content.slice(0, PHASE1_BLOCKS) })
+  } catch (error) {
+    if (my === token) unmountedSource = null
+    throw error
+  }
   let settle!: () => void
   settled = new Promise<void>((resolve) => (settle = resolve))
   host.setLoading(true)
@@ -127,6 +149,7 @@ export function setContentPhased(
     // views, whose constructors would otherwise measure the whole document
     // once before the settled event asks for the same pass again
     if (!host.isDestroyed() && (remounted || !host.getDirty())) host.resetHistory()
+    unmountedSource = null
     cancelPending = null
     host.setLoading(false)
     settle()
@@ -138,6 +161,13 @@ export function setContentPhased(
     if (host.isDestroyed()) return finish()
     const chunk = content.slice(index, index + chunkSize)
     index += chunk.length
+    for (const node of chunk) {
+      const source = node.attrs?.docxIndex
+      if (typeof source !== 'number') continue
+      const n = remaining.get(source) ?? 0
+      if (n > 1) remaining.set(source, n - 1)
+      else remaining.delete(source)
+    }
     const wasDirty = host.getDirty()
     try {
       const started = now()
@@ -157,6 +187,7 @@ export function setContentPhased(
     } catch {
       // a refused chunk falls back to the one-pass mount instead of leaving the file truncated
       remounted = true
+      remaining.clear()
       try {
         host.setContent(pmDoc)
       } catch {
