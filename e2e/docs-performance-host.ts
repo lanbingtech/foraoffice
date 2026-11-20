@@ -137,7 +137,12 @@ async function activateOwnedCaption(
       owner.processStartTime,
       ...(raiseOwnedWindow ? ['-RaiseOwnedWindow'] : []),
     ],
-    { windowsHide: true, timeout: 12_000, encoding: 'utf8' },
+    {
+      windowsHide: true,
+      // The Qt script bounds its native waits and must finish restoring the layer.
+      ...(raiseOwnedWindow ? {} : { timeout: 12_000 }),
+      encoding: 'utf8',
+    },
   )
   return JSON.parse(stdout)
 }

@@ -66,13 +66,11 @@ public static class GuardedTitleClick {
     }, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
     if (hasOwnedWindow) throw new InvalidOperationException("The test window owns another top-level window");
   }
-  public static void SetTopmost(IntPtr window, bool topmost) {
-    const uint NoSize = 0x0001, NoMove = 0x0002, NoActivate = 0x0010, NoOwnerZOrder = 0x0200;
+  public static void RequestTopmost(IntPtr window, bool topmost) {
+    const uint NoSize = 0x0001, NoMove = 0x0002, NoActivate = 0x0010, NoOwnerZOrder = 0x0200, AsyncWindowPos = 0x4000;
     var layer = new IntPtr(topmost ? -1 : -2); // HWND_TOPMOST / HWND_NOTOPMOST
-    if (!SetWindowPos(window, layer, 0, 0, 0, 0, NoSize | NoMove | NoActivate | NoOwnerZOrder))
+    if (!SetWindowPos(window, layer, 0, 0, 0, 0, NoSize | NoMove | NoActivate | NoOwnerZOrder | AsyncWindowPos))
       throw new Win32Exception(Marshal.GetLastWin32Error());
-    if (IsTopmost(window) != topmost)
-      throw new InvalidOperationException("Native test window layer change was not observed");
   }
   public sealed class ClickReceipt {
     public uint Submitted { get; set; }
@@ -151,22 +149,38 @@ function Find-OwnedCaption {
     }
   }
 }
+function Request-OwnedLayer([bool]$Topmost) {
+  Assert-OwnedWindow
+  # Win32 propagates topmost transitions along owner relationships.
+  [GuardedTitleClick]::RequireIndependentWindow($window)
+  Assert-OwnedWindow
+  [GuardedTitleClick]::RequestTopmost($window,$Topmost)
+}
+function Confirm-OwnedLayer([bool]$Topmost) {
+  $timer=[System.Diagnostics.Stopwatch]::StartNew()
+  do {
+    Assert-OwnedWindow
+    if ([GuardedTitleClick]::IsTopmost($window) -eq $Topmost) {return}
+    Start-Sleep -Milliseconds 20
+  } while ($timer.ElapsedMilliseconds -lt 2000)
+  throw 'Native test window layer change was not observed'
+}
 Assert-OwnedWindow -RequireVisible
 $before=[GuardedTitleClick]::GetForegroundWindow() -eq $window
 $submitted=0
 $cursor='not moved'
 $originalTopmost=$null
 $restoredTopmost=$null
+$layerRequested=$false
 $owned=@(Find-OwnedCaption)
 try {
   if ($RaiseOwnedWindow -and !$before -and !$owned.Count -and ![GuardedTitleClick]::Held()) {
     Assert-OwnedWindow -RequireVisible
     $originalTopmost=[GuardedTitleClick]::IsTopmost($window)
     if (!$originalTopmost) {
-      # Win32 propagates topmost transitions along owner relationships.
-      [GuardedTitleClick]::RequireIndependentWindow($window)
-      Assert-OwnedWindow -RequireVisible
-      [GuardedTitleClick]::SetTopmost($window,$true)
+      Request-OwnedLayer $true
+      $layerRequested=$true
+      Confirm-OwnedLayer $true
       $owned=@(Find-OwnedCaption)
     }
   }
@@ -179,10 +193,11 @@ try {
   }
 } finally {
   if ($null -ne $originalTopmost) {
-    Assert-OwnedWindow
-    if ([GuardedTitleClick]::IsTopmost($window) -ne $originalTopmost) {
-      [GuardedTitleClick]::SetTopmost($window,$originalTopmost)
+    if ($layerRequested) {
+      # Undo the request even if its stage timed out before the new layer was observed.
+      Request-OwnedLayer $originalTopmost
     }
+    Confirm-OwnedLayer $originalTopmost
     $restoredTopmost=[GuardedTitleClick]::IsTopmost($window)
     if ($restoredTopmost -ne $originalTopmost) {throw 'Failed to restore the owned test window layer'}
   }
