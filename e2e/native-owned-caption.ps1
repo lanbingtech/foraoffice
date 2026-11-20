@@ -1,7 +1,13 @@
-param([Parameter(Mandatory)][int]$ProcessId,[Parameter(Mandatory)][string]$Handle,[Parameter(Mandatory)][string]$StartUtc)
+param(
+  [Parameter(Mandatory)][int]$ProcessId,
+  [Parameter(Mandatory)][string]$Handle,
+  [Parameter(Mandatory)][string]$StartUtc,
+  [switch]$RaiseOwnedWindow
+)
 $ErrorActionPreference='Stop'
 Add-Type @"
 using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 public static class GuardedTitleClick {
   [StructLayout(LayoutKind.Sequential)] public struct Bounds { public int Left,Top,Right,Bottom; }
@@ -18,6 +24,13 @@ public static class GuardedTitleClick {
   [DllImport("user32.dll")] public static extern bool GetCursorPos(out Point p);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x,int y);
   [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key);
+  private delegate bool EnumWindowCallback(IntPtr window, IntPtr data);
+  [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr data);
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+  [DllImport("user32.dll", SetLastError=true, ExactSpelling=true)] private static extern IntPtr GetWindowLongPtrW(IntPtr window, int index);
+  [DllImport("user32.dll", SetLastError=true, ExactSpelling=true)] private static extern int GetWindowLongW(IntPtr window, int index);
+  [DllImport("kernel32.dll")] private static extern void SetLastError(uint error);
   [DllImport("user32.dll",SetLastError=true)] public static extern uint SendInput(uint count,Input[] inputs,int size);
   [DllImport("user32.dll",SetLastError=true,ExactSpelling=true)]
   private static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, UIntPtr wParam,
@@ -32,6 +45,34 @@ public static class GuardedTitleClick {
   public static bool Held() {
     foreach(int k in new int[]{1,2,4,16,17,18,91,92}) if((GetAsyncKeyState(k)&0x8000)!=0) return true;
     return false;
+  }
+  public static bool IsTopmost(IntPtr window) {
+    const int ExtendedStyle = -20;
+    const int TopmostStyle = 0x0008;
+    SetLastError(0);
+    long style = IntPtr.Size == 8 ? GetWindowLongPtrW(window, ExtendedStyle).ToInt64() : GetWindowLongW(window, ExtendedStyle);
+    int error = Marshal.GetLastWin32Error();
+    if (style == 0 && error != 0) throw new Win32Exception(error);
+    return (style & TopmostStyle) != 0;
+  }
+  public static void RequireIndependentWindow(IntPtr window) {
+    const uint Owner = 4;
+    if (GetWindow(window, Owner) != IntPtr.Zero)
+      throw new InvalidOperationException("The test window has a native owner");
+    bool hasOwnedWindow = false;
+    if (!EnumWindows((candidate, _) => {
+      if (GetWindow(candidate, Owner) == window) hasOwnedWindow = true;
+      return true;
+    }, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    if (hasOwnedWindow) throw new InvalidOperationException("The test window owns another top-level window");
+  }
+  public static void SetTopmost(IntPtr window, bool topmost) {
+    const uint NoSize = 0x0001, NoMove = 0x0002, NoActivate = 0x0010, NoOwnerZOrder = 0x0200;
+    var layer = new IntPtr(topmost ? -1 : -2); // HWND_TOPMOST / HWND_NOTOPMOST
+    if (!SetWindowPos(window, layer, 0, 0, 0, 0, NoSize | NoMove | NoActivate | NoOwnerZOrder))
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+    if (IsTopmost(window) != topmost)
+      throw new InvalidOperationException("Native test window layer change was not observed");
   }
   public sealed class ClickReceipt {
     public uint Submitted { get; set; }
@@ -85,25 +126,65 @@ $target=Get-Process -Id $ProcessId -ErrorAction Stop
 $window=[IntPtr]::new([long]$Handle)
 [uint32]$owner=0
 $thread=[GuardedTitleClick]::GetWindowThreadProcessId($window,[ref]$owner)
-if($owner -ne $target.Id -or $thread -eq 0 -or $target.StartTime.ToUniversalTime().ToString('o') -cne $StartUtc -or ![GuardedTitleClick]::IsWindowVisible($window) -or [GuardedTitleClick]::IsIconic($window)) {throw 'Exact foreground candidate is not the visible owned test window'}
-$rect=[GuardedTitleClick+Bounds]::new()
-if(![GuardedTitleClick]::GetWindowRect($window,[ref]$rect)){throw 'Owned window has no rectangle'}
-$owned=@()
-foreach($vertical in @(12,18,26)) {
-  foreach($horizontal in @(.35,.48,.60,.71)) {
-    $pt=[GuardedTitleClick+Point]::new()
-    $pt.X=$rect.Left+[int](($rect.Right-$rect.Left)*$horizontal)
-    $pt.Y=$rect.Top+$vertical
-    if([GuardedTitleClick]::IsCaption($window,$pt)){$owned+= $pt}
+function Assert-OwnedWindow([switch]$RequireVisible) {
+  [uint32]$observedOwner=0
+  $observedThread=[GuardedTitleClick]::GetWindowThreadProcessId($window,[ref]$observedOwner)
+  $target.Refresh()
+  if ($thread -eq 0 -or $observedThread -ne $thread -or $observedOwner -ne $ProcessId -or
+      $target.HasExited -or $target.StartTime.ToUniversalTime().ToString('o') -cne $StartUtc -or
+      [GuardedTitleClick]::GetAncestor($window,2) -ne $window) {
+    throw 'Exact foreground candidate is not the owned test window'
+  }
+  if ($RequireVisible -and (![GuardedTitleClick]::IsWindowVisible($window) -or [GuardedTitleClick]::IsIconic($window))) {
+    throw 'Owned test window is not visible'
   }
 }
+function Find-OwnedCaption {
+  $rect=[GuardedTitleClick+Bounds]::new()
+  if(![GuardedTitleClick]::GetWindowRect($window,[ref]$rect)){throw 'Owned window has no rectangle'}
+  foreach($vertical in @(12,18,26)) {
+    foreach($horizontal in @(.35,.48,.60,.71)) {
+      $pt=[GuardedTitleClick+Point]::new()
+      $pt.X=$rect.Left+[int](($rect.Right-$rect.Left)*$horizontal)
+      $pt.Y=$rect.Top+$vertical
+      if([GuardedTitleClick]::IsCaption($window,$pt)){$pt}
+    }
+  }
+}
+Assert-OwnedWindow -RequireVisible
 $before=[GuardedTitleClick]::GetForegroundWindow() -eq $window
 $submitted=0
 $cursor='not moved'
-if(!$before -and $owned.Count){
-  $click=[GuardedTitleClick]::SendOwnedTitleClick($window,[uint32]$target.Id,$owned[0])
-  $submitted=$click.Submitted
-  $cursor=$click.Cursor
-  Start-Sleep -Milliseconds 160
+$originalTopmost=$null
+$restoredTopmost=$null
+$owned=@(Find-OwnedCaption)
+try {
+  if ($RaiseOwnedWindow -and !$before -and !$owned.Count -and ![GuardedTitleClick]::Held()) {
+    Assert-OwnedWindow -RequireVisible
+    $originalTopmost=[GuardedTitleClick]::IsTopmost($window)
+    if (!$originalTopmost) {
+      # Win32 propagates topmost transitions along owner relationships.
+      [GuardedTitleClick]::RequireIndependentWindow($window)
+      Assert-OwnedWindow -RequireVisible
+      [GuardedTitleClick]::SetTopmost($window,$true)
+      $owned=@(Find-OwnedCaption)
+    }
+  }
+  if (!$before -and $owned.Count -and [GuardedTitleClick]::GetForegroundWindow() -ne $window) {
+    Assert-OwnedWindow -RequireVisible
+    $click=[GuardedTitleClick]::SendOwnedTitleClick($window,[uint32]$ProcessId,$owned[0])
+    $submitted=$click.Submitted
+    $cursor=$click.Cursor
+    Start-Sleep -Milliseconds 160
+  }
+} finally {
+  if ($null -ne $originalTopmost) {
+    Assert-OwnedWindow
+    if ([GuardedTitleClick]::IsTopmost($window) -ne $originalTopmost) {
+      [GuardedTitleClick]::SetTopmost($window,$originalTopmost)
+    }
+    $restoredTopmost=[GuardedTitleClick]::IsTopmost($window)
+    if ($restoredTopmost -ne $originalTopmost) {throw 'Failed to restore the owned test window layer'}
+  }
 }
-@{ownedBefore=$before;ownedAfter=[GuardedTitleClick]::GetForegroundWindow() -eq $window;safeTitlePoints=$owned.Count;submittedInputs=$submitted;cursor=$cursor;heldInput=[GuardedTitleClick]::Held()}|ConvertTo-Json -Compress
+@{ownedBefore=$before;ownedAfter=[GuardedTitleClick]::GetForegroundWindow() -eq $window;safeTitlePoints=$owned.Count;submittedInputs=$submitted;cursor=$cursor;heldInput=[GuardedTitleClick]::Held();originalTopmost=$originalTopmost;restoredTopmost=$restoredTopmost}|ConvertTo-Json -Compress

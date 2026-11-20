@@ -116,6 +116,32 @@ async function nativeSaveDialog(
   )
 }
 
+async function activateOwnedCaption(
+  owner: NativeImeOwner,
+  raiseOwnedWindow = false,
+): Promise<unknown> {
+  const { stdout } = await promisify(execFile)(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      resolve(__dirname, 'native-owned-caption.ps1'),
+      '-ProcessId',
+      String(owner.targetProcessId),
+      '-Handle',
+      owner.windowHandle,
+      '-StartUtc',
+      owner.processStartTime,
+      ...(raiseOwnedWindow ? ['-RaiseOwnedWindow'] : []),
+    ],
+    { windowsHide: true, timeout: 12_000, encoding: 'utf8' },
+  )
+  return JSON.parse(stdout)
+}
+
 async function triggerPdf(page: Page, useVisiblePointer = false): Promise<void> {
   if (await page.locator('.pagination-preview').count()) {
     const button = page
@@ -205,13 +231,22 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
       const editorPage = page
       const debuggerVersion = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json()
       delete debuggerVersion.webSocketDebuggerUrl
+      const focusInspector = openWindowsNativeFocusInspector()
       return {
         page,
         nativeProcessId: child.pid,
+        inspectNativeFocus: focusInspector.inspect,
+        activateForeground(owner) {
+          if (owner.targetProcessId !== child.pid)
+            throw new Error('Qt foreground candidate does not belong to the launched process')
+          return activateOwnedCaption(owner, true)
+        },
         evidence: {
           kind: 'qt',
           rendering: 'normal-window',
           debuggerVersion,
+          nativeFocusProbe: 'persistent-win32-inspection',
+          nativeFocusActivation: 'guarded-owned-caption',
           exportMethod: 'existing-product-exportPdf-callback-with-native-save-picker',
         },
         open: () =>
@@ -251,13 +286,14 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
           return pdf
         },
         async close() {
-          await writeFile(join(options.workspace, 'qt-stderr.log'), stderr)
           const timer = setTimeout(() => child.kill(), 5_000)
           try {
+            await writeFile(join(options.workspace, 'qt-stderr.log'), stderr)
             await browser?.close()
           } finally {
             clearTimeout(timer)
             if (child.exitCode === null) child.kill()
+            await focusInspector.close()
           }
         },
       }
@@ -325,25 +361,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
                 w.setAlwaysOnTop(true)
                 w.moveTop()
               })
-              const { stdout } = await promisify(execFile)(
-                'powershell.exe',
-                [
-                  '-NoProfile',
-                  '-NonInteractive',
-                  '-ExecutionPolicy',
-                  'Bypass',
-                  '-File',
-                  resolve(__dirname, 'native-owned-caption.ps1'),
-                  '-ProcessId',
-                  String(owner.targetProcessId),
-                  '-Handle',
-                  owner.windowHandle,
-                  '-StartUtc',
-                  owner.processStartTime,
-                ],
-                { windowsHide: true, timeout: 12_000, encoding: 'utf8' },
-              )
-              return JSON.parse(stdout)
+              return await activateOwnedCaption(owner)
             } finally {
               await window.evaluate((w, alwaysOnTop) => {
                 w.setAlwaysOnTop(alwaysOnTop)
