@@ -251,7 +251,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
           rendering: 'normal-window',
           debuggerVersion,
           nativeFocusProbe: 'persistent-win32-inspection',
-          nativeFocusActivation: 'guarded-owned-caption-with-verified-family-fallback',
+          nativeFocusActivation: 'guarded-physical-caption-with-verified-family-fallback',
           exportMethod: 'existing-product-exportPdf-callback-with-native-save-picker',
         },
         open: () =>

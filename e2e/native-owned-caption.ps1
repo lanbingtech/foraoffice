@@ -33,6 +33,9 @@ public static class GuardedTitleClick {
   [DllImport("user32.dll", SetLastError=true)] private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
   [DllImport("user32.dll", SetLastError=true, ExactSpelling=true)] private static extern IntPtr GetWindowLongPtrW(IntPtr window, int index);
   [DllImport("user32.dll", SetLastError=true, ExactSpelling=true)] private static extern int GetWindowLongW(IntPtr window, int index);
+  [DllImport("user32.dll", SetLastError=true)] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+  [DllImport("user32.dll")] private static extern IntPtr GetThreadDpiAwarenessContext();
+  [DllImport("user32.dll")] private static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);
   [DllImport("kernel32.dll")] private static extern void SetLastError(uint error);
   [DllImport("user32.dll",SetLastError=true)] public static extern uint SendInput(uint count,Input[] inputs,int size);
   [DllImport("user32.dll",SetLastError=true,ExactSpelling=true)]
@@ -48,6 +51,39 @@ public static class GuardedTitleClick {
   public static bool Held() {
     foreach(int k in new int[]{1,2,4,16,17,18,91,92}) if((GetAsyncKeyState(k)&0x8000)!=0) return true;
     return false;
+  }
+  private sealed class PhysicalPixelScope : IDisposable {
+    private readonly IntPtr previous;
+    public PhysicalPixelScope() {
+      var perMonitorV2 = new IntPtr(-4);
+      previous = SetThreadDpiAwarenessContext(perMonitorV2);
+      if (previous == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+    public void Dispose() {
+      if (SetThreadDpiAwarenessContext(previous) == IntPtr.Zero ||
+          !AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), previous))
+        throw new InvalidOperationException("Unable to restore the caption helper's DPI context");
+    }
+  }
+  public static Point[] FindPhysicalCaptions(IntPtr window) {
+    using (var dpi = new PhysicalPixelScope()) {
+      Bounds bounds;
+      if (!GetWindowRect(window, out bounds)) throw new InvalidOperationException("Owned window has no rectangle");
+      var points = new List<Point>();
+      foreach (int vertical in new int[] {12, 18, 26, 34}) {
+        foreach (double horizontal in new double[] {.35, .48, .60, .71}) {
+          var point = new Point {
+            X = bounds.Left + (int)Math.Round((bounds.Right - bounds.Left) * horizontal),
+            Y = bounds.Top + vertical
+          };
+          if (IsCaption(window, point)) points.Add(point);
+        }
+      }
+      return points.ToArray();
+    }
+  }
+  public static ClickReceipt SendOwnedPhysicalTitleClick(IntPtr expected, uint expectedPid, Point target) {
+    using (var dpi = new PhysicalPixelScope()) return SendOwnedTitleClick(expected, expectedPid, target);
   }
   public static bool IsTopmost(IntPtr window) {
     const int ExtendedStyle = -20;
@@ -226,6 +262,7 @@ function Assert-OwnedWindow([switch]$RequireVisible) {
   }
 }
 function Find-OwnedCaption {
+  if ($RaiseOwnedWindow) {return [GuardedTitleClick]::FindPhysicalCaptions($window)}
   $rect=[GuardedTitleClick+Bounds]::new()
   if(![GuardedTitleClick]::GetWindowRect($window,[ref]$rect)){throw 'Owned window has no rectangle'}
   foreach($vertical in @(12,18,26)) {
@@ -295,7 +332,11 @@ try {
     } elseif ($raiseRequested -and [GuardedTitleClick]::IsTopmost($window) -ne $originalTopmost) {
       throw 'Owned test window left its original Z-order band'
     }
-    $click=[GuardedTitleClick]::SendOwnedTitleClick($window,[uint32]$ProcessId,$owned[0])
+    $click=if ($RaiseOwnedWindow) {
+      [GuardedTitleClick]::SendOwnedPhysicalTitleClick($window,[uint32]$ProcessId,$owned[0])
+    } else {
+      [GuardedTitleClick]::SendOwnedTitleClick($window,[uint32]$ProcessId,$owned[0])
+    }
     $submitted=$click.Submitted
     $cursor=$click.Cursor
     Start-Sleep -Milliseconds 160
@@ -314,4 +355,4 @@ try {
     if ($observedTopmost -ne $originalTopmost) {throw 'Owned test window left its original Z-order band'}
   }
 }
-@{ownedBefore=$before;ownedAfter=[GuardedTitleClick]::GetForegroundWindow() -eq $window;safeTitlePoints=$owned.Count;submittedInputs=$submitted;cursor=$cursor;heldInput=[GuardedTitleClick]::Held();raiseRequested=$raiseRequested;originalTopmost=$originalTopmost;observedTopmost=$observedTopmost;promotionRequested=$promotionRequested;promotedFamilySize=if($family){$family.Count}else{0};familyRestored=$familyRestored}|ConvertTo-Json -Compress
+@{ownedBefore=$before;ownedAfter=[GuardedTitleClick]::GetForegroundWindow() -eq $window;safeTitlePoints=$owned.Count;submittedInputs=$submitted;cursor=$cursor;heldInput=[GuardedTitleClick]::Held();physicalPixelProbe=[bool]$RaiseOwnedWindow;raiseRequested=$raiseRequested;originalTopmost=$originalTopmost;observedTopmost=$observedTopmost;promotionRequested=$promotionRequested;promotedFamilySize=if($family){$family.Count}else{0};familyRestored=$familyRestored}|ConvertTo-Json -Compress
