@@ -515,6 +515,18 @@ describe('pinCellBoxesToPage', () => {
     expect(box.style.getPropertyValue('--cell-page-dx')).toBe('-113.0px')
   })
 
+  it('leaves page-relative tail drawings alone until their owner has been measured', () => {
+    const pm = paper()
+    const measured = pageBox(pm, 172, 113, { pageRelFrom: 'page' })
+    const tail = pageBox(pm, 1500, 113, { pageRelFrom: 'page' })
+
+    pinCellBoxesToPage(pm, 1, undefined, (box) => box === measured)
+
+    expect(measured.style.getPropertyValue('--cell-page-dy')).toBe('-172.0px')
+    expect(tail.style.getPropertyValue('--cell-page-dy')).toBe('')
+    expect(tail.dataset.pinPage).toBeUndefined()
+  })
+
   it('resolves against the paper of the page the box sits on; margin-relative Y adds that page top margin', () => {
     const pm = paper()
     const gap = makeGapEl({ ...m, marginTop: 80, marginLeft: 100 }, 'block')

@@ -2060,10 +2060,12 @@ export function pinCellBoxesToPage(
   pm: HTMLElement,
   factor: number,
   cuts?: readonly PageCut[],
+  inMeasuredRange?: (element: HTMLElement) => boolean,
 ): void {
-  const boxes = Array.from(
+  let boxes = Array.from(
     pm.querySelectorAll<HTMLElement>('.doc-cell-boxes-page > .doc-textbox[data-cell-page]'),
   )
+  if (inMeasuredRange) boxes = boxes.filter(inMeasuredRange)
   if (boxes.length === 0) return
   const pmRect = pm.getBoundingClientRect()
   const pmCs = getComputedStyle(pm)
@@ -2125,12 +2127,13 @@ export function pinPageRelXPictures(
   pm: HTMLElement,
   factor: number,
   cuts?: readonly PageCut[],
+  inMeasuredRange?: (element: HTMLElement) => boolean,
 ): void {
   const imgs = Array.from(
     pm.querySelectorAll<HTMLElement>(
       '.doc-anchor-origin .doc-inline-img-anchor > img[data-page-rel-x]',
     ),
-  ).filter((img) => !img.closest('td'))
+  ).filter((img) => !img.closest('td') && (!inMeasuredRange || inMeasuredRange(img)))
   if (imgs.length === 0) return
   const pmRect = pm.getBoundingClientRect()
   const pmCs = getComputedStyle(pm)

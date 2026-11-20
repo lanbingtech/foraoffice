@@ -48,6 +48,23 @@ describe('natural-flow measurement state', () => {
 })
 
 describe('incremental flow measurement', () => {
+  it('remeasures the published range without reading geometry in the newly mounted tail', () => {
+    const pm = flowOf([
+      { top: 0, height: 20, inner: 'first' },
+      { top: 20, height: 40, tag: 'div', inner: '<table><tr><td>cell</td></tr></table>' },
+    ])
+    const expected = measureBlocks(pm, 0, 1)
+    const tail = flowOf([
+      { top: 90, height: 40, inner: 'tail<br class="doc-page-br">' },
+    ]).firstElementChild!
+    const tailRect = vi.spyOn(tail, 'getBoundingClientRect')
+    pm.appendChild(tail)
+
+    expect(measureBlocks(pm, 0, 1, undefined, false, undefined, 2)).toEqual(expected)
+    expect(tailRect).not.toHaveBeenCalled()
+    expect(measureBlocks(pm, 0, 1).blocks).toHaveLength(3)
+  })
+
   it('measures the changed table and its flow neighbour while keeping an untouched prefix', () => {
     const pm = flowOf([
       { top: 0, height: 20, inner: 'first' },

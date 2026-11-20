@@ -4351,6 +4351,7 @@ export function App({
      *  line boxes that the height gate cannot see */
     let lastPassChildCount = 0
     let carriedSamples = 0
+    let measureMountedTail = false
     /** first top-level index a transaction touched since the last pass; null once a trigger needs the whole document */
     let dirtyFrom: number | null = null
     let resumePasses = 0
@@ -4494,13 +4495,15 @@ export function App({
       }
       return blocksKeepSlicing(items, slices, factor) || reject('geometry')
     }
-    const remeasure = (forceFull = false) => {
+    const remeasure = (forceFull = false, synchronous = false) => {
       if (disposed) return
       timer = null
       activity.update({ pending: false, active: true })
       lastPassAt = performance.now()
       const stylesChanged = prepareDocStylesRef.current()
       const full = stylesChanged || forceFull
+      const keepPublishedRange = !measureMountedTail && !full && !synchronous
+      measureMountedTail = false
       const edited = full ? null : fastEdits
       fastEdits = new Set()
       const dirty = full ? null : dirtyFrom
@@ -4524,7 +4527,7 @@ export function App({
           if (!fast) {
             if (!edited) fastReject = 'trigger'
             else if (edited.size === 0) fastReject = 'none'
-            remeasurePass(dirty)
+            remeasurePass(dirty, keepPublishedRange)
           }
         } finally {
           if (swapZoom) {
@@ -4571,12 +4574,48 @@ export function App({
         restoreNaturalFlow = undefined
       }
     }
-    const remeasurePass = (dirty: number | null) => {
+    const remeasurePass = (dirty: number | null, keepPublishedRange: boolean) => {
       const pm = pmEl()
       if (!pm) return
-      if (selfScheduled) chain.beginPass()
+      const model = editor?.state.doc
+      let measuredCount = model?.childCount ?? 0
+      let measuredEndPos = model?.content.size ?? 0
+      let end: number | undefined
+      let inMeasuredRange: ((element: HTMLElement) => boolean) | undefined
+      // Follow-up geometry belongs to the range that produced it. Background
+      // appends do not enlarge that range while the viewport is covered.
+      if (
+        editor &&
+        model &&
+        keepPublishedRange &&
+        trackStreamingCoverage &&
+        isPhasedContentPending() &&
+        lastPassChildCount > 0 &&
+        lastPassChildCount < measuredCount &&
+        !streamNeedsLayout()
+      ) {
+        let pos = 0
+        for (let i = 0; i < lastPassChildCount; i++) pos += model.child(i).nodeSize
+        let next = editor.view.nodeDOM(pos)
+        while (next && next.parentNode !== pm) next = next.parentNode
+        const children = Array.from(pm.children)
+        const index = next instanceof Element ? children.indexOf(next) : -1
+        if (index > 0) {
+          end = index
+          measuredCount = lastPassChildCount
+          measuredEndPos = pos
+          const measuredChildren = new Set(children.slice(0, index))
+          inMeasuredRange = (element) => {
+            let block: Element | null = element
+            while (block && block.parentElement !== pm) block = block.parentElement
+            return block !== null && measuredChildren.has(block)
+          }
+        }
+      }
+      const continuing = selfScheduled && measuredCount === lastPassChildCount
+      if (continuing) chain.beginPass()
       else chain.reset()
-      layoutHealth.beginPass(!selfScheduled)
+      layoutHealth.beginPass(!continuing)
       selfScheduled = false
       retrigger = []
       const tStart = performance.now()
@@ -4639,6 +4678,7 @@ export function App({
         obstacleShadow,
         pageLeads,
         headerObstaclesOf,
+        end,
       )
       // natural-flow measuring state: in-paragraph gap widgets force a line break
       // at the PREVIOUS pass's cut, so measuring with them in layout re-confirms
@@ -4665,7 +4705,7 @@ export function App({
           flowRead = { pm, reader: createBlockMeasurer(pm) }
         }
         const { blocks, totalHeight, floats } =
-          linearFlow && flowRead
+          linearFlow && flowRead && end === undefined
             ? flowRead.reader.measure({
                 origin,
                 width: rect.width,
@@ -4687,7 +4727,7 @@ export function App({
                 shadow: true,
                 carryOf,
               })
-            : measureBlocks(pm, origin, factor, planOf, true, carryOf)
+            : measureBlocks(pm, origin, factor, planOf, true, carryOf, end)
         if (hasVertical)
           for (const b of blocks) if (b.el && !b.floated) b.inlineExtraPx = blockInlineExtraPx(b.el)
         planDiff = planOf
@@ -4851,7 +4891,7 @@ export function App({
       slices = measured.s
       pageCuts = cuts
       lastBlocks = blocks
-      lastPassChildCount = editor?.state.doc.childCount ?? lastPassChildCount
+      lastPassChildCount = measuredCount
       pageLayoutRef.current = {
         blocks,
         slices,
@@ -5352,12 +5392,11 @@ export function App({
               return
             }
             if (lead.kind === 'tail') {
-              // deliberate trailing blank page (document ends with a page break): no
-              // anchor block exists — hang the gap at the document end so the blank
-              // sheet paints (min-height extension below covers its paper height)
+              // A trailing break opens a page with no measured anchor block.
+              // Put its gap at the measured endpoint, including during streaming.
               if (k + 2 === slices.length) {
                 gaps.push({
-                  pos: editor.state.doc.content.size,
+                  pos: measuredEndPos,
                   kind: 'inline',
                   page: k + 1,
                   metrics:
@@ -5834,8 +5873,8 @@ export function App({
         // paper top by a negative anchor offset are pushed back down
         clampCellBoxTops(pm, pm.getBoundingClientRect().top, factor)
         clampCellImageTops(pm, factor)
-        pinCellBoxesToPage(pm, factor, cuts)
-        pinPageRelXPictures(pm, factor, cuts)
+        pinCellBoxesToPage(pm, factor, cuts, inMeasuredRange)
+        pinPageRelXPictures(pm, factor, cuts, inMeasuredRange)
         pinParagraphRelVPictures(
           pm,
           planOf,
@@ -6062,14 +6101,17 @@ export function App({
       trigger: 'change' | 'follow-up' | 'append' = 'change',
     ) => {
       if (disposed) return
+      const streaming = isPhasedContentPending()
+      if (streaming && trigger === 'append' && trackStreamingCoverage && !streamNeedsLayout())
+        return
+      if (trigger !== 'follow-up') measureMountedTail = true
       if (fastIndex === null) fastEdits = null
       else fastEdits?.add(fastIndex)
       dirtyFrom = dirtyIndex === null || dirtyFrom === null ? null : Math.min(dirtyFrom, dirtyIndex)
       // while the tail streams, chunks land every few frames: a plain debounce
       // would either never fire (dense chunks) or pay a whole-document pass
       // per chunk (sparse ones); keep the pass already due and pace new ones
-      if (isPhasedContentPending()) {
-        if (trigger === 'append' && trackStreamingCoverage && !streamNeedsLayout()) return
+      if (streaming) {
         if (timer) return
         // a whole-document pass grows with the streamed content; keep it to a
         // fraction of the streaming time so the tail lands sooner
@@ -6104,7 +6146,7 @@ export function App({
         isPhasedContentPending() && (editor?.state.doc.childCount ?? 0) > lastPassChildCount
       if (!force && timer === null && !unlaidTail) return
       if (timer !== null) window.clearTimeout(timer)
-      remeasure(force)
+      remeasure(force, true)
     }
     // async @font-face loading triggers a full reflow (line-break points change); pagination
     // must be remeasured, and cached line samples invalidated (block heights may not change)
@@ -6141,7 +6183,10 @@ export function App({
       requestVisibleStreamLayout()
     })
     if (trackStreamingCoverage) streamResize.observe(scroller)
-    const onContentSettled = () => onUpdate()
+    const onContentSettled = () => {
+      selfScheduled = false
+      onUpdate()
+    }
     document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, onContentSettled)
     const onDocUpdate = ({ transaction }: { transaction: Transaction }) => {
       resetWidthPassHistory(colWidthPass)

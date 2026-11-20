@@ -218,6 +218,7 @@ export function syncWrapObstacles(
   pageLeads?: ReadonlyMap<Element, number>,
   /** header drawings reaching into each page's body: seeded at every page start */
   headerObstaclesOf?: HeaderObstaclesOf,
+  end = pm.children.length,
 ): boolean {
   const pmRect = pm.getBoundingClientRect()
   const rel = (r: DOMRect): ObstacleRect => ({
@@ -254,7 +255,8 @@ export function syncWrapObstacles(
   // page, not a turn: it keeps the obstacles like any other spacer
   let domTurns = 0
   let cutTurns = 0
-  for (const el of Array.from(pm.children) as HTMLElement[]) {
+  for (let i = 0; i < end; i++) {
+    const el = pm.children[i] as HTMLElement
     if (el.classList.contains('page-gap')) {
       if (isPageTurn(el) && !insideFloatTable(el)) {
         domTurns++

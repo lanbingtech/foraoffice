@@ -134,10 +134,11 @@ function bucketByBlock(
   pm: HTMLElement,
   selector: string,
   start: number,
+  end: number,
 ): Map<HTMLElement, HTMLElement[]> {
   const byOwner = new Map<HTMLElement, HTMLElement[]>()
-  if (start > 0) {
-    for (let i = start; i < pm.children.length; i++) {
+  if (start > 0 || end < pm.children.length) {
+    for (let i = start; i < end; i++) {
       const child = pm.children[i] as HTMLElement
       const matches = child.querySelectorAll<HTMLElement>(selector)
       if (matches.length > 0) byOwner.set(child, Array.from(matches))
@@ -316,8 +317,9 @@ export function measureBlocks(
   /** float-carry spacer height before a block, by its position (the engine's
    *  decoration spec); plan-less blocks read the spacer element */
   carryOf?: (pos: number) => number | undefined,
+  end?: number,
 ): MeasuredContent {
-  return readBlockFlow(pm, origin, zoomFactor, planOf, shadow, carryOf)
+  return readBlockFlow(pm, origin, zoomFactor, planOf, shadow, carryOf, undefined, undefined, end)
 }
 
 interface FlowCursor {
@@ -359,6 +361,7 @@ function readBlockFlow(
   carryOf: ((pos: number) => number | undefined) | undefined,
   prefix?: { count: number; snapshot: FlowSnapshot },
   capture?: (snapshot: FlowSnapshot | null) => void,
+  end = pm.children.length,
 ): MeasuredContent {
   const start = prefix?.count ?? 0
   const cursor = prefix?.snapshot.checkpoints[start] ?? startOfFlow
@@ -373,21 +376,23 @@ function readBlockFlow(
   // consecutive zero-height break carriers collapse their margins onto one DOM
   // top; each gets its own virtual slot so its page can be told apart
   const showDeleted = !!pm.closest('.rev-display-original')
-  const breaksByBlock = bucketByBlock(pm, '.doc-field-pagebreak, .doc-page-br', start)
-  const colBreaksByBlock = bucketByBlock(pm, '.doc-col-br', start)
-  const gapInlinesByBlock = bucketByBlock(pm, '.page-gap-inline', start)
+  const breaksByBlock = bucketByBlock(pm, '.doc-field-pagebreak, .doc-page-br', start, end)
+  const colBreaksByBlock = bucketByBlock(pm, '.doc-col-br', start, end)
+  const gapInlinesByBlock = bucketByBlock(pm, '.page-gap-inline', start, end)
   const relImgsByBlock = bucketByBlock(
     pm,
     '.doc-inline-img-anchor > img[data-page-rel-v="1"]',
     start,
+    end,
   )
   const relXImgsByBlock = bucketByBlock(
     pm,
     '.doc-inline-img-anchor > img[data-page-rel-x="1"]:not([data-page-rel-v="1"])',
     start,
+    end,
   )
-  const imgsByBlock = bucketByBlock(pm, 'img', start)
-  const tablesByBlock = bucketByBlock(pm, 'table', start)
+  const imgsByBlock = bucketByBlock(pm, 'img', start, end)
+  const tablesByBlock = bucketByBlock(pm, 'table', start, end)
   const checkpoint = () => ({
     blocks: blocks.length,
     sectionBreaks: sectBreaks.size,
@@ -396,7 +401,7 @@ function readBlockFlow(
     carryApplied,
     lastZeroTop,
   })
-  for (let i = start; i < pm.children.length; i++) {
+  for (let i = start; i < end; i++) {
     if (capture) checkpoints.push(checkpoint())
     const el = pm.children[i] as HTMLElement
     const rect = el.getBoundingClientRect()
