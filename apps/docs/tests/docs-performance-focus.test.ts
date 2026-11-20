@@ -101,6 +101,35 @@ it('checks each sample inside one continuously observed phase without spawning p
   expect(native).toHaveBeenCalledTimes(3)
 })
 
+it('samples native Electron focus before closing the observed phase', async () => {
+  native.mockReset()
+  const actualPage = page()
+  let phaseEnded = false
+  actualPage.evaluate.mockImplementation(async (_, mode) => {
+    if (mode === 'end') phaseEnded = true
+    return { visibilityState: 'visible', hasFocus: true, losses: [] }
+  })
+  const inspectNativeFocus = vi.fn().mockImplementation(async () => ({
+    before: snapshot(!phaseEnded),
+  }))
+  const guard = createPerformanceFocusGuard(
+    'electron',
+    actualPage as unknown as Page,
+    owner.targetProcessId,
+    {
+      inspectNativeFocus,
+    },
+  )
+  await guard.begin()
+  await guard.check()
+  await guard.end()
+  expect(phaseEnded).toBe(true)
+  expect(inspectNativeFocus.mock.calls).toEqual(
+    Array.from({ length: 3 }, () => [owner.targetProcessId]),
+  )
+  expect(native).not.toHaveBeenCalled()
+})
+
 it('preserves actual blur evidence across lightweight checks until phase end', async () => {
   const actualPage = page()
   const fakeWindow = new EventTarget()

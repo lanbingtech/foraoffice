@@ -36,18 +36,18 @@ export function createPerformanceFocusGuard(
   host: PerformanceHost,
   page: Page,
   nativeProcessId?: number,
-  activateForeground?: PerformanceSession['activateForeground'],
+  nativeHost?: Pick<PerformanceSession, 'activateForeground' | 'inspectNativeFocus'>,
 ) {
+  const { activateForeground, inspectNativeFocus } = nativeHost ?? {}
   let owner: NativeImeOwner | undefined
   const observations: Array<Record<string, unknown>> = []
   let checks = 0
   const inspect = async () => {
     if (host === 'browser') return 'not-applicable-headless-browser' as const
     if (!nativeProcessId) throw new Error('Native launcher-owned PID is missing')
-    const evidence = await runWindowsNativeIme({
-      action: 'inspect',
-      targetProcessId: nativeProcessId,
-    })
+    const evidence = inspectNativeFocus
+      ? await inspectNativeFocus(nativeProcessId)
+      : await runWindowsNativeIme({ action: 'inspect', targetProcessId: nativeProcessId })
     const actual = evidence.before.owner
     if (
       owner &&
@@ -107,8 +107,10 @@ export function createPerformanceFocusGuard(
       return { native, dom }
     },
     async end() {
+      // Electron's ready probe samples while DOM monitoring is still armed.
+      const atBoundary = inspectNativeFocus ? await inspect() : undefined
       const dom = await page.evaluate(observeFocus, 'end' as const)
-      const native = await inspect()
+      const native = atBoundary ?? (await inspect())
       observations.push({ stage: 'end', native, dom, checks })
       requireNativeFocus(native)
       requireDomFocus(dom)

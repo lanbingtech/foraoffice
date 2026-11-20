@@ -7,7 +7,11 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { extname, join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { PDFDocument } from 'pdf-lib'
-import type { NativeImeOwner } from './windows-native-ime'
+import {
+  openWindowsNativeFocusInspector,
+  type NativeImeEvidence,
+  type NativeImeOwner,
+} from './windows-native-ime'
 
 export type PerformanceHost = 'qt' | 'electron' | 'browser'
 
@@ -25,6 +29,7 @@ export interface PerformanceSession {
   page: Page
   nativeProcessId?: number
   activateForeground?(owner: NativeImeOwner): Promise<unknown>
+  inspectNativeFocus?(processId: number): Promise<NativeImeEvidence>
   evidence: Record<string, unknown>
   open(): Promise<boolean | null>
   save(): Promise<void>
@@ -293,9 +298,11 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
       )
       // The executable launcher can be a distinct process with no native window.
       const main = await app.evaluate(() => ({ pid: process.pid, versions: process.versions }))
+      const focusInspector = openWindowsNativeFocusInspector()
       return {
         page,
         nativeProcessId: main.pid,
+        inspectNativeFocus: focusInspector.inspect,
         async activateForeground(owner) {
           const window = await app.browserWindow(page)
           try {
@@ -351,6 +358,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
         evidence: {
           kind: 'electron',
           rendering: 'standalone-product',
+          nativeFocusProbe: 'persistent-win32-inspection',
           versions: main.versions,
         },
         async open() {
@@ -379,6 +387,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
           } finally {
             clearTimeout(timer)
             if (child.exitCode === null && child.signalCode === null) child.kill()
+            await focusInspector.close()
           }
         },
       }

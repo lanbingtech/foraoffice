@@ -1,13 +1,29 @@
-param([Parameter(Mandatory = $true)][string]$RequestBase64)
+[CmdletBinding(DefaultParameterSetName = 'Single')]
+param(
+  [Parameter(Mandatory = $true, ParameterSetName = 'Single')][string]$RequestBase64,
+  [Parameter(Mandatory = $true, ParameterSetName = 'Inspection')][switch]$InspectLoop
+)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+if ($InspectLoop) {
+  while ($null -ne ($line = [Console]::ReadLine())) {
+    $request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line)) | ConvertFrom-Json
+    if ($request.action -cne 'inspect' -or $request.includeCandidates) {
+      throw 'The persistent process only supports window inspection'
+    }
+    & $PSCommandPath -RequestBase64 $line
+    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+  }
+  exit 0
+}
 try {
   $request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($RequestBase64)) | ConvertFrom-Json
   if ($request.targetProcessId -le 0) { throw 'A positive owned process ID is required' }
   $target = Get-Process -Id $request.targetProcessId -ErrorAction Stop
   $window = $target.MainWindowHandle
   if ($window -eq [IntPtr]::Zero) { throw 'The owned process has no visible main window' }
-  Add-Type @'
+  if (-not ('DocsNativeIme' -as [type])) {
+    Add-Type @'
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -94,6 +110,7 @@ public static class DocsNativeIme {
   }
 }
 '@
+  }
   function Get-WindowOwner([IntPtr]$handle) {
     if ($handle -eq [IntPtr]::Zero -or -not [DocsNativeIme]::IsWindow($handle)) { return $null }
     [uint32]$ownerId = 0

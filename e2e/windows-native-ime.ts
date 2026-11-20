@@ -1,10 +1,19 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
+import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
 
 const execute = promisify(execFile)
+const nativeHelperArgs = [
+  '-NoProfile',
+  '-NonInteractive',
+  '-ExecutionPolicy',
+  'Bypass',
+  '-File',
+  resolve(__dirname, 'native-ime.ps1'),
+]
 
 export type NativeImeOwner = {
   targetProcessId: number
@@ -603,16 +612,74 @@ export async function runWindowsNativeIme(request: NativeImeRequest): Promise<Na
   const { stdout } = await execute(
     'powershell.exe',
     [
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-File',
-      resolve(__dirname, 'native-ime.ps1'),
+      ...nativeHelperArgs,
       '-RequestBase64',
       Buffer.from(JSON.stringify(request), 'utf8').toString('base64'),
     ],
     { windowsHide: true, timeout: 15_000, maxBuffer: 1024 * 1024, encoding: 'utf8' },
   )
   return parseWindowsNativeImeEvidence(request, stdout)
+}
+
+/** Keep the read-only probe ready so PowerShell startup cannot extend a measurement boundary. */
+export function openWindowsNativeFocusInspector() {
+  if (process.platform !== 'win32') throw new Error('Native window inspection requires Windows')
+  const child = spawn('powershell.exe', [...nativeHelperArgs, '-InspectLoop'], {
+    windowsHide: true,
+  })
+  const lines = createInterface({ input: child.stdout, crlfDelay: Infinity })
+  const results = lines[Symbol.asyncIterator]()
+  let failure: Error | undefined
+  let stderr = ''
+  let pending = false
+  child.on('error', (error) => {
+    failure = error
+  })
+  child.stdin.on('error', (error) => {
+    failure = error
+  })
+  child.stderr.on('data', (chunk: Buffer) => {
+    stderr = (stderr + chunk.toString()).slice(-4096)
+  })
+  const exited = new Promise<number | null>((done) => child.once('close', done))
+  return {
+    async inspect(targetProcessId: number): Promise<NativeImeEvidence> {
+      if (failure) throw failure
+      if (pending) throw new Error('A native window inspection is already running')
+      if (!Number.isSafeInteger(targetProcessId) || targetProcessId <= 0)
+        throw new Error('A positive owned process ID is required')
+      const request = { action: 'inspect', targetProcessId } as const
+      pending = true
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        child.stdin.write(Buffer.from(JSON.stringify(request), 'utf8').toString('base64') + '\n')
+        const result = await Promise.race([
+          results.next(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              child.kill()
+              reject(new Error('Native window inspection did not respond'))
+            }, 15_000)
+          }),
+        ])
+        if (result.done)
+          throw failure ?? new Error(`Native window inspection stopped: ${stderr.trim()}`)
+        return parseWindowsNativeImeEvidence(request, result.value)
+      } finally {
+        clearTimeout(timer)
+        pending = false
+      }
+    },
+    async close() {
+      child.stdin.end()
+      const timer = setTimeout(() => child.kill(), 5_000)
+      try {
+        if ((await exited) !== 0)
+          throw failure ?? new Error(`Native window inspection stopped: ${stderr.trim()}`)
+      } finally {
+        clearTimeout(timer)
+        lines.close()
+      }
+    },
+  }
 }
