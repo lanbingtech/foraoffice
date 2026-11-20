@@ -55,6 +55,49 @@ const nodeInsert = (editor: Editor) =>
 describe('SettledParagraphCache', () => {
   const node = {} as ProseMirrorNode
 
+  it('reads independent paragraphs with their inline gaps hidden in one pass', () => {
+    const root = document.createElement('div')
+    root.innerHTML = '<p><span class="page-gap-inline"></span></p>'.repeat(2)
+    const gaps = Array.from(root.querySelectorAll<HTMLElement>('.page-gap-inline'))
+    const elements = Array.from(root.children)
+    const viewOf = (dom: HTMLElement) =>
+      ({ dom, nodeDOM: (pos: number) => elements[pos] }) as unknown as EditorView
+    const view = viewOf(root)
+    const cache = new SettledParagraphCache<number[]>(shiftAll)
+    const paragraphs = elements.map((_, pos) => ({ node: {} as ProseMirrorNode, pos }))
+
+    const result = cache.measurePass(view, paragraphs, ({ pos }) => {
+      expect(gaps.map((gap) => gap.style.display)).toEqual(['none', 'none'])
+      return [pos]
+    })
+    expect(result).toEqual([[0], [1]])
+    expect(gaps.map((gap) => gap.style.display)).toEqual(['', ''])
+
+    const individually = ({ pos }: { pos: number }) => {
+      expect(gaps[pos].style.display).toBe('none')
+      expect(gaps[1 - pos].style.display).toBe('')
+      return [pos]
+    }
+    root.style.columnCount = '2'
+    cache.clear()
+    document.body.appendChild(root)
+    try {
+      cache.measurePass(view, paragraphs, individually)
+    } finally {
+      root.remove()
+    }
+    expect(gaps.map((gap) => gap.style.display)).toEqual(['', ''])
+
+    const float = document.createElement('div')
+    float.className = 'doc-table-float-left'
+    root.appendChild(float)
+    const withFloat = viewOf(document.createElement('div'))
+    withFloat.dom.append(...root.childNodes)
+    cache.clear()
+    cache.measurePass(withFloat, paragraphs, individually)
+    expect(gaps.map((gap) => gap.style.display)).toEqual(['', ''])
+  })
+
   it('re-measures until two consecutive passes agree, then reuses the result', () => {
     const el = document.createElement('p')
     const view = fakeView(el)

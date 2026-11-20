@@ -72,9 +72,12 @@ function floatBandsOf(view: EditorView): number[][] {
  * the paginator itself measures it (its measuring-natural state).
  */
 export function measureNatural<T>(el: HTMLElement, fn: () => T): T {
-  const gaps = el.querySelectorAll<HTMLElement>('.page-gap-inline')
+  return withInlineGapsHidden(Array.from(el.querySelectorAll<HTMLElement>('.page-gap-inline')), fn)
+}
+
+function withInlineGapsHidden<T>(gaps: readonly HTMLElement[], fn: () => T): T {
   if (gaps.length === 0) return fn()
-  const prev = Array.from(gaps, (g) => g.style.display)
+  const prev = gaps.map((g) => g.style.display)
   gaps.forEach((g) => (g.style.display = 'none'))
   try {
     return fn()
@@ -101,6 +104,11 @@ interface Entry<T> {
 }
 
 export type ReuseNoOpWhile = (excludedByStyle: (style: CSSStyleDeclaration) => boolean) => void
+
+interface ParagraphPosition {
+  node: ProseMirrorNode
+  pos: number
+}
 
 /**
  * A paragraph whose compression re-wraps its own lines can answer differently
@@ -152,12 +160,62 @@ export class SettledParagraphCache<T> {
     this.floatBands = floatBandsOf(view)
   }
 
+  measurePass(
+    view: EditorView,
+    paragraphs: ParagraphPosition[],
+    read: (para: ParagraphPosition, el: HTMLElement, reuseNoOpWhile: ReuseNoOpWhile) => T | null,
+  ): Array<T | null> {
+    this.beginPass(view)
+    const roots = topLevelBlockDom(view)
+    const mounted = paragraphs.map((para) => ({
+      para,
+      el: roots.get(para.node) ?? view.nodeDOM(para.pos),
+    }))
+    const natural = new Set<HTMLElement>()
+    const gaps: HTMLElement[] = []
+    // In normal flow, removing one paragraph's gap changes later paragraphs'
+    // vertical position but not their width. Columns, floats and cells may couple them.
+    if (this.floatBands.length === 0) {
+      for (const { para, el } of mounted) {
+        if (!(el instanceof HTMLElement) || el.parentElement !== view.dom || natural.has(el))
+          continue
+        const own = el.querySelectorAll<HTMLElement>('.page-gap-inline')
+        if (own.length === 0) continue
+        const previous = this.results.get(para.node)
+        if (previous?.el === el && previous.excludedByStyle?.(getComputedStyle(el))) continue
+        natural.add(el)
+        for (const gap of own) gaps.push(gap)
+      }
+    }
+    const batch =
+      natural.size > 1 &&
+      !(Number(getComputedStyle(view.dom).columnCount) > 1) &&
+      !view.dom.querySelector(
+        '.doc-hf-wrap-float, .doc-col-split-float, .doc-para-frame-float, .doc-textbox-side, .has-drop-cap',
+      )
+    return withInlineGapsHidden(batch ? gaps : [], () =>
+      mounted.map(({ para, el }) =>
+        el instanceof HTMLElement
+          ? this.measure(
+              view,
+              para.node,
+              para.pos,
+              (dom, reuse) => read(para, dom, reuse),
+              el,
+              batch && natural.has(el),
+            )
+          : null,
+      ),
+    )
+  }
+
   measure(
     view: EditorView,
     node: ProseMirrorNode,
     pos: number,
     measureParagraph: (el: HTMLElement, reuseNoOpWhile: ReuseNoOpWhile) => T | null,
     dom?: HTMLElement,
+    natural = false,
   ): T | null {
     const el = dom ?? view.nodeDOM(pos)
     if (!(el instanceof HTMLElement)) return null
@@ -181,7 +239,8 @@ export class SettledParagraphCache<T> {
       )
         return this.resultAt(prev, pos)
     }
-    return measureNatural(el, () => this.measureEl(node, pos, el, measureParagraph, prev))
+    const measure = () => this.measureEl(node, pos, el, measureParagraph, prev)
+    return natural ? measure() : measureNatural(el, measure)
   }
 
   private measureEl(

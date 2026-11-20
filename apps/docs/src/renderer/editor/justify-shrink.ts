@@ -3,12 +3,7 @@ import { Plugin, PluginKey, type EditorState } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { rangeSlot } from '../dom-range'
-import {
-  SettledParagraphCache,
-  noteFloatTransaction,
-  topLevelBlockDom,
-  type ReuseNoOpWhile,
-} from './settled-measure'
+import { SettledParagraphCache, noteFloatTransaction, type ReuseNoOpWhile } from './settled-measure'
 import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
 import { DOC_CSS_COMMITTED_EVENT, WRAP_WIDTHS_COMMITTED_EVENT } from './cjk-punct-shrink'
 
@@ -382,16 +377,10 @@ class JustifyShrinkView {
 
     const shrinks: MeasuredShrink[] = []
     let measurable = paras.length === 0
-    this.results.beginPass(view)
-    const topLevel = topLevelBlockDom(view)
-    for (const para of paras) {
-      const measured = this.results.measure(
-        view,
-        para.node,
-        para.pos,
-        (el, reuseNoOpWhile) => this.measureParagraph(para.node, para.pos, el, reuseNoOpWhile),
-        topLevel.get(para.node),
-      )
+    const measuredParas = this.results.measurePass(view, paras, (para, el, reuseNoOpWhile) =>
+      this.measureParagraph(para.node, para.pos, el, reuseNoOpWhile),
+    )
+    for (const measured of measuredParas) {
       if (!measured) continue
       measurable = true
       shrinks.push(...measured)
