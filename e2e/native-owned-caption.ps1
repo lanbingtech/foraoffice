@@ -7,7 +7,10 @@ param(
 $ErrorActionPreference='Stop'
 Add-Type @"
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 public static class GuardedTitleClick {
   [StructLayout(LayoutKind.Sequential)] public struct Bounds { public int Left,Top,Right,Bottom; }
@@ -25,6 +28,7 @@ public static class GuardedTitleClick {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x,int y);
   [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int key);
   private delegate bool EnumWindowCallback(IntPtr window, IntPtr data);
+  [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
   [DllImport("user32.dll", SetLastError=true)] private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr data);
   [DllImport("user32.dll", SetLastError=true)] private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
   [DllImport("user32.dll", SetLastError=true, ExactSpelling=true)] private static extern IntPtr GetWindowLongPtrW(IntPtr window, int index);
@@ -71,10 +75,90 @@ public static class GuardedTitleClick {
     if (hasForeignWindow) throw new InvalidOperationException("The test window group contains a foreign native window");
   }
   public static void RequestRaiseWithinBand(IntPtr window) {
+    RequestPosition(window, IntPtr.Zero); // HWND_TOP preserves the current Z-order band.
+  }
+  private static void RequestPosition(IntPtr window, IntPtr after) {
     const uint NoSize = 0x0001, NoMove = 0x0002, NoActivate = 0x0010, NoOwnerZOrder = 0x0200, AsyncWindowPos = 0x4000;
-    // HWND_TOP preserves the current topmost or non-topmost band.
-    if (!SetWindowPos(window, IntPtr.Zero, 0, 0, 0, 0, NoSize | NoMove | NoActivate | NoOwnerZOrder | AsyncWindowPos))
+    if (!SetWindowPos(window, after, 0, 0, 0, 0, NoSize | NoMove | NoActivate | NoOwnerZOrder | AsyncWindowPos))
       throw new Win32Exception(Marshal.GetLastWin32Error());
+  }
+  public sealed class OwnedWindowFamily {
+    private const uint RootOwner = 3, Owner = 4;
+    private readonly IntPtr root;
+    private readonly uint processId;
+    private readonly string startUtc;
+    private readonly Dictionary<IntPtr, Member> original;
+    private sealed class Member {
+      public uint Thread;
+      public IntPtr OwnerWindow;
+      public bool Topmost;
+    }
+    public OwnedWindowFamily(IntPtr root, uint processId, string startUtc) {
+      this.root = root;
+      this.processId = processId;
+      this.startUtc = startUtc;
+      original = ReadFamily();
+      if (!AllInBand(original, false))
+        throw new InvalidOperationException("The owned test window family is already topmost");
+    }
+    private void RequireProcess() {
+      using (var process = Process.GetProcessById((int)processId)) {
+        if (process.HasExited || process.StartTime.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture) != startUtc)
+          throw new InvalidOperationException("The test launcher process identity changed");
+      }
+    }
+    private Dictionary<IntPtr, Member> ReadFamily() {
+      RequireProcess();
+      if (GetAncestor(root, RootOwner) != root)
+        throw new InvalidOperationException("The test window is not its native root owner");
+      var windows = new List<IntPtr>();
+      if (!EnumWindows((candidate, _) => {
+        if (GetAncestor(candidate, RootOwner) == root) windows.Add(candidate);
+        return true;
+      }, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      var snapshot = new Dictionary<IntPtr, Member>();
+      foreach (var window in windows) {
+        uint pid;
+        uint thread = GetWindowThreadProcessId(window, out pid);
+        if (thread == 0 || pid != processId || GetAncestor(window, RootOwner) != root)
+          throw new InvalidOperationException("The test window family contains a foreign or changed native window");
+        snapshot.Add(window, new Member { Thread = thread, OwnerWindow = GetWindow(window, Owner), Topmost = IsTopmost(window) });
+      }
+      if (!snapshot.ContainsKey(root) || snapshot[root].OwnerWindow != IntPtr.Zero)
+        throw new InvalidOperationException("The exact native root owner was not observed");
+      foreach (var member in snapshot.Values) {
+        if (member.OwnerWindow != IntPtr.Zero && !snapshot.ContainsKey(member.OwnerWindow))
+          throw new InvalidOperationException("The test window family has an unverified native owner");
+      }
+      RequireProcess();
+      return snapshot;
+    }
+    private Dictionary<IntPtr, Member> RequireUnchangedFamily() {
+      var current = ReadFamily();
+      if (current.Count != original.Count)
+        throw new InvalidOperationException("The test window family membership changed");
+      foreach (var pair in original) {
+        Member observed;
+        if (!current.TryGetValue(pair.Key, out observed) || observed.Thread != pair.Value.Thread || observed.OwnerWindow != pair.Value.OwnerWindow)
+          throw new InvalidOperationException("The test window family identity changed");
+      }
+      return current;
+    }
+    private static bool AllInBand(Dictionary<IntPtr, Member> windows, bool topmost) {
+      foreach (var item in windows.Values) if (item.Topmost != topmost) return false;
+      return true;
+    }
+    public int Count { get { return original.Count; } }
+    public bool InBand(bool topmost) {
+      return AllInBand(RequireUnchangedFamily(), topmost);
+    }
+    public void RequestBand(bool topmost) {
+      var current = RequireUnchangedFamily();
+      if (topmost && !AllInBand(current, false))
+        throw new InvalidOperationException("The test window family left the original band before promotion");
+      // HWND_TOPMOST and HWND_NOTOPMOST propagate through the verified owner family.
+      RequestPosition(root, new IntPtr(topmost ? -1 : -2));
+    }
   }
   public sealed class ClickReceipt {
     public uint Submitted { get; set; }
@@ -153,6 +237,14 @@ function Find-OwnedCaption {
     }
   }
 }
+function Confirm-FamilyBand($Family,[bool]$Topmost) {
+  $timer=[System.Diagnostics.Stopwatch]::StartNew()
+  do {
+    if ($Family.InBand($Topmost)) {return}
+    Start-Sleep -Milliseconds 20
+  } while ($timer.ElapsedMilliseconds -lt 2000)
+  throw 'Native test window family layer change was not observed'
+}
 Assert-OwnedWindow -RequireVisible
 $before=[GuardedTitleClick]::GetForegroundWindow() -eq $window
 $submitted=0
@@ -160,6 +252,9 @@ $cursor='not moved'
 $originalTopmost=$null
 $observedTopmost=$null
 $raiseRequested=$false
+$family=$null
+$promotionRequested=$false
+$familyRestored=$false
 $owned=@(Find-OwnedCaption)
 try {
   if ($RaiseOwnedWindow -and !$before -and !$owned.Count -and ![GuardedTitleClick]::Held()) {
@@ -183,11 +278,21 @@ try {
         if ($owned.Count -or [GuardedTitleClick]::Held()) {break}
         Start-Sleep -Milliseconds 20
       } while ($timer.ElapsedMilliseconds -lt 2000)
+      if (!$owned.Count -and ![GuardedTitleClick]::Held() -and [GuardedTitleClick]::GetForegroundWindow() -ne $window) {
+        Assert-OwnedWindow -RequireVisible
+        $family=[GuardedTitleClick+OwnedWindowFamily]::new($window,[uint32]$ProcessId,$StartUtc)
+        $family.RequestBand($true)
+        $promotionRequested=$true
+        Confirm-FamilyBand $family $true
+        $owned=@(Find-OwnedCaption)
+      }
     }
   }
   if (!$before -and $owned.Count -and [GuardedTitleClick]::GetForegroundWindow() -ne $window) {
     Assert-OwnedWindow -RequireVisible
-    if ($raiseRequested -and [GuardedTitleClick]::IsTopmost($window) -ne $originalTopmost) {
+    if ($promotionRequested) {
+      if (!$family.InBand($true)) {throw 'Owned test window family changed band before the caption click'}
+    } elseif ($raiseRequested -and [GuardedTitleClick]::IsTopmost($window) -ne $originalTopmost) {
       throw 'Owned test window left its original Z-order band'
     }
     $click=[GuardedTitleClick]::SendOwnedTitleClick($window,[uint32]$ProcessId,$owned[0])
@@ -196,10 +301,17 @@ try {
     Start-Sleep -Milliseconds 160
   }
 } finally {
+  if ($promotionRequested) {
+    Assert-OwnedWindow
+    # Undo the queued promotion even if its confirmation failed.
+    $family.RequestBand($false)
+    Confirm-FamilyBand $family $false
+    $familyRestored=$true
+  }
   if ($null -ne $originalTopmost) {
     Assert-OwnedWindow
     $observedTopmost=[GuardedTitleClick]::IsTopmost($window)
     if ($observedTopmost -ne $originalTopmost) {throw 'Owned test window left its original Z-order band'}
   }
 }
-@{ownedBefore=$before;ownedAfter=[GuardedTitleClick]::GetForegroundWindow() -eq $window;safeTitlePoints=$owned.Count;submittedInputs=$submitted;cursor=$cursor;heldInput=[GuardedTitleClick]::Held();raiseRequested=$raiseRequested;originalTopmost=$originalTopmost;observedTopmost=$observedTopmost}|ConvertTo-Json -Compress
+@{ownedBefore=$before;ownedAfter=[GuardedTitleClick]::GetForegroundWindow() -eq $window;safeTitlePoints=$owned.Count;submittedInputs=$submitted;cursor=$cursor;heldInput=[GuardedTitleClick]::Held();raiseRequested=$raiseRequested;originalTopmost=$originalTopmost;observedTopmost=$observedTopmost;promotionRequested=$promotionRequested;promotedFamilySize=if($family){$family.Count}else{0};familyRestored=$familyRestored}|ConvertTo-Json -Compress
