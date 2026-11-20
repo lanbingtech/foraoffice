@@ -71,7 +71,7 @@ import { parseDocxOffThread } from './parse-off-thread'
 import { PHASED_APPEND } from './editor/streaming-tail-guard'
 import { docTextLength, docWeight, openTierFor } from './large-document'
 import { documentToMarkdown } from './export-markdown'
-import { docStyleCss } from './doc-style-css'
+import { activeDocStyleCss } from './doc-style-css'
 import { documentTextContext } from './text-layout/document-context'
 import { setNoteNumFmts } from './note-format'
 import type { CompareEntry } from './editor/compare'
@@ -660,7 +660,7 @@ export async function loadFile(
       // opens files without replacing the current document.
       discardStalePasswordIntents()
       ctx.setAiPanelKey((k) => k + 1)
-      ctx.setDocCss(docStyleCss(parsed))
+      ctx.setDocCss(activeDocStyleCss(parsed))
       ctx.setSection(readSectionSettings(parsed))
       ctx.setSections(readSections(parsed))
       ctx.setSectionDirty(false)
@@ -815,9 +815,11 @@ export async function newFile(ctx: FileActionContext): Promise<boolean | undefin
       ctx.editor!.storage.listNumbering.docDefaults = parsed.docDefaults
       ctx.editor!.storage.listNumbering.defs = parsed.numbering
       applyDocLayoutSettings(ctx.editor!, parsed)
-      ctx.editor!
-        .chain()
-        .setContent(blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)) as never)
+      ctx
+        .editor!.chain()
+        .setContent(
+          blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)) as never,
+        )
         .command(selectOpenedDocumentStart)
         .run()
       commentEndpoints(ctx.editor!.view, parsed.blocks)
@@ -840,7 +842,7 @@ export async function newFile(ctx: FileActionContext): Promise<boolean | undefin
       // the previous draft (its DocState, including the encrypted flag, is gone)
       discardStalePasswordIntents()
       ctx.setAiPanelKey((k) => k + 1)
-      ctx.setDocCss(docStyleCss(parsed))
+      ctx.setDocCss(activeDocStyleCss(parsed))
       ctx.setSection(readSectionSettings(parsed))
       ctx.setSections(readSections(parsed))
       ctx.setSectionDirty(false)
@@ -1647,7 +1649,7 @@ async function saveOnce(
         chain.run()
         restoreMarksAfterDocRewrite(editor, caretMarks)
       }
-      ctx.setDocCss(docStyleCss(reparsed))
+      ctx.setDocCss(activeDocStyleCss(reparsed))
       ctx.setDoc((prev) =>
         prev
           ? {
