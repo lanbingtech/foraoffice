@@ -7,6 +7,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { extname, join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { PDFDocument } from 'pdf-lib'
+import type { NativeImeOwner } from './windows-native-ime'
 
 export type PerformanceHost = 'qt' | 'electron' | 'browser'
 
@@ -23,6 +24,7 @@ export interface HostOptions {
 export interface PerformanceSession {
   page: Page
   nativeProcessId?: number
+  activateForeground?(owner: NativeImeOwner): Promise<unknown>
   evidence: Record<string, unknown>
   open(): Promise<boolean | null>
   save(): Promise<void>
@@ -294,6 +296,58 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
       return {
         page,
         nativeProcessId: main.pid,
+        async activateForeground(owner) {
+          const window = await app.browserWindow(page)
+          try {
+            const initial = await window.evaluate((w) => {
+              const handle = w.getNativeWindowHandle()
+              return {
+                pid: process.pid,
+                handle: (handle.length === 4
+                  ? handle.readUInt32LE()
+                  : handle.readBigUInt64LE()
+                ).toString(),
+                alwaysOnTop: w.isAlwaysOnTop(),
+              }
+            })
+            if (initial.pid !== owner.targetProcessId || initial.handle !== owner.windowHandle)
+              throw new Error('Electron BrowserWindow does not match the native measurement owner')
+            try {
+              // Expose the owned native caption before the guarded Windows mouse click.
+              await window.evaluate((w) => {
+                w.setAlwaysOnTop(true)
+                w.moveTop()
+              })
+              const { stdout } = await promisify(execFile)(
+                'powershell.exe',
+                [
+                  '-NoProfile',
+                  '-NonInteractive',
+                  '-ExecutionPolicy',
+                  'Bypass',
+                  '-File',
+                  resolve(__dirname, 'native-owned-caption.ps1'),
+                  '-ProcessId',
+                  String(owner.targetProcessId),
+                  '-Handle',
+                  owner.windowHandle,
+                  '-StartUtc',
+                  owner.processStartTime,
+                ],
+                { windowsHide: true, timeout: 12_000, encoding: 'utf8' },
+              )
+              return JSON.parse(stdout)
+            } finally {
+              await window.evaluate((w, alwaysOnTop) => {
+                w.setAlwaysOnTop(alwaysOnTop)
+                if (w.isAlwaysOnTop() !== alwaysOnTop)
+                  throw new Error('Failed to restore the original Electron window layer')
+              }, initial.alwaysOnTop)
+            }
+          } finally {
+            await window.dispose()
+          }
+        },
         evidence: {
           kind: 'electron',
           rendering: 'standalone-product',

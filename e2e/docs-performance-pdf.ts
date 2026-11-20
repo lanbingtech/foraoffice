@@ -105,9 +105,9 @@ export function verifyPositionedPdf(
   pages: PdfTextPage[],
   host: 'qt' | 'electron' | 'browser' = 'browser',
 ) {
-  // Measured A4 output differs by 0.94004pt on Qt and 0.6203pt on the browser.
-  // The browser's paper allowance is one CSS pixel. Source regions are unscaled.
-  const paperTolerance = host === 'qt' ? 1 : host === 'browser' ? 0.75 : 0.25
+  // Measured A4 output differs by 0.94004pt on Qt and 0.62023pt on both Chromium hosts.
+  // Browser and Electron allow one CSS pixel on the paper edge. Source regions are unscaled.
+  const paperTolerance = host === 'qt' ? 1 : 0.75
   if (typeof expected.body !== 'string' || !expected.body.trim())
     throw new Error('Independent main body expectation is missing')
   const matchesChain = (text: string, source: string | PdfTocLeader) =>

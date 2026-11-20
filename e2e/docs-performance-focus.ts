@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test'
-import type { PerformanceHost } from './docs-performance-host'
+import type { PerformanceHost, PerformanceSession } from './docs-performance-host'
 import { runWindowsNativeIme, type NativeImeOwner } from './windows-native-ime'
 
 type FocusState = {
@@ -24,6 +24,8 @@ function observeFocus(mode: 'begin' | 'check' | 'end') {
     state.active = true
   } else if (mode === 'end') state.active = false
   return {
+    timeOriginMs: performance.timeOrigin,
+    observedAtMs: performance.now(),
     visibilityState: document.visibilityState,
     hasFocus: document.hasFocus(),
     losses: state.losses,
@@ -34,6 +36,7 @@ export function createPerformanceFocusGuard(
   host: PerformanceHost,
   page: Page,
   nativeProcessId?: number,
+  activateForeground?: PerformanceSession['activateForeground'],
 ) {
   let owner: NativeImeOwner | undefined
   const observations: Array<Record<string, unknown>> = []
@@ -82,8 +85,17 @@ export function createPerformanceFocusGuard(
       if (
         typeof before !== 'string' &&
         (!before.before.foregroundOwned || !before.before.focusOwned)
-      )
-        await runWindowsNativeIme({ action: 'focus', ...owner! })
+      ) {
+        if (activateForeground) {
+          const started = performance.now()
+          const receipt = await activateForeground(before.before.owner)
+          observations.push({
+            stage: 'native-caption-activation',
+            receipt,
+            elapsedMs: performance.now() - started,
+          })
+        } else await runWindowsNativeIme({ action: 'focus', ...before.before.owner })
+      }
       await page.bringToFront()
       await page.locator('.ProseMirror').first().focus()
       const native = await inspect()

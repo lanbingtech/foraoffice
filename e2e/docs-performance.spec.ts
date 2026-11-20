@@ -619,7 +619,12 @@ test('production document performance and correctness evidence', async () => {
       session.page.on('pageerror', (error) => errors.push(error.message))
       errors.push(...(await session.page.pageErrors()).map((error) => error.message))
       await installProbe(session.page)
-      focus = createPerformanceFocusGuard(host, session.page, session.nativeProcessId)
+      focus = createPerformanceFocusGuard(
+        host,
+        session.page,
+        session.nativeProcessId,
+        session.activateForeground,
+      )
       details.push({ launch, operation: 'foreground-control', observations: focus.observations })
       await focus.begin()
       const prepared = await waitForLayout(session.page, primerText, 180_000, -1, started, [
