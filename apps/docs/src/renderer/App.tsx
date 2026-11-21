@@ -8184,6 +8184,14 @@ export function App({
   fileCtxRef.current.beforeDocumentReplace = () => {
     docsCommands.releaseAll()
     docsAnnotations.reset()
+    // The pane survives a document replacement. Reset its position together
+    // with the cached offsets used by layout before the new caret is mounted.
+    const pane = scrollContainerRef.current
+    if (pane) {
+      pane.scrollLeft = 0
+      pane.scrollTop = 0
+    }
+    scrollPosRef.current = { left: 0, top: 0 }
   }
   useEffect(() => {
     if (runtimeDocumentRef.current) {
