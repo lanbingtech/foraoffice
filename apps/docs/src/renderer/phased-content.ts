@@ -71,12 +71,19 @@ export function isPhasedContentPending(): boolean {
   return cancelPending !== null
 }
 
+function replaceStream(): number {
+  const generation = ++token
+  const cancel = cancelPending
+  // The loading callback may start its own open. Drop the old owner first.
+  unmountedSource = null
+  cancelPending = null
+  cancel?.()
+  return generation
+}
+
 /** Any full content replacement outside the phased path must drop a pending tail. */
 export function cancelPhasedContent(): void {
-  token++
-  unmountedSource = null
-  cancelPending?.()
-  cancelPending = null
+  replaceStream()
 }
 
 /**
@@ -109,9 +116,9 @@ export function setContentPhased(
   schedule: (cb: () => void) => void = nextPaintedFrame,
   now: () => number = () => performance.now(),
 ): void {
-  cancelPhasedContent()
+  const my = replaceStream()
+  if (my !== token) return
   const content = pmDoc.content ?? []
-  const my = ++token
   if (content.length <= PHASED_MIN_BLOCKS) {
     host.setContent(pmDoc)
     return
@@ -130,13 +137,19 @@ export function setContentPhased(
     if (my === token) unmountedSource = null
     throw error
   }
+  if (my !== token) return
   let settle!: () => void
   settled = new Promise<void>((resolve) => (settle = resolve))
-  host.setLoading(true)
-  cancelPending = () => {
-    host.setLoading(false)
-    settle()
+  const release = () => {
+    try {
+      host.setLoading(false)
+    } finally {
+      settle()
+    }
   }
+  cancelPending = release
+  host.setLoading(true)
+  if (my !== token) return
   let index = PHASE1_BLOCKS
   let chunkSize = PHASE_CHUNK_BLOCKS
   let previous: { finished: number; dispatchMs: number; count: number } | undefined
@@ -150,11 +163,11 @@ export function setContentPhased(
     // views, whose constructors would otherwise measure the whole document
     // once before the settled event asks for the same pass again
     if (!host.isDestroyed() && (remounted || !host.getDirty())) host.resetHistory()
+    if (my !== token) return
     unmountedSource = null
     cancelPending = null
-    host.setLoading(false)
-    settle()
-    if (typeof document !== 'undefined')
+    release()
+    if (my === token && typeof document !== 'undefined')
       document.dispatchEvent(new Event(PHASED_CONTENT_SETTLED_EVENT))
   }
   const appendChunk = () => {
@@ -187,6 +200,7 @@ export function setContentPhased(
       const finished = now()
       previous = { finished, dispatchMs: finished - started, count: chunk.length }
     } catch {
+      if (my !== token) return
       // a refused chunk falls back to the one-pass mount instead of leaving the file truncated
       remounted = true
       remaining.clear()
@@ -195,10 +209,13 @@ export function setContentPhased(
       } catch {
         /* same failure as the one-pass path */
       }
+      if (my !== token) return
       host.setDirty(wasDirty)
       return finish()
     }
+    if (my !== token) return
     host.setDirty(wasDirty)
+    if (my !== token) return
     if (index < content.length) schedule(appendChunk)
     else finish()
   }

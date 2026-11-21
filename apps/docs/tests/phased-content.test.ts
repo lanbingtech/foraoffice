@@ -198,6 +198,83 @@ describe('setContentPhased', () => {
     expect(second.state.loading).toBe(false)
   })
 
+  it('keeps the replacement pending when it opens during the old history reset', () => {
+    const first = makeHost()
+    const second = makeHost()
+    const owner = {}
+    const oldFrames = makeScheduler()
+    const newFrames = makeScheduler()
+    const blocks = PHASED_MIN_BLOCKS + 1
+    first.host.resetHistory = () =>
+      setContentPhased({ ...second.host, owner }, docOf(blocks), newFrames.schedule, () => 0)
+
+    try {
+      setContentPhased(first.host, docOf(blocks), oldFrames.schedule, () => 0)
+      while (oldFrames.pending()) oldFrames.drain()
+      expect(isPhasedContentPending()).toBe(true)
+      expect(unmountedSourceBlocksOf(owner)?.(PHASE1_BLOCKS)).toBe(true)
+      expect(second.state.mounted.length).toBe(PHASE1_BLOCKS)
+      while (newFrames.pending()) newFrames.drain()
+      expect(second.state.mounted.length).toBe(blocks)
+    } finally {
+      cancelPhasedContent()
+    }
+  })
+
+  it('holds the save gate for the winning stream when the first mount starts another open', async () => {
+    const first = makeHost()
+    const second = makeHost()
+    const oldFrames = makeScheduler()
+    const newFrames = makeScheduler()
+    const blocks = PHASED_MIN_BLOCKS + 1
+    first.host.setContent = () =>
+      setContentPhased(second.host, docOf(blocks), newFrames.schedule, () => 0)
+
+    try {
+      setContentPhased(first.host, docOf(blocks), oldFrames.schedule, () => 0)
+      expect(oldFrames.pending()).toBe(0)
+      expect(first.state.loading).toBe(false)
+      let gateOpened = false
+      const gate = waitForFullContent()
+      void gate.then(() => (gateOpened = true))
+      await Promise.resolve()
+      expect(gateOpened).toBe(false)
+      while (newFrames.pending()) newFrames.drain()
+      await expect(gate).resolves.toBeUndefined()
+      expect(gateOpened).toBe(true)
+      expect(second.state.mounted.length).toBe(blocks)
+    } finally {
+      cancelPhasedContent()
+    }
+  })
+
+  it('drops an old append failure after the same editor starts opening a new document', () => {
+    const { host, state } = makeHost()
+    const oldFrames = makeScheduler()
+    const newFrames = makeScheduler()
+    const blocks = PHASED_MIN_BLOCKS + 2
+    const { appendNodes } = host
+    host.appendNodes = () => {
+      host.appendNodes = appendNodes
+      setContentPhased(host, docOf(blocks), newFrames.schedule, () => 0)
+      state.dirty = true
+      throw new Error('The superseded append was refused')
+    }
+
+    try {
+      setContentPhased(host, docOf(blocks + 1), oldFrames.schedule, () => 0)
+      oldFrames.drain()
+      expect(state.mounted.length).toBe(PHASE1_BLOCKS)
+      expect(state.dirty).toBe(true)
+      expect(isPhasedContentPending()).toBe(true)
+      while (newFrames.pending()) newFrames.drain()
+      expect(state.mounted.length).toBe(blocks)
+      expect(state.dirty).toBe(true)
+    } finally {
+      cancelPhasedContent()
+    }
+  })
+
   it('a rejected chunk falls back to the one-pass mount and releases the save gate', async () => {
     const blocks = PHASE1_BLOCKS + PHASE_CHUNK_BLOCKS * 2
     const { host, state } = makeHost()
