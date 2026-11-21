@@ -910,12 +910,34 @@ const NON_LOCAL_FLOW = [
   '.doc-protected-floating',
   '.doc-protected-textboxes',
   '.doc-img-float',
+  '.img-wrap-square-left, .img-wrap-square-right',
+  '.img-wrap-tight-left, .img-wrap-tight-right',
+  '.img-wrap-through-left, .img-wrap-through-right',
+  '.img-wrap-topBottom',
+  '.has-drop-cap, .doc-col-split-float, .doc-para-frame-box-float',
   '.doc-table-float-left',
   '.doc-table-float-right',
   '.doc-table-float-center',
-  '.doc-cell-boxes',
-  'img:not(.ProseMirror-separator)',
+  // Table cells establish their own formatting context. A cell's strut can
+  // change the owning table's height, but cannot wrap earlier body blocks.
+  '.doc-cell-boxes:not(td *, th *)',
+  '.doc-hf-wrap-float',
+  '.doc-textbox-side',
+  '.doc-inline-img-anchor',
+  'img[data-page-rel-v="1"], img[data-page-rel-x="1"]',
+  'img[class*="doc-inline-img--wrap-"]',
+  'img[style*="float:"]',
 ].join(', ')
+
+const CONTENT_IMAGE = 'img:not(.ProseMirror-separator)'
+
+export function hasNonLocalFlow(pm: HTMLElement): boolean {
+  return pm.querySelector(NON_LOCAL_FLOW) !== null
+}
+
+function intrinsicImageGeometry(img: HTMLImageElement): string {
+  return `${img.complete}:${img.naturalWidth}:${img.naturalHeight}`
+}
 
 function layoutClass(value: string | null): string {
   return (value ?? '')
@@ -931,9 +953,18 @@ export function createBlockMeasurer(pm: HTMLElement) {
   let snapshot: FlowSnapshot | null = null
   let width = NaN
   let factor = NaN
+  let shadow = false
   let frontier = 0
   let observing = false
   let positions = new Map<Node, number>()
+  const images = new Map<HTMLImageElement, string>()
+  const invalidateBlock = (target: Node) => {
+    let owner: Node | null = target
+    while (owner && owner.parentNode !== pm) owner = owner.parentNode
+    // Margins and contextual spacing at the frontier affect its neighbour.
+    const index = owner ? positions.get(owner) : undefined
+    frontier = Math.min(frontier, index === undefined ? 0 : Math.max(0, index - 1))
+  }
   const invalidate = (records: MutationRecord[]) => {
     if (!snapshot || frontier === 0) return
     for (const record of records) {
@@ -951,11 +982,7 @@ export function createBlockMeasurer(pm: HTMLElement) {
         const preceding = record.previousSibling
         frontier = Math.min(frontier, (preceding && positions.get(preceding)) || 0)
       } else {
-        let owner: Node | null = target
-        while (owner && owner.parentNode !== pm) owner = owner.parentNode
-        // Margins and contextual spacing at the frontier affect its neighbour.
-        const index = owner ? positions.get(owner) : undefined
-        frontier = Math.min(frontier, index === undefined ? 0 : Math.max(0, index - 1))
+        invalidateBlock(target)
       }
       if (frontier === 0) return
     }
@@ -964,7 +991,14 @@ export function createBlockMeasurer(pm: HTMLElement) {
   return {
     measure(input: FlowRead): MeasuredContent {
       invalidate(observer.takeRecords())
-      const linear = !pm.querySelector(NON_LOCAL_FLOW)
+      const linear = !hasNonLocalFlow(pm)
+      // Intrinsic image size can change without a DOM mutation, including
+      // before a queued load event. An inline image invalidates its block.
+      if (input.allowReuse && snapshot && linear)
+        for (const [img, geometry] of images) {
+          if (!pm.contains(img)) continue
+          if (intrinsicImageGeometry(img) !== geometry) invalidateBlock(img)
+        }
       const count = Math.min(
         frontier,
         pm.children.length,
@@ -978,6 +1012,7 @@ export function createBlockMeasurer(pm: HTMLElement) {
         linear &&
         width === input.width &&
         factor === input.factor &&
+        shadow === Boolean(input.shadow) &&
         count > 0 &&
         positions.get(pm.children[count - 1]) === count - 1
           ? { count, snapshot }
@@ -998,9 +1033,14 @@ export function createBlockMeasurer(pm: HTMLElement) {
           : undefined,
       )
       positions = snapshot ? new Map(Array.from(pm.children, (child, i) => [child, i])) : new Map()
+      images.clear()
+      if (snapshot)
+        for (const img of pm.querySelectorAll<HTMLImageElement>(CONTENT_IMAGE))
+          images.set(img, intrinsicImageGeometry(img))
       frontier = positions.size
       width = input.width
       factor = input.factor
+      shadow = Boolean(input.shadow)
       if (Boolean(snapshot) !== observing) {
         observing = Boolean(snapshot)
         if (observing)
@@ -1019,6 +1059,7 @@ export function createBlockMeasurer(pm: HTMLElement) {
       observer.disconnect()
       snapshot = null
       positions.clear()
+      images.clear()
     },
   }
 }

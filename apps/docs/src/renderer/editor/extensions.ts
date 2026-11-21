@@ -17,7 +17,7 @@ import { SHAPE_INLINE_WRAP } from './floating-z-order'
 import { selectBoxAt, selectedBoxPlugin } from './selected-box'
 import { drawingChildInteraction } from './drawing-child-interaction'
 import { drawingLineSize } from './drawing-line'
-import { StreamingTailGuardExtension } from './streaming-tail-guard'
+import { appendedStreamedTail, StreamingTailGuardExtension } from './streaming-tail-guard'
 import { wrapGroupCss, type WrapPicture } from './wrap-group'
 import type { ChainedCommands, RawCommands } from '@tiptap/core'
 import { Gapcursor } from '@tiptap/extensions'
@@ -99,9 +99,10 @@ import {
   substituteBullet,
   markerFallbackFace,
   SEGOE_UI_SYMBOL_RE,
-  computeListMarkerInfos,
+  appendListMarkerInfos,
   markerTabAdvance,
   type ListItemRef,
+  type ListMarkerState,
 } from './numbering'
 import { symbolFontCovers } from '../font-check'
 import { dropActiveSubEditor, notifySubEditorState, setActiveSubEditor } from './active-editor'
@@ -1942,6 +1943,12 @@ function markerParagraphFont(
 }
 
 let markerMeasureCtx: CanvasRenderingContext2D | null | undefined
+let markerFontEpoch = 0
+let observedMarkerFonts: FontFaceSet | undefined
+const onMarkerFontsLoaded = () => {
+  markerFontEpoch++
+}
+
 /** marker advance in twips via canvas metrics; null in DOM-less test envs */
 function measureMarkerTwips(
   text: string,
@@ -1957,6 +1964,13 @@ function measureMarkerTwips(
     }
   }
   if (!markerMeasureCtx) return null
+  // The shared canvas may switch from a fallback to the newly loaded face.
+  const fonts = document.fonts
+  if (fonts !== observedMarkerFonts) {
+    observedMarkerFonts?.removeEventListener('loadingdone', onMarkerFontsLoaded)
+    observedMarkerFonts = fonts
+    fonts?.addEventListener('loadingdone', onMarkerFontsLoaded)
+  }
   const weight = bold ? '600 ' : ''
   markerMeasureCtx.font = `${weight}${(sizePt * 4) / 3}px "${family.replaceAll('"', '')}", Calibri, sans-serif`
   const w = markerMeasureCtx.measureText(text).width
@@ -2307,11 +2321,24 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
   },
   addProseMirrorPlugins() {
     const storage = this.storage
-    const compute = (doc: PmNode): DecorationSet | null => {
-      if (storage.defs.size === 0) return null
+    interface CachedMarkers {
+      inputs: Readonly<ListNumberingStorage>
+      decos: DecorationSet | null
+      counterState?: ListMarkerState
+      fontEpoch?: number
+    }
+    const compute = (
+      doc: PmNode,
+      content = doc.content,
+      from = 0,
+      old?: CachedMarkers,
+    ): CachedMarkers => {
+      const inputs = old?.inputs ?? { ...storage }
+      if (storage.defs.size === 0) return old ?? { inputs, decos: null }
       const refs: ListItemRef[] = []
       const nodes: Array<{ pos: number; node: PmNode }> = []
-      doc.descendants((node, pos) => {
+      content.descendants((node, offset) => {
+        const pos = from + offset
         if (node.type.name === 'docListItem') {
           const deleted =
             !!node.attrs.paraMarkDel ||
@@ -2335,9 +2362,10 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
         }
         return true
       })
-      if (refs.length === 0) return null
-      const markers = computeListMarkerInfos(refs, storage.defs)
+      if (refs.length === 0) return old ?? { inputs, decos: null }
+      const { markers, state } = appendListMarkerInfos(refs, storage.defs, old?.counterState)
       const decos: Decoration[] = []
+      let fontEpoch = old?.fontEpoch
       markers.forEach((marker, i) => {
         if (marker === null) return
         const styles: string[] = []
@@ -2485,6 +2513,7 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
               (szHalf ?? para.sizeHalf) / 2,
               para.bold,
             )
+            if (markerMeasureCtx) fontEpoch ??= markerFontEpoch
           }
           // lvlJc right/center: the marker's end/middle sits at the marker position,
           // so its box starts earlier by the glyph width (or half of it)
@@ -2530,23 +2559,36 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
         if (styles.length > 0) attrs.style = styles.join(';')
         decos.push(Decoration.node(nodes[i].pos, nodes[i].pos + nodes[i].node.nodeSize, attrs))
       })
-      return DecorationSet.create(doc, decos)
+      return {
+        inputs,
+        decos: old?.decos ? old.decos.add(doc, decos) : DecorationSet.create(doc, decos),
+        counterState: state,
+        fontEpoch,
+      }
     }
 
-    interface CachedMarkers {
-      defs: Map<string, NumberingDef>
-      decos: DecorationSet | null
-    }
     const key = new PluginKey<CachedMarkers>('listNumbering')
     return [
       new Plugin<CachedMarkers>({
         key,
         state: {
-          init: (_config, state) => ({ defs: storage.defs, decos: compute(state.doc) }),
+          init: (_config, state) => compute(state.doc),
           apply(tr, old) {
             // defs is replaced (never mutated) on open/reparse and marker overlay
-            if (old.defs !== storage.defs) return { defs: storage.defs, decos: compute(tr.doc) }
+            if (old.inputs.defs !== storage.defs) return compute(tr.doc)
             if (!tr.docChanged) return old
+            const tail = appendedStreamedTail(tr)
+            if (tail) {
+              const inputs = old.inputs
+              // A full pass refreshes prefix marker geometry after font or style changes.
+              return inputs.styles === storage.styles &&
+                inputs.docDefaults === storage.docDefaults &&
+                inputs.defaultTabTwips === storage.defaultTabTwips &&
+                inputs.indentNotTabStop === storage.indentNotTabStop &&
+                (old.fontEpoch === undefined || old.fontEpoch === markerFontEpoch)
+                ? compute(tr.doc, tail.content, tail.from, old)
+                : compute(tr.doc)
+            }
             // markers depend on the sequence of list items: a local edit that
             // touches no list item (and adds/removes no block) cannot move one
             const touched = localEditBlocks(tr)
@@ -2558,9 +2600,9 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
                 (n.type.name === 'docProtected' && !!n.attrs.strayList)
               const hasList = (node: PmNode) => containsNode(node, isListNode)
               if (!touchedNeedsRecompute(tr, touched, mapped, hasList))
-                return { defs: old.defs, decos: mapped }
+                return { ...old, decos: mapped }
             }
-            return { defs: storage.defs, decos: compute(tr.doc) }
+            return compute(tr.doc)
           },
         },
         props: {

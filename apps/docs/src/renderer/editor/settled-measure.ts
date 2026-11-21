@@ -1,7 +1,7 @@
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import type { EditorState, Transaction } from '@tiptap/pm/state'
 import { AddMarkStep, RemoveMarkStep, ReplaceStep } from '@tiptap/pm/transform'
-import type { EditorView } from '@tiptap/pm/view'
+import type { Decoration, DecorationSet, EditorView } from '@tiptap/pm/view'
 import { PAINTED_FRAME_FALLBACK_MS } from '../phased-content'
 
 /** CSS floats: the only layout where a paragraph's vertical position changes its line breaks */
@@ -24,19 +24,27 @@ const FLOAT_SELECTOR = [
   '.doc-textbox-side',
 ].join(', ')
 
-function requiresFullWrapMeasure(view: Pick<EditorView, 'dom'>): boolean {
+function requiresFullWrapMeasure(
+  view: Pick<EditorView, 'dom'>,
+  multipleColumns?: boolean,
+): boolean {
   // Drop caps have no DOM box, and a legacy frame can change its own float
   // width as its text wraps. Recheck the flow in both cases.
   return (
-    Number(getComputedStyle(view.dom).columnCount) > 1 ||
+    (multipleColumns ?? Number(getComputedStyle(view.dom).columnCount) > 1) ||
     view.dom.querySelector('.has-drop-cap, .doc-para-frame-box-float') !== null
   )
 }
 
-export function hasCoupledWrapGeometry(view: Pick<EditorView, 'dom'>): boolean {
+export function hasCoupledWrapGeometry(
+  view: Pick<EditorView, 'dom'>,
+  multipleColumns?: boolean,
+): boolean {
   return (
-    requiresFullWrapMeasure(view) ||
-    Array.from(view.dom.querySelectorAll(FLOAT_SELECTOR)).some(isFloat)
+    requiresFullWrapMeasure(view, multipleColumns) ||
+    Array.from(view.dom.querySelectorAll(FLOAT_SELECTOR)).some(
+      (element) => !element.closest(LOCAL_FLOW) && isFloat(element),
+    )
   )
 }
 
@@ -183,6 +191,26 @@ export function paragraphDecorationsChanged(state: EditorState, previous: Editor
   return state.plugins.some(
     (plugin) => plugin.props.decorations && plugin.getState(state) !== plugin.getState(previous),
   )
+}
+
+/** First document position whose published shrink geometry changed. */
+export function firstChangedParagraphDecoration(
+  previous: DecorationSet | undefined,
+  next: DecorationSet | undefined,
+): number | null {
+  if (previous === next) return null
+  const byPosition = (a: Decoration, b: Decoration) => a.from - b.from || a.to - b.to
+  const before = previous?.find().sort(byPosition) ?? []
+  const after = next?.find().sort(byPosition) ?? []
+  for (let i = 0; i < Math.max(before.length, after.length); i++) {
+    const a = before[i]
+    const b = after[i]
+    if (!a) return b.from
+    if (!b) return a.from
+    if (byPosition(a, b) !== 0 || a.spec.style !== b.spec.style || a.spec.hang !== b.spec.hang)
+      return Math.min(a.from, b.from)
+  }
+  return null
 }
 
 export function flushPendingParagraphMeasurements(view: EditorView): void {

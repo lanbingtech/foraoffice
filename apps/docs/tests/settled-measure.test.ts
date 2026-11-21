@@ -5,6 +5,7 @@ import {
   PhasedParagraphMeasurement,
   SettledParagraphCache,
   hasCoupledWrapGeometry,
+  firstChangedParagraphDecoration,
   hasPendingParagraphMeasurements,
   flushPendingParagraphMeasurements,
   measureNatural,
@@ -12,7 +13,7 @@ import {
   topLevelBlockDom,
   type ReuseNoOpWhile,
 } from '../src/renderer/editor/settled-measure'
-import type { EditorView } from '@tiptap/pm/view'
+import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
@@ -33,6 +34,30 @@ function fakeView(el: HTMLElement) {
     nodeDOM: () => el,
   } as unknown as EditorView
 }
+
+it('keeps the common layout prefix when typography settles with later changes', () => {
+  const editor = new Editor({
+    element: document.createElement('div'),
+    extensions: editorExtensions,
+    content: '<p>One two</p><p>Three four</p>',
+  })
+  try {
+    const { doc } = editor.state
+    const later = doc.firstChild!.nodeSize + 1
+    const style = 'word-spacing:-1px'
+    const mark = (from: number, value = style) =>
+      Decoration.inline(from, from + 1, { style: value }, { style: value })
+    const build = (...marks: Decoration[]) => DecorationSet.create(doc, marks)
+    const before = build(mark(1), mark(later))
+    expect(firstChangedParagraphDecoration(before, build(mark(later), mark(1)))).toBeNull()
+    expect(firstChangedParagraphDecoration(before, build(mark(1)))).toBe(later)
+    expect(
+      firstChangedParagraphDecoration(before, build(mark(1), mark(later, 'word-spacing:-2px'))),
+    ).toBe(later)
+  } finally {
+    editor.destroy()
+  }
+})
 
 /** jsdom has no layout: give the paragraph the box the test wants */
 function sized(el: HTMLElement, box: () => { width: number; height: number }) {
@@ -281,6 +306,24 @@ describe('SettledParagraphCache', () => {
         return [pos]
       }),
     ).toEqual([[0], [1], [2], [3]])
+  })
+
+  it('uses known column geometry without flushing CSS for floats confined to table cells', () => {
+    const root = document.createElement('div')
+    root.innerHTML =
+      '<table><tr><td><div class="doc-cell-boxes" style="float:left"></div></td></tr></table>'
+    const computed = vi.spyOn(window, 'getComputedStyle')
+    try {
+      expect(hasCoupledWrapGeometry({ dom: root }, false)).toBe(false)
+      expect(computed).not.toHaveBeenCalled()
+      root.insertAdjacentHTML(
+        'beforeend',
+        '<div class="img-wrap-square-left" style="float:left"></div>',
+      )
+      expect(hasCoupledWrapGeometry({ dom: root }, false)).toBe(true)
+    } finally {
+      computed.mockRestore()
+    }
   })
 
   it('does not read or couple paragraphs to a wrap marker that CSS does not float', () => {

@@ -452,12 +452,10 @@ class JustifyShrinkView {
     this.lastSig = sig
 
     if (shrinks.length === 0 && (!old || old === DecorationSet.empty)) return
-    const decos = shrinks.map((s) =>
-      Decoration.inline(s.from, s.to, {
-        class: 'doc-jshrink',
-        style: `word-spacing:${-s.perChar}px`,
-      }),
-    )
+    const decos = shrinks.map((s) => {
+      const style = `word-spacing:${-s.perChar}px`
+      return Decoration.inline(s.from, s.to, { class: 'doc-jshrink', style }, { style })
+    })
     view.dispatch(
       view.state.tr.setMeta(justifyShrinkPluginKey, decos).setMeta('addToHistory', false),
     )

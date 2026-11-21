@@ -238,12 +238,12 @@ function rowGapPx(tr: Element): number {
   return parseFloat(parts[1] ?? parts[0]) || 0
 }
 
-/** Apply split-row height patches and report whether they require another layout pass. */
+/** Apply split-row height patches and return the earliest changed row position. */
 export function setRowFills(
   view: EditorView,
   fills: Array<{ el: Element; targetPx: number; extraPx?: number }>,
   batch?: LayoutBatch,
-): boolean {
+): number | null {
   const decos: Decoration[] = []
   for (const fill of fills) {
     const attrs = rowFillAttrs(fill.targetPx, fill.extraPx, rowGapPx(fill.el))
@@ -265,13 +265,28 @@ export function setRowFills(
   }
   const next = DecorationSet.create(view.state.doc, decos)
   const prev = rowFillKey.getState(view.state) ?? DecorationSet.empty
-  if (sameGaps(prev, next)) return false
+  if (sameGaps(prev, next)) return null
   // Relative flow offsets may move while the mapped row and its displayed
   // height remain the same. Follow up only on changes to applied geometry.
-  const changed = !sameGaps(prev, next, (decoration) => decoration.spec.geometry)
+  const changedAt = firstChangedRowFill(prev, next)
   if (batch) batch.set(rowFillKey, next)
   else view.dispatch(view.state.tr.setMeta(rowFillKey, next).setMeta('addToHistory', false))
-  return changed
+  return changedAt
+}
+
+function firstChangedRowFill(previous: DecorationSet, next: DecorationSet): number | null {
+  const byRow = (a: Decoration, b: Decoration) =>
+    a.from - b.from || a.to - b.to || a.spec.geometry.localeCompare(b.spec.geometry)
+  const before = previous.find().sort(byRow)
+  const after = next.find().sort(byRow)
+  for (let i = 0; i < Math.max(before.length, after.length); i++) {
+    const a = before[i]
+    const b = after[i]
+    if (!a) return b.from
+    if (!b) return a.from
+    if (byRow(a, b) !== 0) return Math.min(a.from, b.from)
+  }
+  return null
 }
 
 /**
@@ -1599,11 +1614,8 @@ function setDelta(prev: string[], next: string[]): number {
   return Math.max(next.filter((k) => !a.has(k)).length, prev.filter((k) => !b.has(k)).length)
 }
 
-function sameGaps(
-  a: DecorationSet,
-  b: DecorationSet,
-  keyOf: (d: Decoration) => string = (d) => d.spec.key ?? '',
-): boolean {
+function sameGaps(a: DecorationSet, b: DecorationSet): boolean {
+  const keyOf = (d: Decoration) => d.spec.key ?? ''
   const af = a.find()
   const bf = b.find()
   return (

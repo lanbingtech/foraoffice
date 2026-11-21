@@ -11,6 +11,7 @@ import { submitDocsEditorAction } from './runtime/editor-actions'
 import { scriptFontHtml } from './editor/script-fonts'
 import { carryDocSeen } from './ai/tools'
 import { DOC_CSS_COMMITTED_EVENT, cjkPunctShrinkPluginKey } from './editor/cjk-punct-shrink'
+import { TopLevelPositions } from './editor/top-level-pos'
 import { paginationActivity, trackPaginationActivity } from './pagination-activity'
 import { createDocumentStoryDiagnostic, disposeOwnedDiagnostic } from './document-story-diagnostic'
 import { observePaginationFonts } from './pagination-fonts'
@@ -194,6 +195,7 @@ import {
   createLineRectsCache,
   createTableGapReads,
   createBlockMeasurer,
+  hasNonLocalFlow,
   enterNaturalFlow,
   anchorElement,
   lineStartAnchor,
@@ -304,6 +306,7 @@ import { layoutMultipage, multipageColumns, multipageZoomForColumns } from './mu
 import { setColumnLayout, WRAP_WIDTHS_COMMITTED_EVENT } from './editor/column-layout'
 import {
   PARAGRAPH_MEASUREMENTS_SETTLED_EVENT,
+  firstChangedParagraphDecoration,
   flushPendingParagraphMeasurements,
   hasCoupledWrapGeometry,
   hasPendingParagraphMeasurements,
@@ -561,7 +564,7 @@ import {
   unmountedSourceBlocksOf,
   waitForFullContent,
 } from './phased-content'
-import { PHASED_APPEND } from './editor/streaming-tail-guard'
+import { appendedStreamedTail } from './editor/streaming-tail-guard'
 import { sameSectionInfos } from './pagination-sections'
 import {
   blocksKeepSlicing,
@@ -904,7 +907,7 @@ export function App({
   const [status, setStatus] = useState('')
   const [zoom, setZoom] = useState(100)
   const scrollContainerRef = useRef<HTMLElement>(null)
-  /** bumps after every pagination pass: the canvas' page gaps are in place */
+  /** Refreshes the multi-page grid after pagination publishes its canvas. */
   const [layoutRev, setLayoutRev] = useState(0)
   /** Multiple Pages grid: page index under the live editor, null while single-column */
   const multipageActiveRef = useRef<number | null>(null)
@@ -1666,7 +1669,16 @@ export function App({
     onSelectionUpdate: () => forceRender(),
     // typing in the main document takes ribbon routing back from any textbox
     onFocus: () => setActiveSubEditor(null),
-    onUpdate: () => {
+    onUpdate: ({ transaction, appendedTransactions = [] }) => {
+      // Appending original content is a loading operation. The editor owns
+      // its DOM immediately; shell state follows actual edits and settlement.
+      if (
+        appendedStreamedTail(transaction) &&
+        !appendedTransactions.some(
+          (appended) => appended.docChanged && !appendedStreamedTail(appended),
+        )
+      )
+        return
       dirtyRef.current = true
       forceRender()
     },
@@ -4285,6 +4297,7 @@ export function App({
     // The continuous paper and sheet grid use different scroll coordinates.
     // Endnotes may also create provisional pages beyond the mounted body.
     const trackStreamingCoverage = !multipageMode && endnoteItems.length === 0
+    const linearFlow = colMode === 'none' && !hasVertical && !hasVAlign && !mirrorMargins
     let selfScheduled = false
     // set by the cleanup: document.fonts.ready and other promise callbacks of
     // this run can still fire after the effect was re-created (zoom change)
@@ -4718,10 +4731,10 @@ export function App({
       // later blocks were read before this pass's writes landed: one more
       // pass settles the chain (FollowUpChain refuses a repeating cause)
       const planOf = blockPlans()
-      const obstacleShadow = newObstacleShadow()
       pageReaderShadow.enabled =
         import.meta.env.DEV ||
         (window as unknown as { __pageReaderShadow?: boolean }).__pageReaderShadow === true
+      const obstacleShadow = pageReaderShadow.enabled ? newObstacleShadow() : undefined
       // the previous pass's block leads: where its gap widgets stand in the DOM
       const prevLayout = pageLayoutRef.current
       const pageLeads = prevLayout
@@ -4788,7 +4801,6 @@ export function App({
         const rect = pm.getBoundingClientRect()
         const origin = rect.top + mTopPx * factor
         const carryOf = floatCarriesOf(editor.state)
-        const linearFlow = colMode === 'none' && !hasVertical && !hasVAlign && !mirrorMargins
         if (linearFlow && flowRead?.pm !== pm) {
           flowRead?.reader.dispose()
           flowRead = { pm, reader: createBlockMeasurer(pm) }
@@ -4813,18 +4825,19 @@ export function App({
                     : 0
                 },
                 planOf,
-                shadow: true,
+                shadow: pageReaderShadow.enabled,
                 carryOf,
               })
-            : measureBlocks(pm, origin, factor, planOf, true, carryOf, end)
+            : measureBlocks(pm, origin, factor, planOf, pageReaderShadow.enabled, carryOf, end)
         if (hasVertical)
           for (const b of blocks) if (b.el && !b.floated) b.inlineExtraPx = blockInlineExtraPx(b.el)
-        planDiff = planOf
-          ? [
-              ...shadowPlanDiff(planOf, blocks, blockMetaOf),
-              ...obstaclePlanDiffs(obstacleShadow.diffs, blocks, planOf),
-            ]
-          : []
+        planDiff =
+          planOf && obstacleShadow
+            ? [
+                ...shadowPlanDiff(planOf, blocks, blockMetaOf),
+                ...obstaclePlanDiffs(obstacleShadow.diffs, blocks, planOf),
+              ]
+            : []
         carriedSamples += carryStreamedSamples(blocks, lastBlocks, {
           pending: isPhasedContentPending(),
           dirty,
@@ -4870,11 +4883,10 @@ export function App({
           spillOverhangPx,
         )
         const flowH = flowWithFloats ?? withEndnotes?.totalHeight ?? totalHeight
-        const secSig = secList
-          ? secList
-              .map((s) => `${s.firstBlockIndex}:${s.lastBlockIndex}:${s.startType ?? ''}`)
-              .join('|')
-          : ''
+        const secSig = JSON.stringify([
+          geoms,
+          secList?.map((s) => [s.firstBlockIndex, s.lastBlockIndex, s.startType]),
+        ])
         const resume = resumeFor(blocks, secSig, dirty)
         if (resume) resumePasses++
         const t1 = performance.now()
@@ -4997,15 +5009,15 @@ export function App({
       if (slices.length > 0) {
         const lastIdx = slices.length - 1
         const num = secList ? pageNumbers(slices, secList)[lastIdx] : slices.length
-        setLastPageNo({
-          num,
-          text: secList
-            ? formatPageNumber(
-                num,
-                secList[Math.min(slices[lastIdx].section, secList.length - 1)]?.pageNumberFmt,
-              )
-            : String(num),
-        })
+        const text = secList
+          ? formatPageNumber(
+              num,
+              secList[Math.min(slices[lastIdx].section, secList.length - 1)]?.pageNumberFmt,
+            )
+          : String(num)
+        setLastPageNo((previous) =>
+          previous?.num === num && previous.text === text ? previous : { num, text },
+        )
         const counts = sectionPageCounts(slices)
         const first = counts[0]
         const last = counts[lastIdx]
@@ -5745,7 +5757,7 @@ export function App({
               ...(f.extraPx ? { extraPx: f.extraPx } : {}),
             })
         }
-        const rowFillsChanged = setRowFills(editor.view, rowFillEls, layoutBatch)
+        const rowFillsChangedAt = setRowFills(editor.view, rowFillEls, layoutBatch)
         stage('rowFills')
         // oversized single-line blocks: resolve the engine's page-bottom clips to their elements
         const oversizeEls: Array<{ el: HTMLElement; clipPx: number }> = []
@@ -5909,11 +5921,15 @@ export function App({
           layoutSpecs = [...mergedSpecs.values()]
         }
         const changedWrapBlocks = setColumnLayout(editor.view, layoutSpecs, layoutBatch)
-        const hadCoupledWrap = changedWrapBlocks.size > 0 && hasCoupledWrapGeometry(editor.view)
+        const multipleColumns = viewMode === 'print' && (colFlow?.cols ?? 1) > 1
+        const hadCoupledWrap =
+          changedWrapBlocks.size > 0 && hasCoupledWrapGeometry(editor.view, multipleColumns)
+        const hasLayoutFeedback = rowFillsChangedAt !== null || changedWrapBlocks.size > 0
+        const previousNonLocalFlow = hasLayoutFeedback && hasNonLocalFlow(pm)
         stage('columnLayout')
         const tCommit0 = performance.now()
         layoutBatch.commit()
-        prepareDocStylesRef.current()
+        const committedStylesChanged = prepareDocStylesRef.current()
         tCommit = performance.now() - tCommit0
         stage('commit')
         // in-table gap bands live in the spanning cell's coordinate space:
@@ -5975,12 +5991,42 @@ export function App({
         stage('sheets')
         tSetGaps = performance.now() - tSet0
         if (obstaclesChanged) followUp('obstacles')
+        const independentFeedback =
+          hasLayoutFeedback &&
+          linearFlow &&
+          !obstaclesChanged &&
+          !committedStylesChanged &&
+          !previousNonLocalFlow &&
+          floats.length === 0 &&
+          !hasNonLocalFlow(pm) &&
+          !blocks.some(
+            (block) => block.floated || block.floatTable || block.floatBottom !== undefined,
+          )
+        const docIndexAt = (position: number | null) =>
+          independentFeedback && position !== null
+            ? editor.state.doc.resolve(position).index(0)
+            : null
         // a fill just applied to a split row changed the table height under the slices
-        if (rowFillsChanged) followUp('rowFills')
+        if (rowFillsChangedAt !== null) followUpAt('rowFills', docIndexAt(rowFillsChangedAt))
         if (colGranted) followUp('columns')
         if (changedWrapBlocks.size > 0) {
-          if (!colGranted) followUp('width')
-          const lostCoupling = hadCoupledWrap && !hasCoupledWrapGeometry(editor.view)
+          if (!colGranted) {
+            let first: number | null = null
+            if (independentFeedback) {
+              const positions = new TopLevelPositions(editor.view)
+              for (const block of changedWrapBlocks) {
+                const range = positions.of(block)
+                if (!range) {
+                  first = null
+                  break
+                }
+                first = first === null ? range.from : Math.min(first, range.from)
+              }
+            }
+            followUpAt('width', docIndexAt(first))
+          }
+          const lostCoupling =
+            hadCoupledWrap && !hasCoupledWrapGeometry(editor.view, multipleColumns)
           const detail = obstaclesChanged || lostCoupling ? null : changedWrapBlocks
           editor.view.dom.dispatchEvent(new CustomEvent(WRAP_WIDTHS_COMMITTED_EVENT, { detail }))
         }
@@ -6049,7 +6095,9 @@ export function App({
           pageCutSig: pageCutSignature(pageCuts),
           planDiff,
           planDiffHistogram: planDiffHistogram(planDiff),
-          obstacleShadow: { wrappers: obstacleShadow.wrappers, boxes: obstacleShadow.boxes },
+          obstacleShadow: obstacleShadow
+            ? { wrappers: obstacleShadow.wrappers, boxes: obstacleShadow.boxes }
+            : undefined,
           layoutHealth: layoutHealth.snapshot(),
           carriedSamples,
           resumePasses,
@@ -6134,7 +6182,7 @@ export function App({
           return lookup.fromCuts(y, top, factor) ?? lookup.fromSlices((y - top) / factor - mTopPx)
         }
       }
-      setLayoutRev((v) => v + 1)
+      if (multipageMode) setLayoutRev((v) => v + 1)
       refreshToc?.()
     }
     const streamNeedsLayout = (viewportTop = scrollPosRef.current.top) =>
@@ -6248,7 +6296,13 @@ export function App({
     if (trackStreamingCoverage) streamResize.observe(scroller)
     const onContentSettled = () => {
       selfScheduled = false
-      onUpdate(null, null, editedWhileMeasuring ? 'change' : 'settled')
+      const appendOnly =
+        !editedWhileMeasuring && linearFlow && editor && !hasNonLocalFlow(editor.view.dom)
+      onUpdate(
+        null,
+        appendOnly ? lastPassChildCount : null,
+        editedWhileMeasuring ? 'change' : 'settled',
+      )
     }
     document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, onContentSettled)
     const paragraphHost = editor?.view.dom
@@ -6256,11 +6310,16 @@ export function App({
       if (!waitingForParagraphs && !laidOutBeforeParagraphsSettled) return
       const finalTypography = editor ? typographyOf(editor.state) : undefined
       laidOutBeforeParagraphsSettled = false
-      if (
-        !waitingForParagraphs &&
-        finalTypography?.cjk === measuredTypography?.cjk &&
-        finalTypography?.justify === measuredTypography?.justify
-      ) {
+      let first: number | null = null
+      if (!waitingForParagraphs || dirtyFrom !== null) {
+        const cjk = firstChangedParagraphDecoration(measuredTypography?.cjk, finalTypography?.cjk)
+        const justify = firstChangedParagraphDecoration(
+          measuredTypography?.justify,
+          finalTypography?.justify,
+        )
+        first = cjk === null ? justify : justify === null ? cjk : Math.min(cjk, justify)
+      }
+      if (!waitingForParagraphs && first === null) {
         if (timer === null) activity.update({ pending: false })
         return
       }
@@ -6268,25 +6327,45 @@ export function App({
       // it in an already queued pass, or resume the pass that waited for it.
       measureMountedTail = true
       fastEdits = null
-      dirtyFrom = null
+      if (first !== null && dirtyFrom !== null) {
+        if (editor && linearFlow && !hasNonLocalFlow(editor.view.dom)) {
+          const { doc: model } = editor.state
+          const index = model.resolve(Math.min(first, model.content.size)).index(0)
+          dirtyFrom = Math.min(dirtyFrom, index)
+        } else dirtyFrom = null
+      }
       viewportAppendOnly = false
       if (timer === null) timer = window.setTimeout(remeasure)
       activity.update({ pending: true })
     }
     paragraphHost?.addEventListener(PARAGRAPH_MEASUREMENTS_SETTLED_EVENT, onParagraphsSettled)
-    const onDocUpdate = ({ transaction }: { transaction: Transaction }) => {
+    const onDocUpdate = ({
+      transaction,
+      appendedTransactions = [],
+    }: {
+      transaction: Transaction
+      appendedTransactions?: readonly Transaction[]
+    }) => {
       resetWidthPassHistory(colWidthPass)
-      const firstChanged = firstChangedTopLevelIndex(transaction)
-      const appendedTail =
-        transaction.getMeta(PHASED_APPEND) &&
-        firstChanged !== null &&
-        firstChanged >= transaction.before.childCount &&
-        transaction.doc.childCount > transaction.before.childCount
-      if (!appendedTail) editedWhileMeasuring = true
+      const appendedTail = appendedStreamedTail(transaction) !== null
+      const additionalEdit = appendedTransactions.some(
+        (tr) => tr.docChanged && !appendedStreamedTail(tr),
+      )
       // Still-unmounted originals already participate in section resolution.
       // Mounting their break nodes is an append, so the existing page coverage
       // decides when the newly mounted range needs layout.
-      onUpdate(singleInlineEditIndex(transaction), firstChanged, appendedTail ? 'append' : 'change')
+      if (appendedTail && !additionalEdit) {
+        onUpdate(null, transaction.before.childCount, 'append')
+        return
+      }
+      editedWhileMeasuring = true
+      if (additionalEdit) onUpdate()
+      else
+        onUpdate(
+          singleInlineEditIndex(transaction),
+          firstChangedTopLevelIndex(transaction),
+          'change',
+        )
     }
     editor?.on('update', onDocUpdate)
     // justify-shrink re-decides via decoration-only transactions that move the
@@ -8670,14 +8749,42 @@ export function App({
   const [histState, setHistState] = useState({ canUndo: false, canRedo: false })
   useEffect(() => {
     if (!editor) return
-    const refresh = ({ transaction }: { transaction?: { docChanged: boolean } } = {}) => {
-      setHistState({ canUndo: editor.can().undo(), canRedo: editor.can().redo() })
-      if (transaction?.docChanged) setDocVersion((v) => v + 1)
+    const refresh = ({
+      transaction,
+      appendedTransactions = [],
+    }: {
+      transaction?: Transaction
+      appendedTransactions?: readonly Transaction[]
+    } = {}) => {
+      const canUndo = editor.can().undo()
+      const canRedo = editor.can().redo()
+      const appendedEdit = appendedTransactions.some(
+        (appended) => appended.docChanged && !appendedStreamedTail(appended),
+      )
+      const streamed = transaction && appendedStreamedTail(transaction)
+      if (
+        streamed &&
+        !appendedEdit &&
+        !appendedTransactions.some((appended) => appended.storedMarksSet)
+      ) {
+        setHistState((previous) =>
+          previous.canUndo === canUndo && previous.canRedo === canRedo
+            ? previous
+            : { canUndo, canRedo },
+        )
+        return
+      }
+      // Metadata-only transactions also update ribbon state, e.g. a collapsed caret's marks.
+      setHistState({ canUndo, canRedo })
+      if (transaction?.docChanged || appendedEdit) setDocVersion((v) => v + 1)
     }
+    const settled = () => setDocVersion((v) => v + 1)
     refresh()
     editor.on('transaction', refresh)
+    document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, settled)
     return () => {
       editor.off('transaction', refresh)
+      document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, settled)
     }
   }, [editor])
   const quickActions = useMemo(
