@@ -3,7 +3,6 @@ import { Plugin, PluginKey, type EditorState, type Transaction } from '@tiptap/p
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import type { EditorView } from '@tiptap/pm/view'
 import type { LineAnchor } from '../pagination'
-import type { RowFillPatch } from '../pagination-types'
 import { rangeSlot } from '../dom-range'
 import { additiveParagraphSpacing, autoLineMultOf } from '../line-metrics'
 import type { PlanOf } from '../pagination-plan'
@@ -239,26 +238,14 @@ function rowGapPx(tr: Element): number {
   return parseFloat(parts[1] ?? parts[0]) || 0
 }
 
-/** Identity of a pass's applied row fills: a change re-lays out the table (the
- *  filled tr grows), so the slices computed from the pre-fill DOM are stale and
- *  the pass must run once more; equal signatures end the chain. */
-export function rowFillsSig(fills: readonly RowFillPatch[]): string {
-  return fills
-    .map(
-      (f) =>
-        `${Math.round(f.blockTop)}:${f.row}:${Math.round(f.targetPx)}:${Math.round(f.extraPx ?? 0)}`,
-    )
-    .join(',')
-}
-
-/** Apply/replace the split-row height patches (an empty list clears them). */
+/** Apply split-row height patches and report whether they require another layout pass. */
 export function setRowFills(
   view: EditorView,
   fills: Array<{ el: Element; targetPx: number; extraPx?: number }>,
   batch?: LayoutBatch,
-): void {
+): boolean {
   const decos: Decoration[] = []
-  for (const [i, fill] of fills.entries()) {
+  for (const fill of fills) {
     const attrs = rowFillAttrs(fill.targetPx, fill.extraPx, rowGapPx(fill.el))
     try {
       const $inside = view.state.doc.resolve(view.posAtDOM(fill.el, 0))
@@ -266,7 +253,8 @@ export function setRowFills(
         if ($inside.node(d).type.name !== 'docTableRow') continue
         decos.push(
           Decoration.node($inside.before(d), $inside.after(d), attrs, {
-            key: `row-fill-${i}-${attrs.style}-${attrs['data-split-extra'] ?? ''}`,
+            key: `row-fill-${attrs.style}-${attrs['data-split-extra'] ?? ''}`,
+            geometry: `${attrs.style}:${Math.round(Number(attrs['data-split-extra'] ?? 0))}`,
           }),
         )
         break
@@ -276,11 +264,14 @@ export function setRowFills(
     }
   }
   const next = DecorationSet.create(view.state.doc, decos)
-  const prev = rowFillKey.getState(view.state)
-  if (!prev || !sameGaps(prev, next)) {
-    if (batch) batch.set(rowFillKey, next)
-    else view.dispatch(view.state.tr.setMeta(rowFillKey, next).setMeta('addToHistory', false))
-  }
+  const prev = rowFillKey.getState(view.state) ?? DecorationSet.empty
+  if (sameGaps(prev, next)) return false
+  // Relative flow offsets may move while the mapped row and its displayed
+  // height remain the same. Follow up only on changes to applied geometry.
+  const changed = !sameGaps(prev, next, (decoration) => decoration.spec.geometry)
+  if (batch) batch.set(rowFillKey, next)
+  else view.dispatch(view.state.tr.setMeta(rowFillKey, next).setMeta('addToHistory', false))
+  return changed
 }
 
 /**
@@ -1509,26 +1500,39 @@ export function syncPageSheets(
   first: { left: number; width: number } | null,
   cuts?: readonly PageCut[],
 ): void {
-  let layer = wrap.querySelector(':scope > .page-sheets') as HTMLElement | null
+  const existing = wrap.querySelector<HTMLElement>(':scope > .page-sheets')
   if (!first) {
-    layer?.remove()
+    existing?.remove()
     return
   }
-  if (!layer) {
-    layer = document.createElement('div')
-    layer.className = 'page-sheets'
-    wrap.appendChild(layer)
+  // Keep the previous paper in place during geometry reads; unchanged frames
+  // should not invalidate the presentation tree on a convergence pass.
+  const frames = pageFramesFromGaps(wrap, zoomFactor, first, cuts).filter(
+    ({ top, bottom }) => bottom - top > 10,
+  )
+  const layer = existing ?? document.createElement('div')
+  const additions = document.createDocumentFragment()
+  const sheets = Array.from(layer.children) as HTMLElement[]
+  for (const [index, frame] of frames.entries()) {
+    const el = sheets[index] ?? document.createElement('div')
+    if (!sheets[index]) {
+      el.className = 'page-sheet'
+      additions.append(el)
+    }
+    const top = `${frame.top}px`
+    const height = `${frame.bottom - frame.top}px`
+    const left = `${frame.left}px`
+    const width = `${frame.width}px`
+    if (el.style.top !== top) el.style.top = top
+    if (el.style.height !== height) el.style.height = height
+    if (el.style.left !== left) el.style.left = left
+    if (el.style.width !== width) el.style.width = width
   }
-  layer.textContent = ''
-  for (const f of pageFramesFromGaps(wrap, zoomFactor, first, cuts)) {
-    if (f.bottom - f.top <= 10) continue
-    const el = document.createElement('div')
-    el.className = 'page-sheet'
-    el.style.top = `${f.top}px`
-    el.style.height = `${f.bottom - f.top}px`
-    el.style.left = `${f.left}px`
-    el.style.width = `${f.width}px`
-    layer.appendChild(el)
+  for (const sheet of sheets.slice(frames.length)) sheet.remove()
+  if (additions.firstChild) layer.append(additions)
+  if (!existing) {
+    layer.className = 'page-sheets'
+    wrap.append(layer)
   }
 }
 
@@ -1595,8 +1599,11 @@ function setDelta(prev: string[], next: string[]): number {
   return Math.max(next.filter((k) => !a.has(k)).length, prev.filter((k) => !b.has(k)).length)
 }
 
-function sameGaps(a: DecorationSet, b: DecorationSet): boolean {
-  const keyOf = (d: Decoration) => (d.spec as { key?: string }).key ?? ''
+function sameGaps(
+  a: DecorationSet,
+  b: DecorationSet,
+  keyOf: (d: Decoration) => string = (d) => d.spec.key ?? '',
+): boolean {
   const af = a.find()
   const bf = b.find()
   return (

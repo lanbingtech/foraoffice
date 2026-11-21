@@ -276,7 +276,6 @@ import {
   setOversizeClips,
   setPageGaps,
   canvasZoomOf,
-  rowFillsSig,
   setRowFills,
   syncAnchorBands,
   syncCutOverlays,
@@ -4276,7 +4275,6 @@ export function App({
         document: current ? { hash: current.hash, blocks: current.parsed.blocks } : null,
       }
     })
-    let rowFillSig = ''
     let previousHeaderFooterContent = new Map<string, number>()
     // passes a pass schedules for itself (widths / suppression applied late);
     // a document whose column widths never settle must not paginate forever
@@ -5747,7 +5745,7 @@ export function App({
               ...(f.extraPx ? { extraPx: f.extraPx } : {}),
             })
         }
-        setRowFills(editor.view, rowFillEls, layoutBatch)
+        const rowFillsChanged = setRowFills(editor.view, rowFillEls, layoutBatch)
         stage('rowFills')
         // oversized single-line blocks: resolve the engine's page-bottom clips to their elements
         const oversizeEls: Array<{ el: HTMLElement; clipPx: number }> = []
@@ -5978,11 +5976,7 @@ export function App({
         tSetGaps = performance.now() - tSet0
         if (obstaclesChanged) followUp('obstacles')
         // a fill just applied to a split row changed the table height under the slices
-        const fSig = rowFillsSig(rowFills)
-        if (fSig !== rowFillSig) {
-          rowFillSig = fSig
-          followUp('rowFills')
-        }
+        if (rowFillsChanged) followUp('rowFills')
         if (colGranted) followUp('columns')
         if (changedWrapBlocks.size > 0) {
           if (!colGranted) followUp('width')
