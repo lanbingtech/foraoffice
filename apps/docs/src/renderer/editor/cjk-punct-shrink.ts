@@ -516,10 +516,13 @@ class CjkPunctShrinkView {
     if (!this.storage.enabled && !this.storage.hangPunct) {
       if (old && old !== DecorationSet.empty)
         view.dispatch(
-          view.state.tr.setMeta(cjkPunctShrinkPluginKey, []).setMeta('addToHistory', false),
+          view.state.tr
+            .setMeta(cjkPunctShrinkPluginKey, DecorationSet.empty)
+            .setMeta('addToHistory', false),
         )
       return
     }
+    if (this.frozen) return
     if (!view.dom.isConnected) {
       this.scheduleRetry()
       return
@@ -536,8 +539,11 @@ class CjkPunctShrinkView {
 
     const shrinks: MeasuredShrink[] = []
     let measurable = paras.length === 0
-    const measuredParas = this.results.measurePass(view, paras, (para, el, reuseNoOpWhile) =>
-      this.measureParagraph(para.node, para.pos, el, reuseNoOpWhile),
+    const measuredParas = this.results.measurePass(
+      view,
+      paras,
+      (para, el, reuseNoOpWhile) => this.measureParagraph(para.node, para.pos, el, reuseNoOpWhile),
+      { trackProposal: true },
     )
     for (const measured of measuredParas) {
       if (!measured) continue
@@ -545,21 +551,28 @@ class CjkPunctShrinkView {
       shrinks.push(...measured)
     }
     if (!measurable) {
+      this.results.acceptMeasuredResults()
       this.scheduleRetry()
       return
     }
     this.retries = 0
 
-    const sig = JSON.stringify(shrinks.map((s) => [s.from, s.perChar, s.baseLs]))
-    if (sig === this.lastSig) return
-    if (this.frozen) return
+    const sig = JSON.stringify(
+      shrinks.map((s) => [s.from, s.ch, s.perChar, s.baseLs, s.hang === true]),
+    )
+    if (sig === this.lastSig) {
+      this.results.acceptMeasuredResults()
+      return
+    }
     if (this.seenSigs.has(sig) || this.seenSigs.size >= MEASURE_SIGS_MAX) {
+      this.results.retainPublishedResults()
       this.frozen = true
       console.warn('[docs] cjk-punct-shrink layout did not converge; keeping current decorations')
       return
     }
     this.seenSigs.add(sig)
     this.lastSig = sig
+    this.results.acceptMeasuredResults()
 
     if (shrinks.length === 0 && (!old || old === DecorationSet.empty)) return
     const decos = shrinks.map((s) =>
@@ -570,8 +583,10 @@ class CjkPunctShrinkView {
         { hang: s.hang === true },
       ),
     )
+    const next = DecorationSet.create(view.state.doc, decos)
+    if (old?.eq(next)) return
     view.dispatch(
-      view.state.tr.setMeta(cjkPunctShrinkPluginKey, decos).setMeta('addToHistory', false),
+      view.state.tr.setMeta(cjkPunctShrinkPluginKey, next).setMeta('addToHistory', false),
     )
   }
 
@@ -887,9 +902,8 @@ export const CjkPunctShrinkExtension = Extension.create({
           init: () => DecorationSet.empty,
           apply(tr, old) {
             noteFloatTransaction(tr)
-            const meta = tr.getMeta(cjkPunctShrinkPluginKey) as Decoration[] | undefined
-            if (meta)
-              return meta.length > 0 ? DecorationSet.create(tr.doc, meta) : DecorationSet.empty
+            const meta = tr.getMeta(cjkPunctShrinkPluginKey) as DecorationSet | undefined
+            if (meta) return meta
             return old.map(tr.mapping, tr.doc)
           },
         },

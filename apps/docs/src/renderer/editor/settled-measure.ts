@@ -151,6 +151,7 @@ export const MAX_PARA_ROUNDS = 3
  */
 export class SettledParagraphCache<T> {
   private results = new Map<ProseMirrorNode, Entry<T>>()
+  private previousResults?: Map<ProseMirrorNode, Entry<T> | undefined>
   private floatBands: number[][] = []
   private gen = 0
   private wrapVersion = 0
@@ -171,6 +172,7 @@ export class SettledParagraphCache<T> {
   clear(): void {
     this.scopedPass = false
     this.results.clear()
+    this.previousResults = undefined
   }
 
   invalidateBlocks(view: EditorView, blocks: ReadonlySet<HTMLElement>): void {
@@ -200,17 +202,46 @@ export class SettledParagraphCache<T> {
   /** once per pass: vertical bands beside which text wraps; drops paragraphs the previous pass never visited */
   beginPass(view: EditorView): void {
     this.gen++
+    this.previousResults = undefined
     for (const [node, entry] of this.results)
       if (entry.gen < this.gen - 1) this.results.delete(node)
     this.floatBands = floatBandsOf(view)
+  }
+
+  /** The current boxes were measured with the still-published decorations.
+   * When the next proposal is rejected, associate those boxes with that result
+   * so a later edit does not restart the same cycle from unpublished work. */
+  retainPublishedResults(): void {
+    if (!this.previousResults) return
+    for (const [node, previous] of this.previousResults) {
+      const measured = this.results.get(node)
+      if (!previous || !measured || previous.el !== measured.el) {
+        this.results.delete(node)
+        continue
+      }
+      this.results.set(node, {
+        ...measured,
+        key: previous.key,
+        result: this.resultAt(previous, measured.pos),
+        settled: true,
+        excludedByStyle: previous.excludedByStyle,
+      })
+    }
+    this.acceptMeasuredResults()
+  }
+
+  acceptMeasuredResults(): void {
+    this.previousResults = undefined
   }
 
   measurePass(
     view: EditorView,
     paragraphs: ParagraphPosition[],
     read: (para: ParagraphPosition, el: HTMLElement, reuseNoOpWhile: ReuseNoOpWhile) => T | null,
+    options?: { trackProposal: boolean },
   ): Array<T | null> {
     this.beginPass(view)
+    if (options?.trackProposal) this.previousResults = new Map()
     const width = view.dom.offsetWidth
     const canReuse = this.scopedPass && this.rootWidth === width && this.floatBands.length === 0
     this.scopedPass = false
@@ -321,6 +352,8 @@ export class SettledParagraphCache<T> {
 
     let excludedByStyle: Entry<T>['excludedByStyle']
     const result = measureParagraph(el, (check) => (excludedByStyle = check))
+    if (this.previousResults && !this.previousResults.has(node))
+      this.previousResults.set(node, this.results.get(node))
     if (result === null) {
       this.results.delete(node)
       return null

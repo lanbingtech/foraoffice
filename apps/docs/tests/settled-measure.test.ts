@@ -179,6 +179,32 @@ describe('SettledParagraphCache', () => {
     expect(fn).toHaveBeenCalledTimes(3)
   })
 
+  it('keeps the published result when a measurement would restart a layout cycle', () => {
+    const el = document.createElement('p')
+    const view = fakeView(el)
+    let width = 554
+    let height = 95
+    sized(el, () => ({ width, height }))
+    const cache = new SettledParagraphCache<number[]>(shiftAll)
+    const read = vi.fn<() => number[]>().mockReturnValueOnce([1]).mockReturnValueOnce([2])
+    const pass = (pos: number) =>
+      cache.measurePass(view, [{ node, pos }], read, { trackProposal: true })
+
+    expect(pass(1)).toEqual([[1]])
+    // The published decoration changed the measured height. The next proposal
+    // would return to the previous layout, so the view retains the current one.
+    height = 126
+    expect(pass(1)).toEqual([[2]])
+    cache.retainPublishedResults()
+    expect(pass(4)).toEqual([[4]])
+    expect(read).toHaveBeenCalledTimes(2)
+
+    width++
+    read.mockReturnValueOnce([5])
+    expect(pass(4)).toEqual([[5]])
+    expect(read).toHaveBeenCalledTimes(3)
+  })
+
   it('keeps the last answer of a paragraph that never repeats itself', () => {
     const el = document.createElement('p')
     const view = fakeView(el)
