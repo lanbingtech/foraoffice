@@ -13,6 +13,7 @@ function setup(positions: number[], imageStyle = 'width:100px;height:50px') {
   app.className = 'app'
   const viewport = document.createElement('div')
   const root = document.createElement('div')
+  let visualTop = 0
   viewport.append(root)
   app.append(viewport)
   document.body.append(app)
@@ -29,7 +30,7 @@ function setup(positions: number[], imageStyle = 'width:100px;height:50px') {
       naturalHeight: { value: 300 },
       currentCSSZoom: { value: 1.25 },
     })
-    image.getBoundingClientRect = () => box(top - viewport.scrollTop, 60)
+    image.getBoundingClientRect = () => box(top - visualTop, 60)
     root.append(image)
     return image
   })
@@ -105,7 +106,12 @@ function setup(positions: number[], imageStyle = 'width:100px;height:50px') {
     },
   )
 
-  const dispose = installScreenImageReadiness(root, viewport)
+  const { updateViewport, dispose } = installScreenImageReadiness(root, viewport, 0)!
+  const scrollTo = (top: number) => {
+    visualTop = top
+    viewport.scrollTop = top
+    updateViewport(top)
+  }
   const notifyIntersection = (
     notify: IntersectionObserverCallback | undefined,
     active: HTMLImageElement[],
@@ -172,6 +178,7 @@ function setup(positions: number[], imageStyle = 'width:100px;height:50px') {
     intersect,
     showInViewport,
     dispose,
+    scrollTo,
     result,
     revoke,
     get worker() {
@@ -183,7 +190,7 @@ function setup(positions: number[], imageStyle = 'width:100px;height:50px') {
 
 it('prepares display-sized copies for the newest viewport and leaves source markup intact', async () => {
   const f = setup([180, 270, 520])
-  const { copies, viewport, intersect, flush, result, media, dispose, animations, revoke, resize } =
+  const { copies, scrollTo, intersect, flush, result, media, dispose, animations, revoke, resize } =
     f
   const sources = copies.map((image) => image.outerHTML)
   intersect(...copies)
@@ -194,8 +201,7 @@ it('prepares display-sized copies for the newest viewport and leaves source mark
     height: 125,
   })
 
-  viewport.scrollTop = 480
-  viewport.dispatchEvent(new Event('scroll'))
+  scrollTo(480)
   intersect(...copies.slice(1))
   flush()
   await result('stale')
@@ -234,10 +240,26 @@ it('prepares display-sized copies for the newest viewport and leaves source mark
   expect(f.worker.terminate).toHaveBeenCalledOnce()
 })
 
+it('prioritizes the direction of the viewport snapshot without reading scroll geometry', () => {
+  const f = setup([20, 380])
+  const scrollTop = vi.spyOn(f.viewport, 'scrollTop', 'get')
+  f.scrollTo(100)
+  f.viewport.dispatchEvent(new Event('scroll'))
+  f.intersect(...f.copies)
+  f.flush()
+  expect(f.worker.postMessage).toHaveBeenCalledExactlyOnceWith({
+    src: f.copies[1].src,
+    width: 250,
+    height: 125,
+  })
+  expect(scrollTop).not.toHaveBeenCalled()
+  f.dispose()
+})
+
 it('checks saturated offscreen admission once and resumes only when input or capacity changes', async () => {
   const positions = [0, ...Array.from({ length: 32 }, (_, i) => 10_000 * (i + 1))]
   const f = setup(positions, 'width:819.2px;height:819.2px')
-  const { app, copies, viewport, intersect, flush, result, resize, dispose } = f
+  const { app, copies, scrollTo, intersect, flush, result, resize, dispose } = f
   const styleRead = vi.spyOn(window, 'getComputedStyle')
   const admission = copies.map((image) => vi.spyOn(image, 'naturalWidth', 'get'))
   intersect(copies[0])
@@ -254,8 +276,7 @@ it('checks saturated offscreen admission once and resumes only when input or cap
   for (const check of admission) check.mockClear()
 
   for (const top of [10, 20, 30, 40, 50]) {
-    viewport.scrollTop = top
-    viewport.dispatchEvent(new Event('scroll'))
+    scrollTo(top)
     flush()
   }
   expect(styleRead).not.toHaveBeenCalled()

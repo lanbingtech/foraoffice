@@ -56,9 +56,13 @@ function hasAuthoredExtent(image: HTMLImageElement): boolean {
  * offscreen copies so a jump across pages can use the already scaled pixels.
  * The original image remains the fallback, clipboard source and serialized DOM.
  */
-export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLElement): () => void {
+export function installScreenImageReadiness(
+  root: HTMLElement,
+  viewport: HTMLElement,
+  initialTop: number,
+): { updateViewport: (top: number) => void; dispose: () => void } | undefined {
   if (!globalThis.Worker || !globalThis.IntersectionObserver || !globalThis.ResizeObserver) {
-    return () => {}
+    return
   }
 
   const observed = new Set<HTMLImageElement>()
@@ -84,7 +88,7 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
   let working = false
   let disabled = false
   let printing = false
-  let lastTop: number | undefined
+  let lastTop = initialTop
   let direction = 0
   let viewportHalfHeight = 0
   let scaleRevision = 0
@@ -131,9 +135,8 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
     reobserveScale()
   }
 
-  function onScroll(): void {
-    const top = viewport.scrollTop
-    if (lastTop !== undefined && top !== lastTop) direction = Math.sign(top - lastTop)
+  function updateViewport(top: number): void {
+    if (top !== lastTop) direction = Math.sign(top - lastTop)
     lastTop = top
     if (nearby.size) schedule()
   }
@@ -156,7 +159,7 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
 
   const intersection = new IntersectionObserver(
     (entries) => {
-      const scrollTop = (lastTop ??= viewport.scrollTop)
+      const scrollTop = lastTop
       for (const { target, isIntersecting, boundingClientRect, rootBounds } of entries) {
         const image = target as HTMLImageElement
         if (isIntersecting && observed.has(image)) {
@@ -310,7 +313,6 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
   // PDF export parks the live editor across all chunks, including between print events.
   if (appRoot) viewChanges.observe(appRoot, { attributes: true, attributeFilter: ['class'] })
   collect(root, true)
-  viewport.addEventListener('scroll', onScroll, { passive: true })
   root.addEventListener('load', onLoad, true)
   resolution.addEventListener('change', watchResolution)
   window.addEventListener('beforeprint', beforePrint)
@@ -326,8 +328,8 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
       if (!nearby.has(image) && eligible(image)) candidates.push(image)
     }
     if (candidates.length) {
-      const top = (lastTop ?? 0) - viewportHalfHeight
-      const bottom = (lastTop ?? 0) + viewportHalfHeight
+      const top = lastTop - viewportHalfHeight
+      const bottom = lastTop + viewportHalfHeight
       const ordered = candidates
         .map((image) => {
           const bounds = nearby.get(image)
@@ -506,7 +508,9 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
     }
   }
 
-  return () => {
+  return { updateViewport, dispose }
+
+  function dispose(): void {
     disabled = true
     if (frame !== undefined) cancelAnimationFrame(frame)
     worker?.terminate()
@@ -518,7 +522,6 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
     mutations.disconnect()
     viewChanges.disconnect()
     root.removeEventListener('load', onLoad, true)
-    viewport.removeEventListener('scroll', onScroll)
     resolution.removeEventListener('change', watchResolution)
     window.removeEventListener('beforeprint', beforePrint)
     window.removeEventListener('afterprint', afterPrint)

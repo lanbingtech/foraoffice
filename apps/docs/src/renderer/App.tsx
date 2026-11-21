@@ -903,8 +903,29 @@ export function App({
     null,
   )
   const [status, setStatus] = useState('')
-  const [zoom, setZoom] = useState(100)
+  const [zoom, setZoomState] = useState(100)
   const scrollContainerRef = useRef<HTMLElement>(null)
+  const scrollPosRef = useRef({ left: 0, top: 0 })
+  const screenImages = useRef<ReturnType<typeof installScreenImageReadiness>>(undefined)
+  const publishScrolledPage = useRef<() => void>(undefined)
+  const readScrollPosition = useCallback((pane: Element) => {
+    const position = { left: pane.scrollLeft, top: pane.scrollTop }
+    scrollPosRef.current = position
+    return position
+  }, [])
+  const captureScrollPosition = useCallback(() => {
+    const pane = scrollContainerRef.current
+    if (pane) readScrollPosition(pane)
+  }, [readScrollPosition])
+  const setZoom = useCallback(
+    (next: SetStateAction<number>) => {
+      // Capture the pre-zoom position even when a native scroll just arrived.
+      // Zooming out can clamp these offsets before the layout effect runs.
+      captureScrollPosition()
+      setZoomState(next)
+    },
+    [captureScrollPosition],
+  )
   /** Refreshes the multi-page grid after pagination publishes its canvas. */
   const [layoutRev, setLayoutRev] = useState(0)
   /** Multiple Pages grid: page index under the live editor, null while single-column */
@@ -1052,7 +1073,14 @@ export function App({
   // Review → Reviewing Pane: the outermost right-edge panel (Word's vertical pane)
   const [showReviewPane, setShowReviewPane] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>('print')
-  const [readMode, setReadMode] = useState(false)
+  const [readMode, setReadModeState] = useState(false)
+  const setReadMode = useCallback(
+    (next: SetStateAction<boolean>) => {
+      captureScrollPosition()
+      setReadModeState(next)
+    },
+    [captureScrollPosition],
+  )
   const [showGrid, setShowGrid] = useState(false)
   const [splitView, setSplitView] = useState(false)
   const [showPagePreview, setShowPagePreview] = useState(false)
@@ -2213,16 +2241,13 @@ export function App({
     }
     window.addEventListener('wheel', onWheel, { passive: false })
     return () => window.removeEventListener('wheel', onWheel)
-  }, [])
+  }, [setZoom])
 
   // Keep the document point under the anchor (cursor for wheel zoom, viewport
   // center otherwise) fixed across a zoom change. Runs after the zoomed layout
   // is committed, so the page box is read post-zoom and the pre-zoom box is
   // derived from it: CSS zoom scales the box linearly, the top edge is a fixed
   // scroller padding, and `.doc-zoom` is margin-auto centered until it overflows.
-  // The pre-zoom scroll offsets come from the last scroll event: a zoom-out can
-  // shrink the overflow and clamp them before this effect gets to read them.
-  const scrollPosRef = useRef({ left: 0, top: 0 })
   const prevZoomRef = useRef(zoom)
 
   // ---- protection enforcement (Review > Protect Document) ----
@@ -2258,7 +2283,7 @@ export function App({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [editor, readMode, isProtected, doc?.hosted?.readOnly])
+  }, [editor, readMode, isProtected, doc?.hosted?.readOnly, setReadMode])
 
   // Track Changes: the recorder plugin reads its toggle from extension storage
   useEffect(() => {
@@ -3721,7 +3746,7 @@ export function App({
       lastFitRef.current = { mode, value: applied }
       setZoom(applied)
     },
-    [fitZoomFor],
+    [fitZoomFor, setZoom],
   )
   const zoomFit = useCallback(
     (mode: ZoomFitMode) => {
@@ -3787,13 +3812,13 @@ export function App({
       preReadZoomRef.current = { zoom: zoomLiveRef.current, fit: lastFitRef.current }
       lastFitRef.current = null
       zoomLiveRef.current = 100
-      setZoom(100)
+      setZoomState(100)
     } else if (preReadZoomRef.current) {
       const prev = preReadZoomRef.current
       preReadZoomRef.current = null
       lastFitRef.current = prev.fit
       zoomLiveRef.current = prev.zoom
-      setZoom(prev.zoom)
+      setZoomState(prev.zoom)
     }
   }, [readMode])
 
@@ -4298,7 +4323,6 @@ export function App({
     const contentH = twipsToPx(section.pageHeight) - effTopSingle - effBottomSingle
     let slices: PageSlice[] = []
     let pageLookup: ReturnType<typeof buildPageLookup> | undefined
-    let scrollFrame = 0
     let restoreNaturalFlow: (() => void) | undefined
     let flowRead: { pm: HTMLElement; reader: ReturnType<typeof createBlockMeasurer> } | undefined
     let timer: number | null = null
@@ -4421,14 +4445,6 @@ export function App({
       const current = cutPage ?? pageLookup.fromSlices(domY ?? flowY())
       const total = pageLookup.total
       publishPage(current, total)
-    }
-    const onScroll = () => {
-      if (scrollFrame) return
-      scrollFrame = requestAnimationFrame(() => {
-        scrollFrame = 0
-        locate()
-        requestVisibleStreamLayout()
-      })
     }
     let lastPassAt = 0
     let lastPassMs = 0
@@ -6321,7 +6337,10 @@ export function App({
     }
     // the epoch bump re-runs this effect; an already-settled ready promise must not re-probe
     const stopFonts = observePaginationFonts(document.fonts, onFontsChanged)
-    scroller.addEventListener('scroll', onScroll, { passive: true })
+    publishScrolledPage.current = () => {
+      locate()
+      requestVisibleStreamLayout()
+    }
     const streamResize = new ResizeObserver(() => {
       if (!isPhasedContentPending() && !waitingForParagraphs) return
       viewportHeight = scroller.getBoundingClientRect().height
@@ -6454,8 +6473,7 @@ export function App({
       if (timer) window.clearTimeout(timer)
       if (hfTimer) window.clearTimeout(hfTimer)
       stopFonts()
-      if (scrollFrame) cancelAnimationFrame(scrollFrame)
-      scroller.removeEventListener('scroll', onScroll)
+      publishScrolledPage.current = undefined
       streamResize.disconnect()
       document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, onContentSettled)
       paragraphHost?.removeEventListener(PARAGRAPH_MEASUREMENTS_SETTLED_EVENT, onParagraphsSettled)
@@ -7287,6 +7305,7 @@ export function App({
     exportImages,
     printDoc,
     zoomFit,
+    setZoom,
     openStats,
     startNewComment,
     runAiProofread,
@@ -8435,9 +8454,39 @@ export function App({
   }
   useEffect(() => {
     const pane = scrollContainerRef.current
+    if (!editor || !pane) return
+    let frame: number | undefined
+    const onScroll = () => {
+      if (frame !== undefined) return
+      // One viewport read per frame. The owner survives pagination resets and
+      // scroll event delivery itself performs no layout reads or writes.
+      frame = requestAnimationFrame(() => {
+        frame = undefined
+        const { top } = readScrollPosition(pane)
+        publishScrolledPage.current?.()
+        screenImages.current?.updateViewport(top)
+      })
+    }
+    pane.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      pane.removeEventListener('scroll', onScroll)
+      if (frame !== undefined) cancelAnimationFrame(frame)
+    }
+  }, [editor, readScrollPosition])
+  useEffect(() => {
+    const pane = scrollContainerRef.current
     if (!editor || !pane || !hasRuntimeDocument) return
-    return installScreenImageReadiness(editor.view.dom, pane)
-  }, [editor, hasRuntimeDocument, runtimeIdentity])
+    const readiness = installScreenImageReadiness(
+      editor.view.dom,
+      pane,
+      readScrollPosition(pane).top,
+    )
+    screenImages.current = readiness
+    return () => {
+      screenImages.current = undefined
+      readiness?.dispose()
+    }
+  }, [editor, hasRuntimeDocument, runtimeIdentity, readScrollPosition])
   useEffect(() => {
     if (runtimeDocumentRef.current) {
       docsAnnotations.activate()
@@ -9485,12 +9534,6 @@ export function App({
               <main
                 className={`editor-scroll${imageDragOver ? ' image-drop-target' : ''}${doc ? '' : ' start-screen-host'}`}
                 ref={scrollContainerRef}
-                onScroll={(e) => {
-                  scrollPosRef.current = {
-                    left: e.currentTarget.scrollLeft,
-                    top: e.currentTarget.scrollTop,
-                  }
-                }}
                 onDragOver={(e) => {
                   if (!editor?.isEditable || !isImageFileDrag(e.dataTransfer)) return
                   e.preventDefault()
