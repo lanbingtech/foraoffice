@@ -84,11 +84,11 @@ function setup(positions: number[], imageStyle = 'width:100px;height:50px') {
     postMessage = vi.fn()
     terminate = vi.fn()
     onmessage?: (event: MessageEvent<Blob | null>) => void
-    constructor() {
-      worker = this
-    }
   }
-  vi.stubGlobal('Worker', FakeWorker)
+  vi.stubGlobal('Worker', function Worker() {
+    worker = new FakeWorker()
+    return worker
+  })
   vi.stubGlobal(
     'Image',
     class {
