@@ -109,7 +109,7 @@ export function createPerformanceFocusGuard(
       return { native, dom }
     },
     async end() {
-      // Electron's ready probe samples while DOM monitoring is still armed.
+      // With a ready native probe, sample while DOM monitoring is still armed.
       const atBoundary = inspectNativeFocus ? await inspect() : undefined
       const dom = await page.evaluate(observeFocus, 'end' as const)
       const native = atBoundary ?? (await inspect())

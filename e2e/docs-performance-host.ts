@@ -116,6 +116,37 @@ async function nativeSaveDialog(
   )
 }
 
+async function activateOwnedCaption(
+  owner: NativeImeOwner,
+  raiseOwnedWindow = false,
+): Promise<unknown> {
+  const { stdout } = await promisify(execFile)(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      resolve(__dirname, 'native-owned-caption.ps1'),
+      '-ProcessId',
+      String(owner.targetProcessId),
+      '-Handle',
+      owner.windowHandle,
+      '-StartUtc',
+      owner.processStartTime,
+      ...(raiseOwnedWindow ? ['-RaiseOwnedWindow'] : []),
+    ],
+    {
+      windowsHide: true,
+      // The Qt script bounds its waits and must finish restoring the native window family.
+      ...(raiseOwnedWindow ? {} : { timeout: 12_000 }),
+      encoding: 'utf8',
+    },
+  )
+  return JSON.parse(stdout)
+}
+
 async function triggerPdf(page: Page, useVisiblePointer = false): Promise<void> {
   if (await page.locator('.pagination-preview').count()) {
     const button = page
@@ -205,13 +236,41 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
       const editorPage = page
       const debuggerVersion = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json()
       delete debuggerVersion.webSocketDebuggerUrl
+      const focusInspector = openWindowsNativeFocusInspector()
+      const waitForUserFocus =
+        process.env.FORAOFFICE_PERF_QT_MANUAL_FOREGROUND === '1' &&
+        process.env.FORAOFFICE_PERF_CORE_PILOT === '1' &&
+        process.env.FORAOFFICE_PERF_SMOKE === '1'
       return {
         page,
         nativeProcessId: child.pid,
+        inspectNativeFocus: focusInspector.inspect,
+        async activateForeground(owner) {
+          if (owner.targetProcessId !== child.pid)
+            throw new Error('Qt foreground candidate does not belong to the launched process')
+          if (!waitForUserFocus) return activateOwnedCaption(owner, true)
+          console.log('Waiting for the user to activate the ForaOffice Docs Qt test window')
+          const deadline = Date.now() + 90_000
+          do {
+            const { before } = await focusInspector.inspect(owner.targetProcessId)
+            if (
+              before.owner.windowHandle !== owner.windowHandle ||
+              before.owner.processStartTime !== owner.processStartTime
+            )
+              throw new Error('Qt foreground candidate changed while waiting for activation')
+            if (before.foregroundOwned && before.focusOwned) return { userActivationVerified: true }
+            await new Promise((done) => setTimeout(done, 250))
+          } while (Date.now() < deadline)
+          throw new Error('Timed out waiting for the user to activate the Qt test window')
+        },
         evidence: {
           kind: 'qt',
           rendering: 'normal-window',
           debuggerVersion,
+          nativeFocusProbe: 'persistent-win32-inspection',
+          nativeFocusActivation: waitForUserFocus
+            ? 'observed-user-activation-before-core-pilot'
+            : 'guarded-physical-caption-with-verified-family-fallback',
           exportMethod: 'existing-product-exportPdf-callback-with-native-save-picker',
         },
         open: () =>
@@ -251,13 +310,14 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
           return pdf
         },
         async close() {
-          await writeFile(join(options.workspace, 'qt-stderr.log'), stderr)
           const timer = setTimeout(() => child.kill(), 5_000)
           try {
+            await writeFile(join(options.workspace, 'qt-stderr.log'), stderr)
             await browser?.close()
           } finally {
             clearTimeout(timer)
             if (child.exitCode === null) child.kill()
+            await focusInspector.close()
           }
         },
       }

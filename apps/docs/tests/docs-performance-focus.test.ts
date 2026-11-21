@@ -125,32 +125,57 @@ it('checks each sample inside one continuously observed phase without spawning p
   expect(native).toHaveBeenCalledTimes(3)
 })
 
-it('samples native Electron focus before closing the observed phase', async () => {
+it.each(['electron', 'qt'] as const)(
+  'samples native %s focus before closing the observed phase',
+  async (host) => {
+    native.mockReset()
+    const actualPage = page()
+    let phaseEnded = false
+    actualPage.evaluate.mockImplementation(async (_, mode) => {
+      if (mode === 'end') phaseEnded = true
+      return { visibilityState: 'visible', hasFocus: true, losses: [] }
+    })
+    const inspectNativeFocus = vi.fn().mockImplementation(async () => ({
+      before: snapshot(!phaseEnded),
+    }))
+    const guard = createPerformanceFocusGuard(
+      host,
+      actualPage as unknown as Page,
+      owner.targetProcessId,
+      {
+        inspectNativeFocus,
+      },
+    )
+    await guard.begin()
+    await guard.check()
+    await guard.end()
+    expect(phaseEnded).toBe(true)
+    expect(inspectNativeFocus.mock.calls).toEqual(
+      Array.from({ length: 3 }, () => [owner.targetProcessId]),
+    )
+    expect(native).not.toHaveBeenCalled()
+  },
+)
+
+it('gives Qt caption activation only the verified test owner and then checks native focus', async () => {
   native.mockReset()
-  const actualPage = page()
-  let phaseEnded = false
-  actualPage.evaluate.mockImplementation(async (_, mode) => {
-    if (mode === 'end') phaseEnded = true
-    return { visibilityState: 'visible', hasFocus: true, losses: [] }
-  })
-  const inspectNativeFocus = vi.fn().mockImplementation(async () => ({
-    before: snapshot(!phaseEnded),
-  }))
+  const inspectNativeFocus = vi
+    .fn()
+    .mockResolvedValueOnce({ before: snapshot(false) })
+    .mockResolvedValueOnce({ before: snapshot(false) })
+  const activateForeground = vi.fn().mockResolvedValue({ ownedAfter: true })
   const guard = createPerformanceFocusGuard(
-    'electron',
-    actualPage as unknown as Page,
+    'qt',
+    page() as unknown as Page,
     owner.targetProcessId,
     {
+      activateForeground,
       inspectNativeFocus,
     },
   )
-  await guard.begin()
-  await guard.check()
-  await guard.end()
-  expect(phaseEnded).toBe(true)
-  expect(inspectNativeFocus.mock.calls).toEqual(
-    Array.from({ length: 3 }, () => [owner.targetProcessId]),
-  )
+  await expect(guard.begin()).rejects.toThrow('Native foreground/focus is not owned')
+  expect(activateForeground.mock.calls).toEqual([[owner]])
+  expect(inspectNativeFocus).toHaveBeenCalledTimes(2)
   expect(native).not.toHaveBeenCalled()
 })
 

@@ -377,6 +377,10 @@ test('production document performance and correctness evidence', async () => {
     'Opt-in performance run; use docs-performance.config.ts',
   )
   const host = process.env.FORAOFFICE_PERF_HOST as PerformanceHost
+  const smoke = process.env.FORAOFFICE_PERF_SMOKE === '1'
+  const corePilot = process.env.FORAOFFICE_PERF_CORE_PILOT === '1'
+  if (corePilot && (host !== 'qt' || !smoke || process.env.FORAOFFICE_PERF_BEFORE))
+    throw new Error('The Qt core pilot requires Qt smoke mode and cannot use formal comparisons')
   const label = process.env.FORAOFFICE_PERF_LABEL!
   const artifactRoot = await realpath(process.env.FORAOFFICE_PERF_ARTIFACTS!)
   assertExternalArtifacts(await realpath(repository), artifactRoot)
@@ -394,11 +398,11 @@ test('production document performance and correctness evidence', async () => {
   const sourceXml = await (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string')
   const mainStory = mainStoryOracle(sourceXml)
   let workingOracle = oracle
-  const nativeImeRequested = host === 'qt' && process.env.FORAOFFICE_PERF_NATIVE_IME === '1'
+  const nativeImeRequested =
+    !corePilot && host === 'qt' && process.env.FORAOFFICE_PERF_NATIVE_IME === '1'
   const primerText = 'Performance runtime primer'
   const primer = await buildDocx({ bodyXml: `<w:p><w:r><w:t>${primerText}</w:t></w:r></w:p>` })
   const tail = oracle.tail
-  const smoke = process.env.FORAOFFICE_PERF_SMOKE === '1'
   const samples = smoke ? 1 : 30
   const nativeSamples = samples === 1 ? 2 : samples // Smoke also exercises actual undo between native compositions.
   const opens = smoke ? 1 : 10
@@ -464,6 +468,7 @@ test('production document performance and correctness evidence', async () => {
     wholeRunLimitMs: test.info().timeout,
     host,
     label,
+    ...(corePilot ? { corePilot: true } : {}),
     headless: host === 'browser',
     harnessCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
       cwd: repository,
@@ -923,6 +928,16 @@ test('production document performance and correctness evidence', async () => {
       blockingTasks.push(...probe.longTasks.map((entry) => entry.duration))
     }
     await focus!.end()
+    if (corePilot) {
+      details.push({
+        operation: 'qt-core-pilot',
+        status: 'completed',
+        exercised: ['fresh-open', 'hot-open', ...edits, 'wheel'],
+        omitted: ['native-os-ime', 'save', 'pdf'],
+        eligibleForFormalComparison: false,
+      })
+      return
+    }
     if (nativeImeRequested) {
       nativeImeAcceptance.status = 'input-phase-incomplete'
       await focus!.begin()
@@ -1451,8 +1466,9 @@ test('production document performance and correctness evidence', async () => {
         : undefined,
       correctness,
       acceptance: {
-        scope:
-          'automated scenario sampling only; ticket acceptance requires the reviewed three-host A/A evidence',
+        scope: corePilot
+          ? 'Qt core smoke observations only; no native OS IME, save or PDF validation'
+          : 'automated scenario sampling only; ticket acceptance requires the reviewed three-host A/A evidence',
         nativeOsIme: nativeImeAcceptance,
         viewport,
         nativeOfficeComparison: 'not measured',
