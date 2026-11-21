@@ -71,7 +71,7 @@ function readViewport(mode: 'inspect' | 'start' | 'finish' | 'pointer' | 'calibr
   }
   const win = window as Window & {
     __docsLayoutActivity?: { snapshot(): Activity }
-    __aidocs?: { editor: Editor }
+    __aidocs?: { editor: Editor; documentGeneration?(): number }
     docsPerformanceViewport?: ViewportProbe
   }
   const scroller = document.querySelector<HTMLElement>('.editor-scroll')
@@ -165,6 +165,7 @@ function readViewport(mode: 'inspect' | 'start' | 'finish' | 'pointer' | 'calibr
   const pageNumbers = pageStatus?.match(/\d+/g)?.map(Number)
   return {
     activity,
+    documentGeneration: win.__aidocs?.documentGeneration?.(),
     geometry,
     ratio: devicePixelRatio,
     pageStatus,
@@ -270,15 +271,17 @@ export async function observeViewport({
     record.before = initial
     if (!inPhase(initial) || !initial.geometry || !initial.editable)
       throw new Error('The requested phase has no compatible interactive viewport')
+    // Layout effects can be replaced by font and pagination updates within one
+    // open document. Use its identity across the action when the host exposes it.
+    const sameDocument = (state: ViewportState) =>
+      initial.documentGeneration === undefined
+        ? state.activity?.generation === initial.activity?.generation
+        : state.documentGeneration === initial.documentGeneration
     const arm = async () => {
       const state = await page.evaluate(readViewport, 'start' as const)
       record.before = state
       armed = true
-      if (
-        !inPhase(state) ||
-        !state.geometry ||
-        state.activity?.generation !== initial.activity?.generation
-      )
+      if (!inPhase(state) || !state.geometry || !sameDocument(state))
         throw new Error('Requested phase ended before the input')
       if (
         phase === 'settled' &&
@@ -385,7 +388,7 @@ export async function observeViewport({
       armed = false
     }
     const after = record.after!
-    if (!inPhase(after) || after.activity?.generation !== initial.activity?.generation) {
+    if (!inPhase(after) || !sameDocument(after)) {
       record.observation = 'unavailable'
       throw new Error('The requested document phase did not span the observed interaction')
     }

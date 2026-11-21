@@ -42,40 +42,13 @@ function canPrepare(image: HTMLImageElement): boolean {
   return !!path && /\.(?:png|jpe?g)$/i.test(path)
 }
 
-function displaySize(image: HTMLImageElement): ScreenImageRequest | undefined {
-  const { width: authoredWidth, height: authoredHeight, aspectRatio } = image.style
+function hasAuthoredExtent(image: HTMLImageElement): boolean {
+  const { width, height, aspectRatio } = image.style
   // Intrinsically sized objects keep the browser image's natural dimensions.
-  if (
-    (!authoredWidth.endsWith('px') && !image.hasAttribute('width')) ||
-    (!authoredHeight.endsWith('px') && !image.hasAttribute('height') && !aspectRatio)
+  return (
+    (width.endsWith('px') || image.hasAttribute('width')) &&
+    (height.endsWith('px') || image.hasAttribute('height') || !!aspectRatio)
   )
-    return
-
-  // Use the content box before rotation, CSS zoom and browser device scale.
-  // Both a crop window and a rotated picture still sample from this box.
-  const style = getComputedStyle(image)
-  if (style.objectFit && style.objectFit !== 'fill') return
-  const px = (value: string) => parseFloat(value) || 0
-  let width = px(style.width)
-  let height = px(style.height)
-  if (style.boxSizing === 'border-box') {
-    width -=
-      px(style.paddingLeft) +
-      px(style.paddingRight) +
-      px(style.borderLeftWidth) +
-      px(style.borderRightWidth)
-    height -=
-      px(style.paddingTop) +
-      px(style.paddingBottom) +
-      px(style.borderTopWidth) +
-      px(style.borderBottomWidth)
-  }
-  const scale = (image.currentCSSZoom || 1) * devicePixelRatio
-  width = Math.ceil(width * scale)
-  height = Math.ceil(height * scale)
-  if (width > 0 && height > 0 && width * height <= MAX_RASTER_PIXELS) {
-    return { src: image.src, width, height }
-  }
 }
 
 /**
@@ -89,13 +62,19 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
   }
 
   const observed = new Set<HTMLImageElement>()
-  const nearby = new Set<HTMLImageElement>()
+  const nearby = new Map<HTMLImageElement, { top: number; bottom: number }>()
+  const visible = new Set<HTMLImageElement>()
+  const isInRange = (image: HTMLImageElement) => nearby.has(image) || visible.has(image)
+  const boxes = new WeakMap<HTMLImageElement, { width: number; height: number }>()
+  const styleInfo = new WeakMap<
+    HTMLImageElement,
+    { inline: string; objectFit: string; zoom: number; scaleRevision: number }
+  >()
   const background = new Set<HTMLImageElement>()
   const deferred = new Map<HTMLImageElement, number>()
   let deferredCursor: MapIterator<[HTMLImageElement, number]> | undefined
   let capacityFreed = false
   const ready = new Map<HTMLImageElement, ReadyPicture>()
-  const resized = new Set<HTMLImageElement>()
   const failed = new WeakMap<HTMLImageElement, string>()
   const costs = new WeakMap<HTMLImageElement, { request: ScreenImageRequest; bytes: number }>()
   let preload: { image: HTMLImageElement; url: string } | undefined
@@ -105,12 +84,11 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
   let working = false
   let disabled = false
   let printing = false
-  let lastTop = viewport.scrollTop
+  let lastTop: number | undefined
   let direction = 0
-  let zoom = root.currentCSSZoom
-  let scaleChanged = false
-  let dpr = devicePixelRatio
-  let resolution = matchMedia(`(resolution: ${dpr}dppx)`)
+  let viewportHalfHeight = 0
+  let scaleRevision = 0
+  let resolution = matchMedia(`(resolution: ${devicePixelRatio}dppx)`)
   const appRoot = root.closest('.app')
   const isParked = () => appRoot?.classList.contains('pv-exporting')
 
@@ -135,17 +113,27 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
     if (!disabled && !printing && frame === undefined) frame = requestAnimationFrame(update)
   }
 
+  function reobserveScale(): void {
+    // A CSS-pixel observer is independent of subpixel positioning. Refresh its
+    // snapshots when the layout's zoom or the window's device scale changes.
+    scaleRevision++
+    for (const image of observed) {
+      boxes.delete(image)
+      resize.unobserve(image)
+      resize.observe(image)
+    }
+  }
+
   function watchResolution(): void {
     resolution.removeEventListener('change', watchResolution)
     resolution = matchMedia(`(resolution: ${devicePixelRatio}dppx)`)
     resolution.addEventListener('change', watchResolution)
-    scaleChanged = true
-    schedule()
+    reobserveScale()
   }
 
   function onScroll(): void {
     const top = viewport.scrollTop
-    if (top !== lastTop) direction = Math.sign(top - lastTop)
+    if (lastTop !== undefined && top !== lastTop) direction = Math.sign(top - lastTop)
     lastTop = top
     if (nearby.size) schedule()
   }
@@ -168,10 +156,16 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
 
   const intersection = new IntersectionObserver(
     (entries) => {
-      for (const { target, isIntersecting } of entries) {
+      const scrollTop = (lastTop ??= viewport.scrollTop)
+      for (const { target, isIntersecting, boundingClientRect, rootBounds } of entries) {
         const image = target as HTMLImageElement
         if (isIntersecting && observed.has(image)) {
-          nearby.add(image)
+          // rootMargin is symmetric, so expanding it leaves the viewport centre intact.
+          const centre = rootBounds ? (rootBounds.top + rootBounds.bottom) / 2 : 0
+          nearby.set(image, {
+            top: boundingClientRect.top - centre + scrollTop,
+            bottom: boundingClientRect.bottom - centre + scrollTop,
+          })
           const copy = ready.get(image)
           if (copy) {
             ready.delete(image)
@@ -186,16 +180,71 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
     { root: viewport, rootMargin: '175% 100%' },
   )
 
-  const resize = new ResizeObserver((entries) => {
-    for (const { target } of entries) {
-      if (target === viewport) {
-        scaleChanged = true
-      } else {
+  // Geometry can move within the overscan window without notifying the broad
+  // observer. Use the actual viewport to promote and protect visible pictures.
+  const viewportIntersection = new IntersectionObserver(
+    (entries) => {
+      let changed = false
+      for (const { target, isIntersecting } of entries) {
         const image = target as HTMLImageElement
-        if (ready.has(image)) resized.add(image)
-        else queue(image)
+        if (isIntersecting && observed.has(image)) {
+          if (!visible.has(image)) {
+            visible.add(image)
+            changed = true
+          }
+        } else if (visible.delete(image)) {
+          changed = true
+        }
+      }
+      if (changed) schedule()
+    },
+    { root: viewport },
+  )
+
+  const resize = new ResizeObserver((entries) => {
+    if (printing || isParked()) return
+    const stale: HTMLImageElement[] = []
+    for (const entry of entries) {
+      if (entry.target === viewport) {
+        viewportHalfHeight = entry.contentRect.height / 2
+        continue
+      }
+      const image = entry.target as HTMLImageElement
+      if (!observed.has(image)) continue
+
+      // ResizeObserver delivers after layout. Record dimensions independently of
+      // the async decoder and of frame callbacks, which can run with dirty layout.
+      const inline = image.style.cssText
+      let style = styleInfo.get(image)
+      if (!style || style.inline !== inline || style.scaleRevision !== scaleRevision) {
+        const { objectFit } = getComputedStyle(image)
+        style = { inline, objectFit, zoom: image.currentCSSZoom || 1, scaleRevision }
+        styleInfo.set(image, style)
+      }
+      const scale = style.zoom * devicePixelRatio
+      const width = Math.ceil(entry.contentRect.width * scale)
+      const height = Math.ceil(entry.contentRect.height * scale)
+      if (
+        hasAuthoredExtent(image) &&
+        (!style.objectFit || style.objectFit === 'fill') &&
+        width > 0 &&
+        height > 0 &&
+        width * height <= MAX_RASTER_PIXELS
+      ) {
+        boxes.set(image, { width, height })
+      } else {
+        boxes.delete(image)
+      }
+      const copy = ready.get(image)
+      if (copy) {
+        const current = targetOf(image)
+        if (!current || !matchesRequest(copy.request, current)) stale.push(image)
+      } else {
+        queue(image)
       }
     }
+    // Read the entire observer batch before changing any presentation.
+    for (const image of stale) release(image)
     schedule()
   })
   resize.observe(viewport)
@@ -208,15 +257,19 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
         observed.add(image)
         queue(image)
         intersection.observe(image)
+        viewportIntersection.observe(image)
         resize.observe(image)
         schedule()
       } else if (!adding && !root.contains(image) && observed.delete(image)) {
         intersection.unobserve(image)
+        viewportIntersection.unobserve(image)
         resize.unobserve(image)
         nearby.delete(image)
+        visible.delete(image)
         background.delete(image)
         deferred.delete(image)
-        resized.delete(image)
+        boxes.delete(image)
+        styleInfo.delete(image)
         release(image)
         schedule()
       }
@@ -241,13 +294,16 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
     attributes: true,
     attributeFilter: ['src'],
   })
-  // CSS zoom changes the number of device pixels while leaving content boxes intact.
-  const zoomHost = root.closest('.doc-zoom')
+  const zoomHost = root.closest<HTMLElement>('.doc-zoom')
+  let lastZoom = zoomHost?.style.zoom
   let wasParked = isParked()
   const viewChanges = new MutationObserver((records) => {
     const parked = isParked()
-    if (records.some(({ target }) => target === zoomHost)) scaleChanged = true
-    if (scaleChanged || parked !== wasParked) schedule()
+    if (records.some(({ target }) => target === zoomHost) && zoomHost?.style.zoom !== lastZoom) {
+      lastZoom = zoomHost?.style.zoom
+      reobserveScale()
+    }
+    if (parked !== wasParked) schedule()
     wasParked = parked
   })
   if (zoomHost) viewChanges.observe(zoomHost, { attributes: true, attributeFilter: ['style'] })
@@ -264,46 +320,38 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
   function update(): void {
     frame = undefined
     if (disabled || printing || isParked()) return
-    if (scaleChanged) {
-      scaleChanged = false
-      const nextZoom = root.currentCSSZoom
-      const nextDpr = devicePixelRatio
-      if (zoom !== nextZoom || dpr !== nextDpr) {
-        zoom = nextZoom
-        dpr = nextDpr
-        for (const image of ready.keys()) release(image)
-        for (const image of observed) queue(image)
-      }
-    }
-
-    const stale = Array.from(resized).filter((image) => {
-      const request = ready.get(image)?.request
-      const size = request && displaySize(image)
-      return !size || !matchesRequest(request, size)
-    })
-    resized.clear()
-    for (const image of stale) release(image)
-
     if (working) return
-    const candidates = Array.from(nearby).filter(eligible)
+    const candidates = Array.from(nearby.keys()).filter(eligible)
+    for (const image of visible) {
+      if (!nearby.has(image) && eligible(image)) candidates.push(image)
+    }
     if (candidates.length) {
-      const view = viewport.getBoundingClientRect()
+      const top = (lastTop ?? 0) - viewportHalfHeight
+      const bottom = (lastTop ?? 0) + viewportHalfHeight
       const ordered = candidates
         .map((image) => {
-          const rect = image.getBoundingClientRect()
-          const side = rect.bottom <= view.top ? -1 : rect.top >= view.bottom ? 1 : 0
+          const bounds = nearby.get(image)
+          const side = !bounds ? 0 : bounds.bottom <= top ? -1 : bounds.top >= bottom ? 1 : 0
           return {
             image,
-            distance: Math.max(0, view.top - rect.bottom, rect.top - view.bottom),
-            priority: side === 0 ? 0 : direction === 0 || side === direction ? 1 : 2,
+            distance: bounds ? Math.max(0, top - bounds.bottom, bounds.top - bottom) : 0,
+            priority: visible.has(image)
+              ? 0
+              : direction === 0 || side === 0 || side === direction
+                ? 1
+                : 2,
           }
         })
         .sort((a, b) => a.priority - b.priority || a.distance - b.distance)
 
       let nearbyBytes = 0
-      for (const image of nearby) nearbyBytes += ready.get(image)?.bytes ?? 0
+      let visibleBytes = 0
+      for (const [image, copy] of ready) {
+        if (visible.has(image)) visibleBytes += copy.bytes
+        if (isInRange(image)) nearbyBytes += copy.bytes
+      }
       for (const { image } of ordered) {
-        if (request(image, nearbyBytes, true)) return
+        if (request(image, visible.has(image) ? visibleBytes : nearbyBytes, true)) return
       }
     }
 
@@ -328,13 +376,20 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
         deferred.delete(waiting)
         image = waiting
       }
-      if (!nearby.has(image) && eligible(image) && request(image, bytes, false)) return
+      if (!isInRange(image) && eligible(image) && request(image, bytes, false)) return
     }
     schedule()
   }
 
   function eligible(image: HTMLImageElement): boolean {
-    return !ready.has(image) && failed.get(image) !== image.src && canPrepare(image)
+    return (
+      boxes.has(image) && !ready.has(image) && failed.get(image) !== image.src && canPrepare(image)
+    )
+  }
+
+  function targetOf(image: HTMLImageElement): ScreenImageRequest | undefined {
+    const box = boxes.get(image)
+    return box && { ...box, src: image.src }
   }
 
   function request(
@@ -342,7 +397,7 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
     reservedBytes: number,
     mustStayNearby: boolean,
   ): boolean {
-    const target = displaySize(image)
+    const target = targetOf(image)
     if (!target) return false
     const previous = costs.get(image)
     const cost =
@@ -384,6 +439,13 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
     }
   }
 
+  function evictOutside(keep: (image: HTMLImageElement) => boolean, cost: number): void {
+    for (const image of ready.keys()) {
+      if (bytes + cost <= CACHE_BYTES) break
+      if (!keep(image)) release(image)
+    }
+  }
+
   async function show(
     image: HTMLImageElement,
     request: ScreenImageRequest,
@@ -399,20 +461,18 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
         !disabled &&
         !printing &&
         !isParked() &&
-        (!mustStayNearby || nearby.has(image)) &&
+        (!mustStayNearby || isInRange(image)) &&
         root.contains(image) &&
-        matchesRequest(displaySize(image), request)
+        matchesRequest(targetOf(image), request)
       if (!stillWanted()) {
         queue(image)
         return
       }
       const copyBytes = request.width * request.height * 4 + blob.size
       costs.set(image, { request, bytes: copyBytes })
-      if (nearby.has(image) && bytes + copyBytes > CACHE_BYTES) {
-        for (const prior of ready.keys()) {
-          if (!nearby.has(prior)) release(prior)
-          if (bytes + copyBytes <= CACHE_BYTES) break
-        }
+      if (isInRange(image) && bytes + copyBytes > CACHE_BYTES) {
+        evictOutside(isInRange, copyBytes)
+        if (visible.has(image)) evictOutside((prior) => visible.has(prior), copyBytes)
       }
       if (bytes + copyBytes > CACHE_BYTES) {
         deferred.set(image, copyBytes)
@@ -453,6 +513,7 @@ export function installScreenImageReadiness(root: HTMLElement, viewport: HTMLEle
     releasePreload()
     for (const image of ready.keys()) release(image)
     intersection.disconnect()
+    viewportIntersection.disconnect()
     resize.disconnect()
     mutations.disconnect()
     viewChanges.disconnect()

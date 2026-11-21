@@ -25,7 +25,7 @@ function setup(positions: number[], imageStyle = 'width:100px;height:50px') {
     image.alt = 'Document image'
     image.style.cssText = imageStyle
     Object.defineProperties(image, {
-      naturalWidth: { value: 600 },
+      naturalWidth: { get: () => 600, configurable: true },
       naturalHeight: { value: 300 },
       currentCSSZoom: { value: 1.25 },
     })
@@ -39,12 +39,14 @@ function setup(positions: number[], imageStyle = 'width:100px;height:50px') {
     return cancel
   })
 
-  let onIntersect: IntersectionObserverCallback
+  let onNear: IntersectionObserverCallback
+  let onVisible: IntersectionObserverCallback | undefined
   vi.stubGlobal(
     'IntersectionObserver',
     class {
-      constructor(callback: IntersectionObserverCallback) {
-        onIntersect = callback
+      constructor(callback: IntersectionObserverCallback, options: IntersectionObserverInit) {
+        if (options.rootMargin) onNear = callback
+        else onVisible = callback
       }
       observe() {}
       unobserve() {}
@@ -104,8 +106,11 @@ function setup(positions: number[], imageStyle = 'width:100px;height:50px') {
   )
 
   const dispose = installScreenImageReadiness(root, viewport)
-  const intersect = (...active: HTMLImageElement[]) => {
-    onIntersect(
+  const notifyIntersection = (
+    notify: IntersectionObserverCallback | undefined,
+    active: HTMLImageElement[],
+  ) => {
+    notify?.(
       copies.map((target) => ({
         target,
         isIntersecting: active.includes(target),
@@ -118,11 +123,45 @@ function setup(positions: number[], imageStyle = 'width:100px;height:50px') {
       {} as IntersectionObserver,
     )
   }
+  const showInViewport = (...active: HTMLImageElement[]) => notifyIntersection(onVisible, active)
+  const intersect = (...active: HTMLImageElement[]) => {
+    notifyIntersection(onNear, active)
+    const viewportBox = viewport.getBoundingClientRect()
+    showInViewport(
+      ...active.filter((image) => {
+        const box = image.getBoundingClientRect()
+        return box.top < viewportBox.bottom && box.bottom > viewportBox.top
+      }),
+    )
+  }
   const result = async (value: string) => {
     worker!.onmessage?.({ data: new Blob([value]) } as MessageEvent<Blob>)
     await Promise.resolve()
     await Promise.resolve()
   }
+  const resize = (
+    target: HTMLImageElement,
+    width = parseFloat(target.style.width),
+    height = parseFloat(target.style.height),
+  ) => {
+    notifyResize(target, new DOMRect(0, 0, width, height))
+  }
+  const notifyResize = (target: HTMLElement, contentRect: DOMRect) => {
+    onResize(
+      [
+        {
+          target,
+          contentRect,
+          contentBoxSize: [],
+          borderBoxSize: [],
+          devicePixelContentBoxSize: [],
+        },
+      ],
+      {} as ResizeObserver,
+    )
+  }
+  notifyResize(viewport, viewport.getBoundingClientRect())
+  for (const image of copies) resize(image)
   return {
     app,
     viewport,
@@ -131,32 +170,21 @@ function setup(positions: number[], imageStyle = 'width:100px;height:50px') {
     media,
     flush,
     intersect,
+    showInViewport,
     dispose,
     result,
     revoke,
     get worker() {
       return worker!
     },
-    resize: (image: HTMLImageElement) => {
-      onResize(
-        [
-          {
-            target: image,
-            contentRect: image.getBoundingClientRect(),
-            contentBoxSize: [],
-            borderBoxSize: [],
-            devicePixelContentBoxSize: [],
-          },
-        ],
-        {} as ResizeObserver,
-      )
-    },
+    resize,
   }
 }
 
 it('prepares display-sized copies for the newest viewport and leaves source markup intact', async () => {
   const f = setup([180, 270, 520])
-  const { copies, viewport, intersect, flush, result, media, dispose, animations, revoke } = f
+  const { copies, viewport, intersect, flush, result, media, dispose, animations, revoke, resize } =
+    f
   const sources = copies.map((image) => image.outerHTML)
   intersect(...copies)
   flush()
@@ -188,6 +216,7 @@ it('prepares display-sized copies for the newest viewport and leaves source mark
 
   vi.stubGlobal('devicePixelRatio', 3)
   media.addEventListener.mock.calls.at(-1)?.[1]()
+  resize(copies[2])
   flush()
   expect(animations[2]).toHaveBeenCalledOnce()
   expect(revoke).toHaveBeenCalledWith('blob:docs-test')
@@ -210,17 +239,19 @@ it('checks saturated offscreen admission once and resumes only when input or cap
   const f = setup(positions, 'width:819.2px;height:819.2px')
   const { app, copies, viewport, intersect, flush, result, resize, dispose } = f
   const styleRead = vi.spyOn(window, 'getComputedStyle')
+  const admission = copies.map((image) => vi.spyOn(image, 'naturalWidth', 'get'))
   intersect(copies[0])
   flush()
   await result('one')
   flush()
   expect(copies[0].animate).toHaveBeenCalledOnce()
   expect(f.worker.postMessage).toHaveBeenCalledOnce()
-  expect(styleRead).not.toHaveBeenCalledWith(copies.at(-1))
+  expect(admission.at(-1)).not.toHaveBeenCalled()
   flush()
   flush()
-  expect(styleRead).toHaveBeenCalledWith(copies.at(-1))
-  styleRead.mockClear()
+  expect(admission.at(-1)).toHaveBeenCalled()
+  expect(styleRead).not.toHaveBeenCalled()
+  for (const check of admission) check.mockClear()
 
   for (const top of [10, 20, 30, 40, 50]) {
     viewport.scrollTop = top
@@ -228,6 +259,7 @@ it('checks saturated offscreen admission once and resumes only when input or cap
     flush()
   }
   expect(styleRead).not.toHaveBeenCalled()
+  for (const check of admission) expect(check).not.toHaveBeenCalled()
 
   const added = copies[3].cloneNode() as HTMLImageElement
   Object.defineProperties(added, {
@@ -237,6 +269,7 @@ it('checks saturated offscreen admission once and resumes only when input or cap
   })
   copies[3].after(added)
   await Promise.resolve()
+  resize(added)
   flush()
   expect(styleRead).toHaveBeenCalledExactlyOnceWith(added)
   expect(f.worker.postMessage).toHaveBeenCalledOnce()
@@ -279,5 +312,78 @@ it('checks saturated offscreen admission once and resumes only when input or cap
     width: 2048,
     height: 2048,
   })
+  dispose()
+})
+
+it('uses the delivered content box for both admission and in-flight validation', async () => {
+  const f = setup([0])
+  const {
+    copies: [image],
+    intersect,
+    flush,
+    resize,
+    result,
+    dispose,
+  } = f
+  const styleRead = vi.spyOn(window, 'getComputedStyle')
+  intersect(image)
+  resize(image, 96, 48)
+  flush()
+  expect(f.worker.postMessage).toHaveBeenLastCalledWith({ src: image.src, width: 240, height: 120 })
+
+  // A layout constraint changes the actual size while the authored CSS stays the same.
+  resize(image, 92, 46)
+  await result('old dimensions')
+  expect(image.animate).not.toHaveBeenCalled()
+  flush()
+  expect(f.worker.postMessage).toHaveBeenLastCalledWith({ src: image.src, width: 230, height: 115 })
+  await result('new dimensions')
+  expect(image.animate).toHaveBeenCalledOnce()
+  expect(styleRead).not.toHaveBeenCalled()
+  dispose()
+})
+
+it('prioritizes and protects the actual viewport when overscan membership stays the same', async () => {
+  const f = setup([0, 550], 'width:819.2px;height:819.2px')
+  const {
+    copies: [first, next],
+    viewport,
+    intersect,
+    showInViewport,
+    flush,
+    result,
+    animations,
+    dispose,
+  } = f
+  intersect(first, next)
+  flush()
+  expect(f.worker.postMessage).toHaveBeenLastCalledWith({
+    src: first.src,
+    width: 2048,
+    height: 2048,
+  })
+  await result('first')
+  flush()
+  expect(animations[0]).not.toHaveBeenCalled()
+  expect(f.worker.postMessage).toHaveBeenCalledTimes(1)
+
+  // Layout shifts both pictures without either crossing the broad observer's boundary.
+  // Only the exact observer sends notifications.
+  showInViewport(next)
+  const rectReads = [viewport, first, next].map((element) =>
+    vi.spyOn(element, 'getBoundingClientRect'),
+  )
+  const styleRead = vi.spyOn(window, 'getComputedStyle')
+  flush()
+  expect(f.worker.postMessage).toHaveBeenLastCalledWith({
+    src: next.src,
+    width: 2048,
+    height: 2048,
+  })
+  await result('next')
+  expect(animations[0]).toHaveBeenCalledOnce()
+  expect(next.animate).toHaveBeenCalledOnce()
+  for (const read of rectReads) expect(read).not.toHaveBeenCalled()
+  expect(styleRead).not.toHaveBeenCalled()
   dispose()
 })

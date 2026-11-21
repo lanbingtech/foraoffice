@@ -356,6 +356,107 @@ export function mapTextNodes(
 
 const charRange = rangeSlot()
 
+// Single UTF-16 characters with unambiguous horizontal CJK shaping. Mixed
+// text, whitespace and combining sequences keep the individual glyph reads.
+const PLAIN_CJK_RUN =
+  /^[\u3001\u3002\u3008-\u3011\u3014-\u301F\u3041-\u3096\u30A1-\u30FA\u3400-\u4DBF\u4E00-\u9FFF\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF60]+$/u
+
+interface TextFragment {
+  end: number
+  rect: DOMRect
+}
+
+function glyphRect(range: Range, dom: Text, i: number): DOMRect {
+  range.setStart(dom, i)
+  range.setEnd(dom, i + 1)
+  return range.getBoundingClientRect()
+}
+
+interface FragmentEnd {
+  end: number
+  edge?: [DOMRect, DOMRect]
+}
+
+function fragmentEnd(
+  range: Range,
+  dom: Text,
+  start: number,
+  limit: number,
+  hint: number,
+): FragmentEnd {
+  let lo = start + 1
+  let hi = Math.min(limit, start + Math.max(2, Math.min(hint, 16)))
+  let step = 1
+  // Grow a local bracket. Probing halfway through the remaining text
+  // materializes unrelated rectangles on every line of a narrow column.
+  while (lo < hi) {
+    // The lower bound is already in this fragment. At a one-character step,
+    // the two glyphs straddling the cut can also serve as its measured edges.
+    const checkEdge = hi === lo + 1
+    range.setStart(dom, checkEdge ? lo - 1 : start)
+    range.setEnd(dom, hi)
+    const rects = range.getClientRects()
+    if (checkEdge && rects.length === 2) return { end: lo, edge: [rects[0], rects[1]] }
+    if (rects.length !== 1) {
+      hi--
+      break
+    }
+    lo = hi
+    hi = Math.min(limit, lo + step)
+    step *= 2
+  }
+  if (lo < hi) range.setStart(dom, start)
+  while (lo < hi) {
+    const mid = lo + Math.ceil((hi - lo) / 2)
+    range.setEnd(dom, mid)
+    if (range.getClientRects().length === 1) lo = mid
+    else hi = mid - 1
+  }
+  return { end: lo }
+}
+
+/** Blink's range rectangles use the same text fragments as its glyph ranges.
+ * With plain LTR CJK and no advance adjustments, glyphs in one fragment have
+ * the same vertical bounds and advance from left to right. The line reducer
+ * needs only those bounds, the first glyph's left and the last glyph's right.
+ * Check the endpoints against real glyphs before reusing a fragment. */
+function textFragments(range: Range, dom: Text): TextFragment[] | null {
+  range.setStart(dom, 0)
+  range.setEnd(dom, dom.length)
+  const rects = range.getClientRects()
+  if (rects.length === 0 || rects.length * 6 > dom.length) return null
+
+  const result: TextFragment[] = []
+  let start = 0
+  let hint = Math.floor(dom.length / rects.length)
+  let nextFirst: DOMRect | undefined
+  for (let i = 0; i < rects.length; i++) {
+    const rect = rects[i]
+    const remaining = rects.length - i - 1
+    const { end, edge } =
+      remaining > 0
+        ? fragmentEnd(range, dom, start, dom.length - remaining, hint)
+        : { end: dom.length }
+    if (end <= start || rect.width <= 0 || rect.height <= 0) return null
+    const first = nextFirst ?? glyphRect(range, dom, start)
+    const last = edge?.[0] ?? (end === start + 1 ? first : glyphRect(range, dom, end - 1))
+    if (
+      first.left !== rect.left ||
+      last.right !== rect.right ||
+      first.top !== rect.top ||
+      last.top !== rect.top ||
+      first.bottom !== rect.bottom ||
+      last.bottom !== rect.bottom
+    )
+      return null
+    result.push({ end, rect })
+    nextFirst = edge?.[1]
+    hint = end - start
+    start = end
+  }
+  return result
+}
+
 const candidateCache = new WeakMap<ProseMirrorNode, boolean>()
 /** CJK paragraph with something to compress, within the per-char measurement budget */
 function isCandidate(node: ProseMirrorNode): boolean {
@@ -649,14 +750,14 @@ class CjkPunctShrinkView {
     let breakPositions: number[] = []
     const paraFont = fontOf(cs)
     // balanced grids give full-width spans a larger letter-spacing than the paragraph
-    const styleCache = new Map<Element, { font: string; ls: number }>()
-    const styleAt = (el: Element | null): { font: string; ls: number } => {
+    const styleCache = new Map<Element, { font: string; ls: number; css: CSSStyleDeclaration }>()
+    const styleAt = (el: Element | null) => {
       const parent = spacingHost(el)
-      if (!parent) return { font: paraFont, ls: baseLs }
+      if (!parent) return { font: paraFont, ls: baseLs, css: cs }
       let st = styleCache.get(parent)
       if (!st) {
         const pcs = window.getComputedStyle(parent)
-        st = { font: fontOf(pcs), ls: parseFloat(pcs.letterSpacing) || 0 }
+        st = { font: fontOf(pcs), ls: parseFloat(pcs.letterSpacing) || 0, css: pcs }
         styleCache.set(parent, st)
       }
       return st
@@ -671,13 +772,33 @@ class CjkPunctShrinkView {
     if (mapped) {
       breakPositions = mapped.breaks
       const range = charRange()
+      const plainBlock =
+        cs.writingMode === 'horizontal-tb' && !el.classList.contains('has-drop-cap')
       for (const slot of mapped.slots) {
-        const { font, ls } = styleAt(slot.dom.parentElement)
+        const parent = slot.dom.parentElement
+        const { font, ls, css } = styleAt(parent)
         const data = slot.dom.data
+        const fragments =
+          plainBlock &&
+          data.length >= 12 &&
+          // Below eight em, one glyph read per position can cost less than
+          // discovering and validating every fragment boundary.
+          contentW >= 8 * parseFloat(css.fontSize) &&
+          PLAIN_CJK_RUN.test(data) &&
+          !parent?.classList.contains('doc-cjkshrink') &&
+          ls >= 0 &&
+          css.writingMode === 'horizontal-tb' &&
+          css.direction === 'ltr' &&
+          (css.unicodeBidi === 'normal' || css.unicodeBidi === 'isolate') &&
+          css.fontKerning === 'none' &&
+          css.fontVariantEastAsian === 'normal' &&
+          (css.fontFeatureSettings === 'normal' || css.fontFeatureSettings === '"liga" 0')
+            ? textFragments(range, slot.dom)
+            : null
+        let part = 0
         for (let i = 0; i < data.length; i++) {
-          range.setStart(slot.dom, i)
-          range.setEnd(slot.dom, i + 1)
-          const r = range.getBoundingClientRect()
+          if (fragments && i === fragments[part].end) part++
+          const r = fragments?.[part].rect ?? glyphRect(range, slot.dom, i)
           const width = charAdvancePx(font, data[i]) + ls
           chars.push({
             ch: data[i],

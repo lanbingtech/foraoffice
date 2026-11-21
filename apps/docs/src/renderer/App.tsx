@@ -7491,6 +7491,7 @@ export function App({
   useEffect(() => {
     ;(window as unknown as Record<string, unknown>).__aidocs = {
       editor,
+      documentGeneration: currentDocGeneration,
       openPath: (path: string) => openRecent(path),
       save: () => save(false),
       getStatus: () => status,
