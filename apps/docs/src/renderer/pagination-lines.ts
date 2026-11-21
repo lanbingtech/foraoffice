@@ -743,6 +743,73 @@ export function outerTableRows(el: HTMLElement): HTMLElement[] {
   )
 }
 
+/** Reuse table reads across page cuts in one gap-building pass, before any gap writes. */
+export function createTableGapReads(zoomFactor: number) {
+  const rowsByBlock = new Map<HTMLElement, HTMLElement[]>()
+  const gapsByBlock = new Map<HTMLElement, DOMRect[]>()
+  const rects = new Map<HTMLElement, DOMRect>()
+  const grids = new Map<HTMLTableElement, { rows: HTMLTableRowElement[]; columns: number }>()
+  const rectOf = (el: HTMLElement) => {
+    let rect = rects.get(el)
+    if (!rect) {
+      rect = el.getBoundingClientRect()
+      rects.set(el, rect)
+    }
+    return rect
+  }
+  return {
+    rowsOf(block: HTMLElement): HTMLElement[] {
+      let rows = rowsByBlock.get(block)
+      if (!rows) {
+        rows = outerTableRows(block)
+        rowsByBlock.set(block, rows)
+      }
+      return rows
+    },
+    rowOffset(block: HTMLElement, row: HTMLElement): number {
+      let gapRects = gapsByBlock.get(block)
+      if (!gapRects) {
+        gapRects = Array.from(block.querySelectorAll('.page-gap-inline'), (gap) =>
+          gap.getBoundingClientRect(),
+        ).filter((gap) => gap.height !== 0)
+        gapsByBlock.set(block, gapRects)
+      }
+      const rowTop = rectOf(row).top
+      const gapAbove = gapRects.reduce(
+        (sum, gap) => (gap.top <= rowTop ? sum + gap.height : sum),
+        0,
+      )
+      return (rowTop - rectOf(block).top - gapAbove) / zoomFactor
+    },
+    gridOf(row: HTMLElement) {
+      const table = row.closest('table')
+      if (!table) return { rows: [], columns: 1 }
+      let grid = grids.get(table)
+      if (!grid) {
+        const rows = Array.from(
+          table.querySelectorAll<HTMLTableRowElement>(':scope > tbody > tr'),
+        ).filter(
+          (r) => !r.classList.contains('page-gap') && !r.classList.contains('page-repeat-header'),
+        )
+        const columns = rows.reduce(
+          (max, r) =>
+            Math.max(
+              max,
+              Array.from(r.cells).reduce((sum, c) => sum + c.colSpan, 0),
+            ),
+          1,
+        )
+        grid = { rows, columns }
+        grids.set(table, grid)
+      }
+      return grid
+    },
+    rowHeight(row: HTMLElement): number {
+      return rectOf(row).height / zoomFactor
+    },
+  }
+}
+
 /** Preview rules for Word-style split rows: stamp each split tr (data-pv-split, cloned
  *  with the block) and, on the page each fragment lands on, translate / clip / hide
  *  the cells' children so only that fragment's lines show, at its top, while the

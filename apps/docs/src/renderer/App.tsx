@@ -192,6 +192,7 @@ import {
   carryStreamedSamples,
   endnotesAnchorY,
   createLineRectsCache,
+  createTableGapReads,
   createBlockMeasurer,
   enterNaturalFlow,
   anchorElement,
@@ -213,7 +214,6 @@ import {
   pageReaderShadow,
   type FlowCarry,
   LEAD_ROW_TOL_PX,
-  outerTableRows,
   type PageCut,
   pageNumbers,
   sliceWithLineSplit,
@@ -5010,6 +5010,7 @@ export function App({
         const overlayPages: number[] = []
         const carries: FlowCarry[] = []
         const lineRectsOf = createLineRectsCache()
+        const tableGapReads = createTableGapReads(factor)
         const gapIds = new Set<string>()
         let firstPageFloats: { els: HTMLElement[]; key: string } | undefined
         if (viewMode === 'print' && !readMode) {
@@ -5455,7 +5456,7 @@ export function App({
             if (lead.kind === 'row' || lead.kind === 'cell') {
               // the previous pass's gap rows and repeated headers are not rows of the
               // measured table (domTableRows): index the same list
-              const realRows = outerTableRows(b.el)
+              const realRows = tableGapReads.rowsOf(b.el)
               if (lead.kind === 'row') {
                 const tr = realRows[lead.row ?? -1]
                 if (!tr) {
@@ -5464,12 +5465,7 @@ export function App({
                 }
                 // the I11 shadow of the row sampler: the measured row top must still be
                 // where the DOM row sits (a tr's offset includes in-table gaps above it)
-                const gapRects = Array.from(b.el.querySelectorAll('.page-gap-inline')).map((g) =>
-                  g.getBoundingClientRect(),
-                )
-                const trTop = tr.getBoundingClientRect().top
-                const gapsAbove = gapRects.reduce((s, g) => (g.top <= trTop ? s + g.height : s), 0)
-                const off = (trTop - b.el.getBoundingClientRect().top - gapsAbove) / factor
+                const off = tableGapReads.rowOffset(b.el, tr)
                 const rowTop = (b.tableRows ?? [])
                   .slice(0, lead.row)
                   .reduce((s, r) => s + r.height, 0)
@@ -5483,6 +5479,8 @@ export function App({
                 )
                 try {
                   const $pos = editor.view.state.doc.resolve(editor.view.posAtDOM(tr, 0))
+                  // The page-gap cell spans exactly the live grid, excluding prior decorations.
+                  const grid = tableGapReads.gridOf(tr)
                   // w:tblHeader repetition: the engine reserved slice.repeatHeader.height
                   // at the top of this page's column, so cloning the source header rows
                   // below the gap fills exactly that space. Clones are decorations —
@@ -5490,46 +5488,21 @@ export function App({
                   let repeatHeaderEls: HTMLElement[] | undefined
                   let repeatHeaderPx = 0
                   if (slice.repeatHeader) {
-                    const tableEl = tr.closest('table')
-                    const srcRows = tableEl
-                      ? (Array.from(tableEl.querySelectorAll(':scope > tbody > tr')).filter(
-                          (r) =>
-                            !r.classList.contains('page-gap') &&
-                            !r.classList.contains('page-repeat-header'),
-                        ) as HTMLElement[])
-                      : []
                     const els: HTMLElement[] = []
                     let acc = 0
-                    for (const row of srcRows) {
+                    for (const row of grid.rows) {
                       if (acc >= slice.repeatHeader.height - 1.5) break
                       const clone = row.cloneNode(true) as HTMLElement
                       clone.classList.add('page-gap-inline', 'page-repeat-header')
                       clone.setAttribute('contenteditable', 'false')
                       els.push(clone)
-                      acc += row.getBoundingClientRect().height / factor
+                      acc += tableGapReads.rowHeight(row)
                     }
                     if (els.length > 0) {
                       repeatHeaderEls = els
                       repeatHeaderPx = acc
                     }
                   }
-                  // the spanning gap cell must cover exactly the table's column
-                  // grid: a wider colSpan adds phantom columns, which collapses
-                  // colgroup-less fixed-layout tables to ~1px columns (makeGapEl)
-                  const gridCols = Math.max(
-                    1,
-                    ...Array.from(
-                      tr
-                        .closest('table')
-                        ?.querySelectorAll<HTMLTableRowElement>(':scope > tbody > tr') ?? [],
-                    )
-                      .filter(
-                        (r) =>
-                          !r.classList.contains('page-gap') &&
-                          !r.classList.contains('page-repeat-header'),
-                      )
-                      .map((r) => Array.from(r.cells).reduce((s, c) => s + c.colSpan, 0)),
-                  )
                   for (let d = $pos.depth; d > 0; d--) {
                     if ($pos.node(d).type.name === 'docTableRow') {
                       // no notes area in table gaps: pad the full remainder
@@ -5537,7 +5510,7 @@ export function App({
                       gaps.push({
                         pos: $pos.before(d),
                         kind: 'table',
-                        cols: gridCols,
+                        cols: grid.columns,
                         page: k + 1,
                         ...(fsplit ? { floatGap: true } : {}),
                         ...(repeatHeaderPx > 0 ? { repeatHeaderPx } : {}),

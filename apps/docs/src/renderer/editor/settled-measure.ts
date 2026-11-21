@@ -23,15 +23,16 @@ const FLOAT_SELECTOR = [
   '.doc-textbox-side',
 ].join(', ')
 
-function requiresFullWrapMeasure(view: EditorView): boolean {
-  // A floated pseudo-element has no DOM box to include in the float bands.
+function requiresFullWrapMeasure(view: Pick<EditorView, 'dom'>): boolean {
+  // Drop caps have no DOM box, and a legacy frame can change its own float
+  // width as its text wraps. Recheck the flow in both cases.
   return (
     Number(getComputedStyle(view.dom).columnCount) > 1 ||
-    view.dom.querySelector('.has-drop-cap') !== null
+    view.dom.querySelector('.has-drop-cap, .doc-para-frame-box-float') !== null
   )
 }
 
-export function hasCoupledWrapGeometry(view: EditorView): boolean {
+export function hasCoupledWrapGeometry(view: Pick<EditorView, 'dom'>): boolean {
   return requiresFullWrapMeasure(view) || view.dom.querySelector(FLOAT_SELECTOR) !== null
 }
 

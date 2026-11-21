@@ -1363,8 +1363,16 @@ export function fromPmNode(
     styles.push(...paraBorderPaddingDecls(padding), ...paraBorderShadowDecls(borderLines))
   }
   // a positioned frame (below) models the same w:framePr; frameBox only covers frames without a width
-  if (node.attrs.frameBox && !node.attrs.frame)
-    styles.push(...frameBoxCss(String(node.attrs.frameBox)))
+  if (!node.attrs.frame) {
+    const box = parseJsonAttr<ParaFrameBox>(node.attrs.frameBox)
+    if (box) {
+      styles.push(...frameBoxCss(box))
+      if (box.floatSide) {
+        classes.push('doc-para-frame-box-float')
+        attrs['class'] = classes.join(' ')
+      }
+    }
+  }
   if (node.attrs.tabStops) {
     // debugging aid only; actual tab layout is measured by TabStopExtension
     attrs['data-tab-stops'] = String(node.attrs.tabStops)
@@ -1407,13 +1415,7 @@ function parseJsonAttr<T>(raw: unknown): T | undefined {
 }
 
 /** w:framePr box: the paragraph lays out at the frame size, floating beside the text when it wraps */
-function frameBoxCss(json: string): string[] {
-  let box: ParaFrameBox
-  try {
-    box = JSON.parse(json) as ParaFrameBox
-  } catch {
-    return []
-  }
+function frameBoxCss(box: ParaFrameBox): string[] {
   const px = (twips: number): string => `${(twips / 15).toFixed(1)}px`
   const out: string[] = []
   if (box.wTwips) out.push(`width:${px(box.wTwips)}`, 'box-sizing:border-box')
