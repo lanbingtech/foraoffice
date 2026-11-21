@@ -254,10 +254,13 @@ const ANCHOR_SEL = [
 
 const sha = (s: string) => createHash('sha1').update(s).digest('hex').slice(0, 16)
 
-/** open tag with attributes, class tokens and style declarations in sorted order */
+/** Open tag with geometry-related attributes, class tokens and style declarations in sorted order. */
 function openTag(el: Element): string {
   const attrs = Array.from(el.attributes)
-    .filter(({ name }) => name !== 'src')
+    .filter(
+      ({ name }) =>
+        name !== 'src' && name !== 'data-source-txbx-index' && name !== 'data-source-shape-id',
+    )
     .map(({ name, value }) => {
       if (name === 'class') value = value.split(/\s+/).filter(Boolean).sort().join(' ')
       if (name === 'style')

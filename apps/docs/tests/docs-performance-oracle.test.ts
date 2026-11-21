@@ -13,6 +13,7 @@ import JSZip from 'jszip'
 
 const original = {
   tail: 'Beta',
+  minimumBodyImages: 0,
   textRuns: ['Alpha', 'Beta'],
   paragraphs: [
     { text: 'Alpha', start: 0 },

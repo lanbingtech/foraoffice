@@ -5,9 +5,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const launches = vi.hoisted(() => ({ browser: vi.fn(), electron: vi.fn() }))
+const inspectNative = vi.hoisted(() => ({ open: vi.fn(), inspect: vi.fn(), close: vi.fn() }))
 vi.mock('@playwright/test', () => ({
   chromium: { launch: launches.browser },
   _electron: { launch: launches.electron },
+}))
+vi.mock('../../../e2e/windows-native-ime', () => ({
+  openWindowsNativeFocusInspector: inspectNative.open,
 }))
 import { launchPerformanceHost, exportWithNativePicker } from '../../../e2e/docs-performance-host'
 
@@ -24,46 +28,60 @@ it('rejects a false product export immediately and aborts a picker that never ap
   expect(signal?.aborted).toBe(true)
 }, 200)
 
-it('launches Electron with a separate primer while retaining the measured document for real Open', async () => {
-  const workspace = await mkdtemp(join(tmpdir(), 'docs-perf-host-'))
-  try {
-    await mkdir(join(workspace, 'node_modules/electron'), { recursive: true })
-    await writeFile(join(workspace, 'package.json'), '{}')
-    await writeFile(
-      join(workspace, 'node_modules/electron/index.js'),
-      'module.exports=process.execPath',
-    )
-    const press = vi.fn().mockResolvedValue(undefined)
-    const evaluate = vi
-      .fn()
-      .mockResolvedValue(undefined)
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce({ pid: 34, versions: { electron: '43.8.3' } })
-    launches.electron.mockResolvedValue({
-      firstWindow: async () => ({ keyboard: { press } }),
-      evaluate,
-      process: () => ({ pid: 12, exitCode: 0, signalCode: null }),
-      close: async () => {},
-    })
-    const session = await launchPerformanceHost({
-      kind: 'electron',
-      workspace,
-      document: 'sample.docx',
-      initialDocument: 'primer.docx',
-      sdk: '',
-      electronApp: workspace,
-      qtExecutable: '',
-    })
-    expect(launches.electron.mock.lastCall![0].args).toEqual([workspace, 'primer.docx'])
-    expect(session.nativeProcessId).toBe(34)
-    expect(evaluate.mock.calls[0][1]).toMatchObject({ document: 'sample.docx' })
-    await session.open()
-    expect(press).toHaveBeenCalledWith('Control+o')
-    await session.close()
-  } finally {
-    await rm(workspace, { recursive: true, force: true })
-  }
-})
+it.each(['win32', 'darwin', 'linux'] as const)(
+  'launches Electron on %s with a primer and uses native inspection only on Windows',
+  async (platform) => {
+    const workspace = await mkdtemp(join(tmpdir(), 'docs-perf-host-'))
+    const actualPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { value: platform })
+    inspectNative.open.mockReset().mockReturnValue(inspectNative)
+    inspectNative.close.mockReset()
+    try {
+      await mkdir(join(workspace, 'node_modules/electron'), { recursive: true })
+      await writeFile(join(workspace, 'package.json'), '{}')
+      await writeFile(
+        join(workspace, 'node_modules/electron/index.js'),
+        'module.exports=process.execPath',
+      )
+      const press = vi.fn().mockResolvedValue(undefined)
+      const evaluate = vi
+        .fn()
+        .mockResolvedValue(undefined)
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ pid: 34, versions: { electron: '43.8.3' } })
+      launches.electron.mockResolvedValue({
+        firstWindow: async () => ({ keyboard: { press } }),
+        evaluate,
+        process: () => ({ pid: 12, exitCode: 0, signalCode: null }),
+        close: async () => {},
+      })
+      const session = await launchPerformanceHost({
+        kind: 'electron',
+        workspace,
+        document: 'sample.docx',
+        initialDocument: 'primer.docx',
+        sdk: '',
+        electronApp: workspace,
+        qtExecutable: '',
+      })
+      expect(launches.electron.mock.lastCall![0].args).toEqual([workspace, 'primer.docx'])
+      expect(session.nativeProcessId).toBe(34)
+      expect(evaluate.mock.calls[0][1]).toMatchObject({ document: 'sample.docx' })
+      const windows = platform === 'win32'
+      expect(session.inspectNativeFocus).toBe(windows ? inspectNative.inspect : undefined)
+      expect(typeof session.activateForeground).toBe(windows ? 'function' : 'undefined')
+      expect(inspectNative.open).toHaveBeenCalledTimes(windows ? 1 : 0)
+      await session.open()
+      await session.save()
+      expect(press.mock.calls).toEqual([['ControlOrMeta+o'], ['ControlOrMeta+s']])
+      await session.close()
+      expect(inspectNative.close).toHaveBeenCalledTimes(windows ? 1 : 0)
+    } finally {
+      Object.defineProperty(process, 'platform', actualPlatform)
+      await rm(workspace, { recursive: true, force: true })
+    }
+  },
+)
 
 it('closes the browser when creating its first page fails before returning a session', async () => {
   const close = vi.fn().mockResolvedValue(undefined)

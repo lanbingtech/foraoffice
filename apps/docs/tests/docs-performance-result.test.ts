@@ -92,16 +92,28 @@ describe('Docs performance evidence', () => {
     const before = {
       status: 'complete',
       condition,
+      correctness: {
+        pdfPages: 1,
+        pageSizesPoints: [{ width: 612, height: 792 }],
+        printTextboxClipping: {},
+      },
+      mainThreadBlocking: { scope: 'sampled input intervals', maxMs: 51, over50ms: 1 },
       summaries: { input: summarizeScenario([{ ok: true as const, durationMs: 100 }], 1) },
     }
     const after = {
       ...before,
+      mainThreadBlocking: { ...before.mainThreadBlocking, maxMs: 120, over50ms: 2 },
       summaries: { input: summarizeScenario([{ ok: true as const, durationMs: 120 }], 1) },
     }
-    expect(comparePerformanceReports(before, after).input).toMatchObject({
+    const comparison = comparePerformanceReports(before, after)
+    expect(comparison.scenarios.input).toMatchObject({
       medianDeltaMs: 20,
       p95DeltaMs: 20,
       p95ChangePercent: 20,
+    })
+    expect(comparison.mainThreadBlocking).toEqual({
+      before: before.mainThreadBlocking,
+      after: after.mainThreadBlocking,
     })
     expect(() => comparePerformanceReports(before, { ...after, status: 'incomplete' })).toThrow(
       'complete',
@@ -115,8 +127,59 @@ describe('Docs performance evidence', () => {
     expect(() =>
       comparePerformanceReports(before, {
         ...after,
-        correctness: { printTextboxClipping: { 'box:1:0': [2] } },
+        correctness: { ...before.correctness, printTextboxClipping: { 'box:1:0': [2] } },
       }),
     ).toThrow('textbox clipping differs')
+    expect(() =>
+      comparePerformanceReports(before, {
+        ...after,
+        correctness: {
+          ...before.correctness,
+          pdfPages: 2,
+          pageSizesPoints: [...before.correctness.pageSizesPoints, { width: 612, height: 792 }],
+        },
+      }),
+    ).toThrow('PDF page count or geometry differs')
+    expect(() =>
+      comparePerformanceReports(before, {
+        ...after,
+        correctness: {
+          ...before.correctness,
+          pageSizesPoints: [{ width: 792, height: 612 }],
+        },
+      }),
+    ).toThrow('PDF page count or geometry differs')
+    expect(() => comparePerformanceReports(before, { ...after, correctness: undefined })).toThrow(
+      'PDF page geometry evidence is missing',
+    )
+    const legacy = JSON.parse(JSON.stringify({ ...before, mainThreadBlocking: undefined }))
+    expect(() => comparePerformanceReports(legacy, after)).toThrow(
+      'Main-thread blocking evidence is missing or invalid',
+    )
+    const invalidBlocking = {
+      ...before,
+      mainThreadBlocking: { scope: '', maxMs: -1, over50ms: 0.5 },
+    }
+    expect(() => comparePerformanceReports(invalidBlocking, after)).toThrow(
+      'Main-thread blocking evidence is missing or invalid',
+    )
+    const noClipping = JSON.parse(
+      JSON.stringify({
+        ...before,
+        correctness: { ...before.correctness, printTextboxClipping: undefined },
+      }),
+    )
+    expect(() => comparePerformanceReports(noClipping, noClipping)).toThrow(
+      'PDF page geometry evidence is missing',
+    )
+    const badDimensions = JSON.parse(
+      JSON.stringify({
+        ...before,
+        correctness: { ...before.correctness, pageSizesPoints: [{ width: 0, height: null }] },
+      }),
+    )
+    expect(() => comparePerformanceReports(badDimensions, badDimensions)).toThrow(
+      'PDF page geometry evidence is missing',
+    )
   })
 })

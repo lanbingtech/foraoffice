@@ -48,3 +48,33 @@ it('excludes only src-less ProseMirror separator images while retaining genuine 
     vi.unstubAllGlobals()
   }
 })
+
+it('requires the expected body images even when no broken image elements survive', () => {
+  vi.stubGlobal('matchMedia', () => ({ matches: false }))
+  document.body.innerHTML =
+    '<div class="ProseMirror"><p>End</p><div class="page-gap"><img src="generated.png"></div>' +
+    '<div class="doc-textbox"></div></div>'
+  try {
+    const input = { end: 'End', textRuns: ['End'], minimumBodyImages: 1 }
+    const image = document.querySelector('img')!
+    Object.defineProperties(image, {
+      complete: { value: true },
+      naturalWidth: { value: 20 },
+    })
+    expect(readLayoutProbe(input)).toMatchObject({
+      complete: true,
+      imagesReady: false,
+      images: 1,
+      bodyImages: 0,
+      minimumBodyImages: 1,
+      brokenImages: [],
+    })
+    document.querySelector('.doc-textbox')!.append(image)
+    expect(readLayoutProbe(input)).toMatchObject({ imagesReady: false, bodyImages: 0 })
+    document.querySelector('.ProseMirror > p')!.append(image)
+    expect(readLayoutProbe(input)).toMatchObject({ imagesReady: true, bodyImages: 1 })
+  } finally {
+    document.body.innerHTML = ''
+    vi.unstubAllGlobals()
+  }
+})

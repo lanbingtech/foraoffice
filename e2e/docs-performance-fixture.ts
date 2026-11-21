@@ -80,6 +80,7 @@ export async function buildPerformanceFixture(scale = 1): Promise<Uint8Array> {
 /** Independent OOXML tail oracle, used alongside pending-work and layout checks. */
 export interface DocumentOracle {
   tail: string
+  minimumBodyImages: number
   textRuns: string[]
   paragraphs: Array<{ text: string; start: number }>
   tables: string
@@ -122,6 +123,58 @@ function documentBody(xml: string, retainNamespace = false): Xml {
   if (!body || (bodyNamespace !== undefined && bodyNamespace !== namespace))
     throw new Error('TOC verification requires the WordprocessingML body namespace')
   return body['w:body'] as Xml
+}
+
+function containsTextboxShape(nodes: Xml): boolean {
+  return nodes.some((node) =>
+    Object.entries(node).some(
+      ([name, children]) =>
+        Array.isArray(children) &&
+        (name === 'textbox' ||
+          name === 'txbxContent' ||
+          name === 'textpath' ||
+          containsTextboxShape(children)),
+    ),
+  )
+}
+
+/** Lower bound for inline embedded body pictures that should produce IMG elements.
+ * Floating graphics and paragraphs with textbox shapes can render as backgrounds. */
+function countBodyPictures(nodes: Xml): number {
+  let count = 0
+  for (const node of nodes) {
+    for (const [name, children] of Object.entries(node)) {
+      if (!Array.isArray(children)) continue
+      if (name === 'del' || name === 'moveFrom' || name === 'txbxContent') continue
+      if (name === 'p' && containsTextboxShape(children)) continue
+      if (name === 'AlternateContent') {
+        const candidates = xmlChildren(children, 'Choice')
+        const fallback = xmlChildren(children, 'Fallback')[0] ?? []
+        count += Math.min(countBodyPictures(fallback), ...candidates.map(countBodyPictures))
+      } else if (name === 'drawing') {
+        const blips = xmlChildren(children, 'inline')
+          .flatMap((anchor) => xmlChildren(anchor, 'graphic'))
+          .flatMap((graphic) => xmlChildren(graphic, 'graphicData'))
+          .flatMap((data) => xmlChildren(data, 'pic'))
+          .flatMap((picture) => xmlChildren(picture, 'blipFill'))
+        if (blips.some((fill) => fill.some((entry) => entry.blip && xmlAttribute(entry, 'embed'))))
+          count++
+      } else if (name === 'pict' || name === 'object') {
+        if (
+          children.some(
+            (shape) =>
+              Array.isArray(shape.shape) &&
+              !/\bposition\s*:/i.test(String(xmlAttribute(shape, 'style') ?? '')) &&
+              (shape.shape as Xml).some((entry) => entry.imagedata && xmlAttribute(entry, 'id')),
+          )
+        )
+          count++
+      } else {
+        count += countBodyPictures(children)
+      }
+    }
+  }
+  return count
 }
 
 function tocFieldResult(paragraph: Xml) {
@@ -327,6 +380,7 @@ export async function documentOracle(
   )
   return {
     tail,
+    minimumBodyImages: countBodyPictures(body),
     textRuns,
     paragraphs,
     tables: JSON.stringify(tables),

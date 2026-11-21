@@ -63,11 +63,54 @@ export function assertExternalArtifacts(repository: string, artifacts: string): 
     throw new Error('Performance artifacts must stay outside the source repository')
 }
 
+export type PerformancePdfGeometry = {
+  pdfPages: number
+  pageSizesPoints: Array<{ width: number; height: number }>
+  printTextboxClipping: Record<string, number[]>
+}
+
 type Report = {
   status: string
   condition: unknown
-  correctness?: { printTextboxClipping?: Record<string, number[]> }
+  correctness?: PerformancePdfGeometry
+  mainThreadBlocking: { scope: string; maxMs: number; over50ms: number }
   summaries: Record<string, ReturnType<typeof summarizeScenario>>
+}
+
+function hasPdfGeometry(
+  value: PerformancePdfGeometry | undefined,
+): value is PerformancePdfGeometry {
+  if (!value || !Number.isSafeInteger(value.pdfPages) || value.pdfPages <= 0) return false
+  const { pageSizesPoints, printTextboxClipping } = value
+  return (
+    Array.isArray(pageSizesPoints) &&
+    pageSizesPoints.length === value.pdfPages &&
+    pageSizesPoints.every(
+      (page) =>
+        Number.isFinite(page?.width) &&
+        page.width > 0 &&
+        Number.isFinite(page?.height) &&
+        page.height > 0,
+    ) &&
+    !!printTextboxClipping &&
+    typeof printTextboxClipping === 'object' &&
+    !Array.isArray(printTextboxClipping) &&
+    Object.values(printTextboxClipping).every(
+      (pages) => Array.isArray(pages) && pages.every(Number.isFinite),
+    )
+  )
+}
+
+function hasBlockingEvidence(value: Report['mainThreadBlocking'] | undefined) {
+  return (
+    value &&
+    typeof value.scope === 'string' &&
+    value.scope.trim() &&
+    Number.isFinite(value.maxMs) &&
+    value.maxMs >= 0 &&
+    Number.isSafeInteger(value.over50ms) &&
+    value.over50ms >= 0
+  )
 }
 
 /** A signed delta is evidence, never an automatic performance acceptance decision. */
@@ -76,18 +119,34 @@ export function comparePerformanceReports(before: Report, after: Report) {
     throw new Error('Both reports must be complete')
   if (JSON.stringify(before.condition) !== JSON.stringify(after.condition))
     throw new Error('Performance conditions differ')
+  const aGeometry = before.correctness
+  const bGeometry = after.correctness
+  if (!hasPdfGeometry(aGeometry) || !hasPdfGeometry(bGeometry))
+    throw new Error('PDF page geometry evidence is missing')
   if (
-    JSON.stringify(before.correctness?.printTextboxClipping) !==
-    JSON.stringify(after.correctness?.printTextboxClipping)
+    aGeometry.pdfPages !== bGeometry.pdfPages ||
+    JSON.stringify(aGeometry.pageSizesPoints) !== JSON.stringify(bGeometry.pageSizesPoints)
+  )
+    throw new Error('PDF page count or geometry differs between reports')
+  if (
+    JSON.stringify(aGeometry.printTextboxClipping) !==
+    JSON.stringify(bGeometry.printTextboxClipping)
   )
     throw new Error('Printed textbox clipping differs between reports')
+  if (
+    !hasBlockingEvidence(before.mainThreadBlocking) ||
+    !hasBlockingEvidence(after.mainThreadBlocking)
+  )
+    throw new Error('Main-thread blocking evidence is missing or invalid')
+  if (before.mainThreadBlocking.scope !== after.mainThreadBlocking.scope)
+    throw new Error('Main-thread blocking scopes differ')
   const names = Object.keys(before.summaries).sort()
   if (
     !names.length ||
     JSON.stringify(names) !== JSON.stringify(Object.keys(after.summaries).sort())
   )
     throw new Error('Performance scenarios differ or are empty')
-  return Object.fromEntries(
+  const scenarios = Object.fromEntries(
     names.map((name) => {
       const a = before.summaries[name]
       const b = after.summaries[name]
@@ -113,4 +172,8 @@ export function comparePerformanceReports(before: Report, after: Report) {
       ]
     }),
   )
+  return {
+    scenarios,
+    mainThreadBlocking: { before: before.mainThreadBlocking, after: after.mainThreadBlocking },
+  }
 }

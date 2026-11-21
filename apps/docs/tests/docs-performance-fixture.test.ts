@@ -2,7 +2,11 @@
 import { expect, it, vi } from 'vitest'
 import JSZip from 'jszip'
 import { XMLParser } from 'fast-xml-parser'
-import { buildPerformanceFixture, documentTail } from '../../../e2e/docs-performance-fixture'
+import {
+  buildPerformanceFixture,
+  documentOracle,
+  documentTail,
+} from '../../../e2e/docs-performance-fixture'
 
 it('generates identical public fixture bytes on different run dates', async () => {
   vi.useFakeTimers({ toFake: ['Date'] })
@@ -18,6 +22,7 @@ it('generates identical public fixture bytes on different run dates', async () =
     expect((await zip.file('word/media/equation.wmf')!.async('uint8array')).length).toBeGreaterThan(
       0,
     )
+    expect((await documentOracle(first)).minimumBodyImages).toBe(9)
     const xml = new XMLParser({ ignoreAttributes: false }).parse(
       await zip.file('word/document.xml')!.async('string'),
     )
@@ -44,6 +49,44 @@ it('generates identical public fixture bytes on different run dates', async () =
   } finally {
     vi.useRealTimers()
   }
+})
+
+it('counts picture placements rather than package parts and counts only one compatibility branch', async () => {
+  const zip = new JSZip()
+  const drawing = (contents: string) =>
+    '<w:drawing><wp:inline><a:graphic><a:graphicData>' +
+    contents +
+    '</a:graphicData></a:graphic></wp:inline></w:drawing>'
+  const picture = (reference: string) =>
+    drawing('<pic:pic><pic:blipFill><a:blip ' + reference + '/></pic:blipFill></pic:pic>')
+  const embedded = picture('r:embed="rId1"')
+  const fallback = '<w:pict><v:shape><v:imagedata r:id="rId2"/></v:shape></w:pict>'
+  const alternate = (fallback: string) =>
+    '<mc:AlternateContent><mc:Choice Requires="a">' +
+    embedded +
+    '</mc:Choice>' +
+    fallback +
+    '</mc:AlternateContent>'
+  zip.file(
+    'word/document.xml',
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body>' +
+      '<w:p><w:r>' +
+      embedded +
+      embedded +
+      alternate('<mc:Fallback>' + fallback + '</mc:Fallback>') +
+      alternate('') +
+      picture('r:link="external"') +
+      drawing('<a:graphicFrame><a:blip r:embed="shape-fill"/></a:graphicFrame>') +
+      embedded.replaceAll('wp:inline', 'wp:anchor') +
+      fallback.replace('<v:shape>', '<v:shape style="position:absolute">') +
+      '</w:r></w:p><w:p><w:r>' +
+      fallback +
+      '<w:pict><v:shape><v:textbox><w:txbxContent/></v:textbox></v:shape></w:pict>' +
+      '</w:r></w:p><w:p><w:r><w:t>End</w:t></w:r></w:p></w:body></w:document>',
+  )
+  expect(
+    (await documentOracle(await zip.generateAsync({ type: 'uint8array' }))).minimumBodyImages,
+  ).toBe(3)
 })
 
 it('uses the final nonempty body paragraph rather than text inside a previous table', async () => {

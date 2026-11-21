@@ -13,7 +13,15 @@ type ProbeWindow = Window & {
   __pageDebug?: { slices?: unknown[] }
 }
 
-export function readLayoutProbe({ end, textRuns }: { end: string; textRuns: string[] }) {
+export function readLayoutProbe({
+  end,
+  textRuns,
+  minimumBodyImages = 0,
+}: {
+  end: string
+  textRuns: string[]
+  minimumBodyImages?: number
+}) {
   const probeStarted = performance.now()
   const win = window as ProbeWindow
   const activity = win.__docsLayoutActivity?.snapshot()
@@ -22,6 +30,12 @@ export function readLayoutProbe({ end, textRuns }: { end: string; textRuns: stri
   const images = allImages.filter(
     (image) => !(image.classList.contains('ProseMirror-separator') && !image.hasAttribute('src')),
   )
+  const bodyImages = images.filter(
+    (image) =>
+      !image.closest(
+        '.doc-textbox,.page-gap,.page-gap-inline,.page-repeat-header,.page-float-carry',
+      ),
+  ).length
   let texts = ''
   if (pm) {
     const walker = document.createTreeWalker(pm, NodeFilter.SHOW_TEXT)
@@ -65,8 +79,12 @@ export function readLayoutProbe({ end, textRuns }: { end: string; textRuns: stri
       orderedTextPresent,
       missingRunIndex,
     },
-    imagesReady: images.every((image) => image.complete && image.naturalWidth > 0),
+    imagesReady:
+      bodyImages >= minimumBodyImages &&
+      images.every((image) => image.complete && image.naturalWidth > 0),
     images: images.length,
+    bodyImages,
+    minimumBodyImages,
     excludedSeparatorImages: allImages.length - images.length,
     brokenImages: images.flatMap((image, index) =>
       image.complete && image.naturalWidth > 0

@@ -44,6 +44,8 @@ export function createPerformanceFocusGuard(
   let checks = 0
   const inspect = async () => {
     if (host === 'browser') return 'not-applicable-headless-browser' as const
+    if (host === 'electron' && process.platform !== 'win32')
+      return 'not-applicable-non-windows-electron' as const
     if (!nativeProcessId) throw new Error('Native launcher-owned PID is missing')
     const evidence = inspectNativeFocus
       ? await inspectNativeFocus(nativeProcessId)

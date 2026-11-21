@@ -7,7 +7,11 @@ import { cpus, platform, release, totalmem } from 'node:os'
 import { join, resolve } from 'node:path'
 import JSZip from 'jszip'
 import { PDFDocument } from 'pdf-lib'
-import { buildPerformanceFixture, documentOracle } from './docs-performance-fixture'
+import {
+  buildPerformanceFixture,
+  documentOracle,
+  type DocumentOracle,
+} from './docs-performance-fixture'
 import { collectPlatformFonts } from './docs-performance-fonts'
 import { captureFailureEvidence } from './docs-performance-evidence'
 import {
@@ -49,6 +53,7 @@ import {
   withDeadline,
   retainRunCondition,
   type PerformanceObservation,
+  type PerformancePdfGeometry,
 } from './docs-performance-result'
 
 type ProbeWindow = Window & {
@@ -128,7 +133,7 @@ async function installProbe(page: Page) {
 
 async function waitForLayout(
   page: Page,
-  tail: string,
+  { tail, minimumBodyImages }: Pick<DocumentOracle, 'tail' | 'minimumBodyImages'>,
   timeout = 180_000,
   newerThan = -1,
   measurementStart = now(),
@@ -141,7 +146,7 @@ async function waitForLayout(
   let unchangedSince = 0
   while (Date.now() < deadline) {
     const state = await withDeadline(
-      page.evaluate(readLayoutProbe, { end: tail, textRuns }),
+      page.evaluate(readLayoutProbe, { end: tail, textRuns, minimumBodyImages }),
       Math.max(1, deadline - Date.now()),
       'layout probe',
     ).catch((error: unknown) => {
@@ -387,10 +392,11 @@ test('production document performance and correctness evidence', async () => {
   const primerText = 'Performance runtime primer'
   const primer = await buildDocx({ bodyXml: `<w:p><w:r><w:t>${primerText}</w:t></w:r></w:p>` })
   const tail = oracle.tail
-  const samples = process.env.FORAOFFICE_PERF_SMOKE === '1' ? 1 : 30
+  const smoke = process.env.FORAOFFICE_PERF_SMOKE === '1'
+  const samples = smoke ? 1 : 30
   const nativeSamples = samples === 1 ? 2 : samples // Smoke also exercises actual undo between native compositions.
-  const opens = process.env.FORAOFFICE_PERF_SMOKE === '1' ? 1 : 10
-  const launches = process.env.FORAOFFICE_PERF_SMOKE === '1' ? 1 : 5
+  const opens = smoke ? 1 : 10
+  const launches = smoke ? 1 : 5
   const edits = [
     'paragraph-start',
     'paragraph-middle',
@@ -468,6 +474,7 @@ test('production document performance and correctness evidence', async () => {
       private: !!process.env.FORAOFFICE_PERF_DOCX,
       archivalTextRuns: oracle.textRuns.length,
       orderedMainStoryRuns: mainStory.textRuns.length,
+      minimumBodyImages: oracle.minimumBodyImages,
       sections: JSON.parse(oracle.sections),
     },
     machine: {
@@ -484,7 +491,7 @@ test('production document performance and correctness evidence', async () => {
     editFingerprintMethod:
       'authored DOM text and root paragraph count; exclude only page-gap/repeat widgets and doc-toc-line generated doc-toc-page; localized target check during input, full exact authored edit/undo checks outside active rAF/longtask recording',
     focusPolicy:
-      'Qt/Electron exact native HWND/start identity and foreground/focus verified at grouped phase endpoints; continuously armed DOM blur/visibility records and lightweight checks before/after each sample reject the whole phase on loss; headless browser native foreground not applicable; activation/native inspection excluded from sample-input timing',
+      'Windows Qt/Electron exact native HWND/start identity and foreground/focus verified at grouped phase endpoints; all hosts reject intervals with DOM blur or visibility loss; non-Windows Electron and headless browser use DOM focus only; activation/native inspection excluded from sample-input timing',
     diagnostics:
       'internal pagination activity v1 and lazy source-story/cell diagnostics v1; same product instrumentation required on both sides',
     sourceStoryMethod:
@@ -501,7 +508,8 @@ test('production document performance and correctness evidence', async () => {
   }
   let condition: Record<string, unknown> | undefined
   let platformFonts: Awaited<ReturnType<typeof collectPlatformFonts>> | undefined
-  let correctness: Record<string, unknown> | undefined
+  let correctness: (PerformancePdfGeometry & Record<string, unknown>) | undefined
+  let formalEvidenceIncomplete: boolean
   let currentScenario = 'process-start-to-layout-verified-observation'
   let session: PerformanceSession | undefined
   let focus: ReturnType<typeof createPerformanceFocusGuard> | undefined
@@ -622,9 +630,14 @@ test('production document performance and correctness evidence', async () => {
       focus = createPerformanceFocusGuard(host, session.page, session.nativeProcessId, session)
       details.push({ launch, operation: 'foreground-control', observations: focus.observations })
       await focus.begin()
-      const prepared = await waitForLayout(session.page, primerText, 180_000, -1, started, [
-        primerText.replace(/\s+/g, ''),
-      ])
+      const prepared = await waitForLayout(
+        session.page,
+        { tail: primerText, minimumBodyImages: 0 },
+        180_000,
+        -1,
+        started,
+        [primerText.replace(/\s+/g, '')],
+      )
       await focus.end()
       const primerGeneration = prepared.activity!.generation
       await focus.begin()
@@ -650,7 +663,7 @@ test('production document performance and correctness evidence', async () => {
       const verificationStarted = now()
       const state = await waitForLayout(
         session.page,
-        tail,
+        oracle,
         180_000,
         primerGeneration,
         started,
@@ -714,7 +727,7 @@ test('production document performance and correctness evidence', async () => {
       push('hot-open-to-first-diagnostic-idle-observation', firstIdleMs)
       const state = await waitForLayout(
         live.page,
-        tail,
+        oracle,
         180_000,
         generation,
         started,
@@ -755,7 +768,7 @@ test('production document performance and correctness evidence', async () => {
           scenario === 'table' ? 'table' : 'paragraph',
           fraction,
         )
-        await waitForLayout(live.page, tail)
+        await waitForLayout(live.page, oracle)
         const mainEditor = live.page.locator('.ProseMirror.doc-page').first()
         const beforeEdit = await mainEditor.evaluate(readEditFingerprint)
         const editTarget = mainEditor.locator(before.targetSelector).nth(before.targetIndex)
@@ -818,7 +831,7 @@ test('production document performance and correctness evidence', async () => {
           }
         }, inputIndex)
         const verificationStarted = now()
-        const state = await waitForLayout(live.page, tail, 180_000, -1, started)
+        const state = await waitForLayout(live.page, oracle, 180_000, -1, started)
         push(`${scenario}-layout-verified-observation`, now() - started)
         const afterEdit = await mainEditor.evaluate(readEditFingerprint)
         if (scenario === 'enter') expect(afterEdit.text).toBe(beforeEdit.text)
@@ -855,7 +868,7 @@ test('production document performance and correctness evidence', async () => {
           },
         })
         blockingTasks.push(...probe.longTasks.map((entry) => entry.duration))
-        await live.page.keyboard.press('Control+z')
+        await live.page.keyboard.press('ControlOrMeta+z')
         await expect.poll(() => mainEditor.evaluate(readEditFingerprint)).toEqual(beforeEdit)
         await expect
           .poll(() =>
@@ -865,7 +878,7 @@ test('production document performance and correctness evidence', async () => {
               .evaluate((pm) => pm.querySelectorAll(':scope > p').length),
           )
           .toBe(beforeEdit.paragraphs)
-        await waitForLayout(live.page, tail)
+        await waitForLayout(live.page, oracle)
       }
       await focus!.end()
     }
@@ -896,7 +909,7 @@ test('production document performance and correctness evidence', async () => {
         probe.activity = false
         return { frames: probe.frames.splice(0), longTasks: probe.longTasks.splice(0) }
       })
-      await waitForLayout(live.page, tail)
+      await waitForLayout(live.page, oracle)
       await focus!.check()
       details.push({ scenario: 'wheel', index: i, probe })
       blockingTasks.push(...probe.longTasks.map((entry) => entry.duration))
@@ -971,7 +984,7 @@ test('production document performance and correctness evidence', async () => {
           })
         const commitStarted = now()
         await nativeAction({ ...requested, action: 'commit' })
-        await waitForLayout(live.page, tail)
+        await waitForLayout(live.page, oracle)
         const committed = await model()
         if (committed.documentId !== before.documentId)
           throw new Error('Native IME document identity changed')
@@ -1002,7 +1015,7 @@ test('production document performance and correctness evidence', async () => {
           .toBe(true)
         const cancelStarted = now()
         await nativeAction({ ...requested, action: 'cancel' })
-        await waitForLayout(live.page, tail)
+        await waitForLayout(live.page, oracle)
         const cancelled = await model()
         if (cancelled.documentId !== committed.documentId || cancelled.text !== committed.text)
           throw new Error('Native composition cancel changed committed model content')
@@ -1025,9 +1038,9 @@ test('production document performance and correctness evidence', async () => {
           cancelledModelSha256: sha(cancelled.text),
         })
         if (i + 1 < nativeSamples) {
-          await live.page.keyboard.press('Control+z')
+          await live.page.keyboard.press('ControlOrMeta+z')
           await expect.poll(async () => (await model()).text).toBe(before.text)
-          await waitForLayout(live.page, tail)
+          await waitForLayout(live.page, oracle)
           expect(
             await live.page.locator('.ProseMirror.doc-page').first().evaluate(readEditFingerprint),
           ).toEqual(beforeFingerprint)
@@ -1055,9 +1068,9 @@ test('production document performance and correctness evidence', async () => {
       saveMarker,
     )
     await live.page.keyboard.insertText(saveMarker)
-    await waitForLayout(live.page, tail)
+    await waitForLayout(live.page, oracle)
     const observedTocPages = await live.page.evaluate(() =>
-      [...document.querySelectorAll('.ProseMirror.doc-page .doc-toc-line[data-toc-anchor]')]
+      [...window.document.querySelectorAll('.ProseMirror.doc-page .doc-toc-line[data-toc-anchor]')]
         .filter((line) => !line.closest('.page-gap,.page-repeat-header'))
         .map((line) => ({
           anchor: line.getAttribute('data-toc-anchor'),
@@ -1104,7 +1117,7 @@ test('production document performance and correctness evidence', async () => {
       throw new Error('Saved document reopen returned false')
     const reopened = await waitForLayout(
       live.page,
-      savedMainStory.tail,
+      { tail: savedMainStory.tail, minimumBodyImages: oracle.minimumBodyImages },
       180_000,
       generation,
       now(),
@@ -1320,7 +1333,7 @@ test('production document performance and correctness evidence', async () => {
       errors,
     }
     await writeFile(join(root, 'results.json'), JSON.stringify(report, null, 2))
-    if (process.env.FORAOFFICE_PERF_BEFORE) {
+    if (process.env.FORAOFFICE_PERF_BEFORE && report.status === 'complete') {
       const before = JSON.parse(await readFile(process.env.FORAOFFICE_PERF_BEFORE, 'utf8'))
       await writeFile(
         join(root, 'comparison.json'),
@@ -1328,7 +1341,7 @@ test('production document performance and correctness evidence', async () => {
           {
             before: before.metadata,
             after: metadata,
-            scenarios: comparePerformanceReports(before, report),
+            ...comparePerformanceReports(before, report),
             interpretation:
               'Signed changes only; compare A/A noise and correctness before judging improvement or regression.',
           },
@@ -1338,5 +1351,9 @@ test('production document performance and correctness evidence', async () => {
       )
     }
     console.log(`Docs performance evidence: ${root}`)
+    formalEvidenceIncomplete =
+      report.status === 'incomplete' && (!smoke || !!process.env.FORAOFFICE_PERF_BEFORE)
   }
+  if (formalEvidenceIncomplete)
+    throw new Error('Formal performance evidence is incomplete; see results.json')
 })

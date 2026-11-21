@@ -298,75 +298,79 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
       )
       // The executable launcher can be a distinct process with no native window.
       const main = await app.evaluate(() => ({ pid: process.pid, versions: process.versions }))
-      const focusInspector = openWindowsNativeFocusInspector()
+      const focusInspector =
+        process.platform === 'win32' ? openWindowsNativeFocusInspector() : undefined
+      async function activateForeground(owner: NativeImeOwner) {
+        const window = await app.browserWindow(page)
+        try {
+          const initial = await window.evaluate((w) => {
+            const handle = w.getNativeWindowHandle()
+            return {
+              pid: process.pid,
+              handle: (handle.length === 4
+                ? handle.readUInt32LE()
+                : handle.readBigUInt64LE()
+              ).toString(),
+              alwaysOnTop: w.isAlwaysOnTop(),
+            }
+          })
+          if (initial.pid !== owner.targetProcessId || initial.handle !== owner.windowHandle)
+            throw new Error('Electron BrowserWindow does not match the native measurement owner')
+          try {
+            // Expose the owned native caption before the guarded Windows mouse click.
+            await window.evaluate((w) => {
+              w.setAlwaysOnTop(true)
+              w.moveTop()
+            })
+            const { stdout } = await promisify(execFile)(
+              'powershell.exe',
+              [
+                '-NoProfile',
+                '-NonInteractive',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-File',
+                resolve(__dirname, 'native-owned-caption.ps1'),
+                '-ProcessId',
+                String(owner.targetProcessId),
+                '-Handle',
+                owner.windowHandle,
+                '-StartUtc',
+                owner.processStartTime,
+              ],
+              { windowsHide: true, timeout: 12_000, encoding: 'utf8' },
+            )
+            return JSON.parse(stdout)
+          } finally {
+            await window.evaluate((w, alwaysOnTop) => {
+              w.setAlwaysOnTop(alwaysOnTop)
+              if (w.isAlwaysOnTop() !== alwaysOnTop)
+                throw new Error('Failed to restore the original Electron window layer')
+            }, initial.alwaysOnTop)
+          }
+        } finally {
+          await window.dispose()
+        }
+      }
       return {
         page,
         nativeProcessId: main.pid,
-        inspectNativeFocus: focusInspector.inspect,
-        async activateForeground(owner) {
-          const window = await app.browserWindow(page)
-          try {
-            const initial = await window.evaluate((w) => {
-              const handle = w.getNativeWindowHandle()
-              return {
-                pid: process.pid,
-                handle: (handle.length === 4
-                  ? handle.readUInt32LE()
-                  : handle.readBigUInt64LE()
-                ).toString(),
-                alwaysOnTop: w.isAlwaysOnTop(),
-              }
-            })
-            if (initial.pid !== owner.targetProcessId || initial.handle !== owner.windowHandle)
-              throw new Error('Electron BrowserWindow does not match the native measurement owner')
-            try {
-              // Expose the owned native caption before the guarded Windows mouse click.
-              await window.evaluate((w) => {
-                w.setAlwaysOnTop(true)
-                w.moveTop()
-              })
-              const { stdout } = await promisify(execFile)(
-                'powershell.exe',
-                [
-                  '-NoProfile',
-                  '-NonInteractive',
-                  '-ExecutionPolicy',
-                  'Bypass',
-                  '-File',
-                  resolve(__dirname, 'native-owned-caption.ps1'),
-                  '-ProcessId',
-                  String(owner.targetProcessId),
-                  '-Handle',
-                  owner.windowHandle,
-                  '-StartUtc',
-                  owner.processStartTime,
-                ],
-                { windowsHide: true, timeout: 12_000, encoding: 'utf8' },
-              )
-              return JSON.parse(stdout)
-            } finally {
-              await window.evaluate((w, alwaysOnTop) => {
-                w.setAlwaysOnTop(alwaysOnTop)
-                if (w.isAlwaysOnTop() !== alwaysOnTop)
-                  throw new Error('Failed to restore the original Electron window layer')
-              }, initial.alwaysOnTop)
-            }
-          } finally {
-            await window.dispose()
-          }
-        },
+        inspectNativeFocus: focusInspector?.inspect,
+        activateForeground: focusInspector ? activateForeground : undefined,
         evidence: {
           kind: 'electron',
           rendering: 'standalone-product',
-          nativeFocusProbe: 'persistent-win32-inspection',
+          nativeFocusProbe: focusInspector
+            ? 'persistent-win32-inspection'
+            : 'not-applicable-non-windows-electron',
           versions: main.versions,
         },
         async open() {
-          await page.keyboard.press('Control+o')
+          await page.keyboard.press('ControlOrMeta+o')
           return null
         },
         async save() {
-          await page.keyboard.press('Control+s')
+          await page.keyboard.press('ControlOrMeta+s')
         },
         async exportPdf() {
           await triggerPdf(page)
@@ -387,7 +391,7 @@ export async function launchPerformanceHost(options: HostOptions): Promise<Perfo
           } finally {
             clearTimeout(timer)
             if (child.exitCode === null && child.signalCode === null) child.kill()
-            await focusInspector.close()
+            await focusInspector?.close()
           }
         },
       }

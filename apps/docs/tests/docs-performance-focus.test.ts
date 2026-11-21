@@ -1,9 +1,13 @@
 // @vitest-environment node
-import { expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Page } from '@playwright/test'
 const native = vi.hoisted(() => vi.fn())
 vi.mock('../../../e2e/windows-native-ime', () => ({ runWindowsNativeIme: native }))
 import { createPerformanceFocusGuard } from '../../../e2e/docs-performance-focus'
+
+const actualPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
+beforeEach(() => Object.defineProperty(process, 'platform', { value: 'win32' }))
+afterEach(() => Object.defineProperty(process, 'platform', actualPlatform))
 
 const owner = {
   targetProcessId: 1234,
@@ -89,6 +93,26 @@ it('records headless browser OS foreground as not applicable without launching a
   const after = await guard.end()
   expect(before.native).toBe('not-applicable-headless-browser')
   expect(after.native).toBe('not-applicable-headless-browser')
+  expect(native).not.toHaveBeenCalled()
+})
+
+it('checks DOM focus on non-Windows Electron without launching the Windows helper', async () => {
+  Object.defineProperty(process, 'platform', { value: 'darwin' })
+  native.mockReset()
+  const actualPage = page()
+  const guard = createPerformanceFocusGuard(
+    'electron',
+    actualPage as unknown as Page,
+    owner.targetProcessId,
+  )
+  expect((await guard.begin()).native).toBe('not-applicable-non-windows-electron')
+  actualPage.evaluate.mockResolvedValueOnce({
+    visibilityState: 'visible',
+    hasFocus: false,
+    losses: [{ type: 'blur', at: 17 }],
+  })
+  await expect(guard.check()).rejects.toThrow('Focus or visibility was lost')
+  expect((await guard.end()).native).toBe('not-applicable-non-windows-electron')
   expect(native).not.toHaveBeenCalled()
 })
 
