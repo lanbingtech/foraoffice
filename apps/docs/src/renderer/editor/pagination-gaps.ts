@@ -986,25 +986,27 @@ export function syncCutOverlays(
   anchors: LineAnchor[],
   zoomFactor: number,
 ): void {
-  let layer = wrap.querySelector(':scope > .page-cut-overlays') as HTMLElement | null
+  const layer = wrap.querySelector<HTMLElement>(':scope > .page-cut-overlays')
   if (anchors.length === 0) {
     layer?.remove()
     return
   }
-  if (!layer) {
-    layer = document.createElement('div')
-    layer.className = 'page-cut-overlays'
-    wrap.appendChild(layer)
-  }
-  layer.textContent = ''
   const wrapTop = wrap.getBoundingClientRect().top
+  const markers = wrap.ownerDocument.createDocumentFragment()
   for (const a of anchors) {
     const top = anchorTop(a)
     if (top == null) continue
-    const el = document.createElement('div')
+    const el = wrap.ownerDocument.createElement('div')
     el.className = 'page-gap-cut page-cut-overlay'
     el.style.top = `${(top - wrapTop) / zoomFactor}px`
-    layer.appendChild(el)
+    markers.appendChild(el)
+  }
+  if (layer) layer.replaceChildren(markers)
+  else {
+    const next = wrap.ownerDocument.createElement('div')
+    next.className = 'page-cut-overlays'
+    next.appendChild(markers)
+    wrap.appendChild(next)
   }
 }
 
@@ -2078,9 +2080,12 @@ export function pinCellBoxesToPage(
     while (block && block.parentElement !== pm) block = block.parentElement
     return block ? parseFloat(getComputedStyle(block).getPropertyValue('--page-cx')) || 0 : 0
   }
-  const rects = boxes.map((box) => box.getBoundingClientRect())
+  const measured = boxes.map((box) => {
+    const rect = box.getBoundingClientRect()
+    return { rect, pageLeft: rect.height > 0 ? pageLeftOf(box) : 0 }
+  })
   boxes.forEach((box, i) => {
-    const r = rects[i]
+    const { rect: r, pageLeft } = measured[i]
     if (r.height <= 0) return
     const appliedX = parseFloat(box.dataset.cellPageDx ?? '') || 0
     const appliedY = parseFloat(box.dataset.cellPageDy ?? '') || 0
@@ -2098,7 +2103,7 @@ export function pinCellBoxesToPage(
     // only a paper-edge X (relativeFrom="page") skips the margin: margin-relative
     // and column-resolved offsets measure from the column start
     const fromPaperEdge = box.dataset.pageRelXFrom === 'page'
-    const targetLeft = pmRect.left + (pageLeftOf(box) + (fromPaperEdge ? offX : ml + offX)) * factor
+    const targetLeft = pmRect.left + (pageLeft + (fromPaperEdge ? offX : ml + offX)) * factor
     const dy = (targetTop - naturalTop) / factor
     const dx = (targetLeft - naturalLeft) / factor
     if (Math.abs(dy - appliedY) > 0.5 || !box.dataset.cellPageDy) {

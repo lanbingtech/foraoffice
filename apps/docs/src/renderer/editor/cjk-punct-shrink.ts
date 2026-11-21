@@ -3,7 +3,13 @@ import { isEastAsianChar, isEastAsianLangTag, isHangulChar } from '@genoffice/do
 import { Plugin, PluginKey, type EditorState } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
-import { SettledParagraphCache, noteFloatTransaction, type ReuseNoOpWhile } from './settled-measure'
+import {
+  PhasedParagraphMeasurement,
+  SettledParagraphCache,
+  noteFloatTransaction,
+  paragraphDecorationsChanged,
+  type ReuseNoOpWhile,
+} from './settled-measure'
 import { sameLine } from './justify-shrink'
 import { rangeSlot } from '../dom-range'
 import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
@@ -509,37 +515,47 @@ class CjkPunctShrinkView {
   private retryRaf = 0
   private retries = 0
   private pendingSettlement = false
+  private phasedDoc?: ProseMirrorNode
+  private measurement: PhasedParagraphMeasurement
   private resizeObserver?: ResizeObserver
   private lastDomWidth = -1
   private onFontsLoaded = () => {
     // canvas advances measured before a @font-face finished loading are stale
     advanceCache.clear()
     this.invalidate()
-    this.measure()
+    this.measurement.request()
   }
   // style-level w:jc arrives with the doc stylesheet after setContent measured
   private onDocCss = () => {
     this.invalidate()
-    this.measure()
+    this.requestLayoutMeasurement()
   }
   private onWrapWidths = (event: Event) => {
+    this.measurement.cancel()
     const { detail } = event as CustomEvent<WrapWidthChanges>
     if (detail) {
       this.results.invalidateBlocks(this.view, detail)
       this.seenSigs.clear()
       this.frozen = false
     } else this.invalidate()
-    this.measure()
+    this.requestLayoutMeasurement()
   }
   private onPhasedSettled = () => {
-    if (this.pendingSettlement) this.measure()
+    if (!this.pendingSettlement) return
+    this.phasedDoc = this.view.state.doc
+    this.measurement.start()
   }
 
   constructor(
     private view: EditorView,
     private storage: CjkPunctShrinkStorage,
   ) {
-    this.measure()
+    this.measurement = new PhasedParagraphMeasurement(
+      view,
+      () => this.prepareMeasurement(),
+      () => this.results.discardMeasuredResults(),
+    )
+    this.measurement.request()
     document.fonts?.addEventListener('loadingdone', this.onFontsLoaded)
     document.addEventListener(DOC_CSS_COMMITTED_EVENT, this.onDocCss)
     view.dom.addEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onWrapWidths)
@@ -550,7 +566,7 @@ class CjkPunctShrinkView {
         if (w === this.lastDomWidth) return
         this.lastDomWidth = w
         this.invalidate()
-        this.measure()
+        this.measurement.request()
       })
       this.resizeObserver.observe(view.dom)
     }
@@ -558,6 +574,7 @@ class CjkPunctShrinkView {
 
   /** layout input changed (resize, fonts, stylesheet): every paragraph re-measures */
   private invalidate() {
+    this.measurement.cancel()
     this.results.clear()
     this.restartConvergence()
   }
@@ -568,19 +585,29 @@ class CjkPunctShrinkView {
     this.lastSig = ''
   }
 
+  private requestLayoutMeasurement() {
+    // Pagination may commit new widths after the first phased measurement.
+    if (this.phasedDoc === this.view.state.doc) this.measurement.start()
+    else this.measurement.request()
+  }
+
   update(view: EditorView, prevState: EditorState) {
     if (view.state.doc !== prevState.doc) {
+      this.phasedDoc = undefined
       // untouched paragraphs keep their settled results (keyed on node identity)
       this.restartConvergence()
     } else if (
-      cjkPunctShrinkPluginKey.getState(view.state) === cjkPunctShrinkPluginKey.getState(prevState)
+      cjkPunctShrinkPluginKey.getState(view.state) ===
+        cjkPunctShrinkPluginKey.getState(prevState) &&
+      (!this.measurement.pending || !paragraphDecorationsChanged(view.state, prevState))
     ) {
       return
     }
-    this.measure()
+    this.measurement.request()
   }
 
   destroy() {
+    this.measurement.destroy()
     document.fonts?.removeEventListener('loadingdone', this.onFontsLoaded)
     document.removeEventListener(DOC_CSS_COMMITTED_EVENT, this.onDocCss)
     this.view.dom.removeEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onWrapWidths)
@@ -592,43 +619,41 @@ class CjkPunctShrinkView {
   private scheduleRetry() {
     if (this.retryRaf || this.retries >= MEASURE_RETRY_MAX) return
     this.retries++
+    if (this.measurement.retryInFrames()) return
     this.retryRaf = requestAnimationFrame(() => {
       this.retryRaf = 0
-      this.measure()
+      this.measurement.request()
     })
   }
 
-  private measure() {
+  private prepareMeasurement() {
     if (this.retryRaf) {
       cancelAnimationFrame(this.retryRaf)
       this.retryRaf = 0
     }
     const { view } = this
-    // a streamed tail is still landing: measured once, when it has (settled event)
+    // A streamed tail is still landing. Start the frame reads once it settles.
     this.pendingSettlement = isPhasedContentPending()
     if (this.pendingSettlement) return
     // PDF export parks the editor subtree (.app.pv-exporting); any layout
     // read here would force the parked document to re-lay out per print chunk
     if (view.dom.closest('.app.pv-exporting')) {
       this.retries = 0
-      this.scheduleRetry()
-      return
+      return () => () => this.scheduleRetry()
     }
     const old = cjkPunctShrinkPluginKey.getState(view.state)
     if (!this.storage.enabled && !this.storage.hangPunct) {
       if (old && old !== DecorationSet.empty)
-        view.dispatch(
-          view.state.tr
-            .setMeta(cjkPunctShrinkPluginKey, DecorationSet.empty)
-            .setMeta('addToHistory', false),
-        )
+        return () => () =>
+          view.dispatch(
+            view.state.tr
+              .setMeta(cjkPunctShrinkPluginKey, DecorationSet.empty)
+              .setMeta('addToHistory', false),
+          )
       return
     }
     if (this.frozen) return
-    if (!view.dom.isConnected) {
-      this.scheduleRetry()
-      return
-    }
+    if (!view.dom.isConnected) return () => () => this.scheduleRetry()
 
     const paras: Array<{ node: ProseMirrorNode; pos: number }> = []
     view.state.doc.descendants((node, pos) => {
@@ -639,14 +664,25 @@ class CjkPunctShrinkView {
       return false
     })
 
-    const shrinks: MeasuredShrink[] = []
-    let measurable = paras.length === 0
-    const measuredParas = this.results.measurePass(
+    const read = this.results.startMeasurePass(
       view,
       paras,
       (para, el, reuseNoOpWhile) => this.measureParagraph(para.node, para.pos, el, reuseNoOpWhile),
       { trackProposal: true },
     )
+    return (deadline: number) => {
+      const measured = read(deadline)
+      if (measured) return () => this.publishMeasurement(old, measured)
+    }
+  }
+
+  private publishMeasurement(
+    old: DecorationSet | undefined,
+    measuredParas: Array<MeasuredShrink[] | null>,
+  ) {
+    const { view } = this
+    const shrinks: MeasuredShrink[] = []
+    let measurable = measuredParas.length === 0
     for (const measured of measuredParas) {
       if (!measured) continue
       measurable = true

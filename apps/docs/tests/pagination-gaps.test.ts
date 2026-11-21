@@ -402,6 +402,22 @@ describe('overlay cut markers (read-only nested-table anchors)', () => {
     syncCutOverlays(wrap, [], 1)
     expect(wrap.querySelector('.page-cut-overlays')).toBeNull()
   })
+
+  it('reads all cut anchors against the last published overlay geometry', () => {
+    const wrap = wrapAt(0)
+    syncCutOverlays(wrap, [anchorAt(20)], 1)
+    const layer = wrap.querySelector('.page-cut-overlays')!
+    const oldMark = layer.firstElementChild
+    const anchors = [anchorAt(40), anchorAt(60)]
+    for (const [i, a] of anchors.entries()) {
+      a.node.parentElement!.getBoundingClientRect = () => {
+        expect([...layer.children]).toEqual([oldMark])
+        return rectOf(40 + i * 20)
+      }
+    }
+    syncCutOverlays(wrap, anchors, 1)
+    expect([...layer.children].map((el) => (el as HTMLElement).style.top)).toEqual(['40px', '60px'])
+  })
 })
 
 describe('createLineRectsCache', () => {

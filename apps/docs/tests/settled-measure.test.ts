@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   MAX_PARA_ROUNDS,
+  PARAGRAPH_MEASUREMENTS_SETTLED_EVENT,
+  PhasedParagraphMeasurement,
   SettledParagraphCache,
   hasCoupledWrapGeometry,
+  hasPendingParagraphMeasurements,
+  flushPendingParagraphMeasurements,
   measureNatural,
   noteFloatTransaction,
   topLevelBlockDom,
@@ -13,9 +17,11 @@ import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { DOC_CSS_COMMITTED_EVENT } from '../src/renderer/editor/cjk-punct-shrink'
+import { WRAP_WIDTHS_COMMITTED_EVENT } from '../src/renderer/editor/column-layout'
 import { appendStreamedNodes } from '../src/renderer/file-actions'
 import {
   cancelPhasedContent,
+  PAINTED_FRAME_FALLBACK_MS,
   PHASED_CONTENT_SETTLED_EVENT,
   PHASED_MIN_BLOCKS,
   setContentPhased,
@@ -170,6 +176,45 @@ describe('SettledParagraphCache', () => {
     expect(gaps.map((gap) => gap.style.display)).toEqual(['', ''])
   })
 
+  it('only changes gap styles for paragraphs read before the next frame', () => {
+    const root = document.createElement('div')
+    root.innerHTML =
+      '<p>ordinary text</p>' + '<p><span class="page-gap-inline"></span></p>'.repeat(9)
+    const elements = Array.from(root.querySelectorAll('p'))
+    const view = { dom: root, nodeDOM: (pos: number) => elements[pos] } as unknown as EditorView
+    const paragraphs = elements.map((_, pos) => ({ node: {} as ProseMirrorNode, pos }))
+    const gaps = Array.from(root.querySelectorAll<HTMLElement>('.page-gap-inline'))
+    const observer = new MutationObserver(() => {})
+    observer.observe(root, { attributes: true, attributeFilter: ['style'], subtree: true })
+    try {
+      const cache = new SettledParagraphCache<number[]>(shiftAll)
+      const read = vi.fn(({ pos }: { pos: number }) => {
+        if (pos > 0) expect(gaps[pos - 1].style.display).toBe('none')
+        return [pos]
+      })
+      const pass = cache.startMeasurePass(view, paragraphs, read)
+      // The first read stands in for Blink spending the entire slice budget.
+      expect(pass(-1)).toBeUndefined()
+      expect(read.mock.calls.map(([{ pos }]) => pos)).toEqual([0])
+      expect(observer.takeRecords()).toEqual([])
+
+      let measured: Array<number[] | null> | undefined
+      for (let i = 0; measured === undefined && i < gaps.length; i++) {
+        read.mockClear()
+        measured = pass(-1)
+        const readGaps = read.mock.calls.map(([{ pos }]) => gaps[pos - 1])
+        const mutated = new Set(observer.takeRecords().map((record) => record.target))
+        expect(mutated).toEqual(new Set(readGaps))
+        expect(readGaps.length).toBeGreaterThan(0)
+        expect(gaps.every((gap) => gap.style.display === '')).toBe(true)
+        if (i === 0) expect(measured).toBeUndefined()
+      }
+      expect(measured).toEqual(paragraphs.map(({ pos }) => [pos]))
+    } finally {
+      observer.disconnect()
+    }
+  })
+
   it('batches body gaps independently of a cell float and keeps cell gaps local', () => {
     const root = document.createElement('div')
     root.innerHTML = `
@@ -297,6 +342,24 @@ describe('SettledParagraphCache', () => {
     expect(pass()).toEqual([2])
     expect(pass()).toEqual([2])
     expect(fn).toHaveBeenCalledTimes(3)
+  })
+
+  it('discards partial measurements instead of reusing them after a layout revision', () => {
+    const first = document.createElement('p')
+    const second = document.createElement('p')
+    const view = fakeView(first)
+    view.dom.append(first, second)
+    const elements = [first, second]
+    view.nodeDOM = (pos) => elements[pos]
+    const paragraphs = elements.map((_, pos) => ({ node: {} as ProseMirrorNode, pos }))
+    const cache = new SettledParagraphCache<number[]>(shiftAll, () => true)
+    const oldRead = vi.fn(() => [1])
+    const pass = cache.startMeasurePass(view, paragraphs, oldRead, { trackProposal: true })
+
+    expect(pass(-1)).toBeUndefined()
+    expect(oldRead).toHaveBeenCalledTimes(1)
+    cache.discardMeasuredResults()
+    expect(cache.measurePass(view, paragraphs, () => [2])).toEqual([[2], [2]])
   })
 
   it('keeps the published result when a measurement would restart a layout cycle', () => {
@@ -644,11 +707,25 @@ it('does not remeasure a Docs editor when it has no phased layout waiting to set
   }
 })
 
-it('measures the newly mounted paragraphs once when the phased layout settles', () => {
+it('leaves settlement free of geometry reads and measures across browser frames', () => {
   const editor = makeEditor()
   document.body.append(editor.view.dom)
   const width = vi.fn(() => 100)
   Object.defineProperty(editor.view.dom, 'offsetWidth', { get: width })
+  const frames = new Map<number, FrameRequestCallback>()
+  let nextFrame = 0
+  const request = vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
+    frames.set(++nextFrame, callback)
+    return nextFrame
+  })
+  const cancel = vi.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((frame) => {
+    frames.delete(frame)
+  })
+  const read = vi.fn()
+  const settled = vi.fn()
+  editor.view.dom.addEventListener(PARAGRAPH_MEASUREMENTS_SETTLED_EVENT, settled)
+  let clock = 0
+  const now = vi.spyOn(performance, 'now').mockImplementation(() => clock)
   editor.storage.cjkPunctShrink.enabled = true
   editor.storage.justifyShrink.enabled = true
   const tasks: Array<() => void> = []
@@ -680,11 +757,159 @@ it('measures the newly mounted paragraphs once when the phased layout settles', 
     )
     width.mockClear()
     while (tasks.length) tasks.shift()?.()
-    expect(width).toHaveBeenCalledTimes(2)
+    expect(width).not.toHaveBeenCalled()
     expect(editor.state.doc.childCount).toBe(content.length)
+    expect(hasPendingParagraphMeasurements(editor.view)).toBe(true)
+    for (const paragraph of editor.view.dom.querySelectorAll<HTMLElement>('p')) {
+      sized(paragraph, () => {
+        read()
+        clock++
+        return { width: 100, height: 20 }
+      })
+      paragraph.getBoundingClientRect = () => ({ width: 100, height: 20 }) as DOMRect
+      paragraph.style.direction = 'rtl'
+    }
+    const readFrame = () => {
+      const queued = [...frames.values()]
+      frames.clear()
+      for (const callback of queued) callback(clock)
+    }
+    readFrame()
+    expect(read).toHaveBeenCalled()
+    expect(read.mock.calls.length).toBeLessThan(content.length)
+    expect(width).not.toHaveBeenCalled()
+    const queuedFrames = [...frames.keys()]
+    editor.view.dispatch(editor.state.tr.setMeta('addToHistory', false))
+    expect(queuedFrames.every((frame) => frames.has(frame))).toBe(true)
+    const partialReads = read.mock.calls.length
+    const changedBlock = new Set([editor.view.dom.querySelector('p')!])
+    const commitWrap = () =>
+      editor.view.dom.dispatchEvent(
+        new CustomEvent(WRAP_WIDTHS_COMMITTED_EVENT, {
+          detail: changedBlock,
+        }),
+      )
+    commitWrap()
+    expect(read).toHaveBeenCalledTimes(partialReads)
+    readFrame()
+    expect(hasPendingParagraphMeasurements(editor.view)).toBe(true)
+    expect(read.mock.calls.length).toBeGreaterThan(partialReads)
+    expect(settled).not.toHaveBeenCalled()
+    flushPendingParagraphMeasurements(editor.view)
+    expect(hasPendingParagraphMeasurements(editor.view)).toBe(false)
+    expect(settled).toHaveBeenCalledTimes(1)
+    expect(width).toHaveBeenCalledTimes(2)
+    expect(frames.size).toBe(0)
+    const completedReads = read.mock.calls.length
+    commitWrap()
+    expect(read).toHaveBeenCalledTimes(completedReads)
+    expect(hasPendingParagraphMeasurements(editor.view)).toBe(true)
+    flushPendingParagraphMeasurements(editor.view)
+    expect(settled).toHaveBeenCalledTimes(2)
   } finally {
     cancelPhasedContent()
     editor.view.dom.remove()
+    editor.destroy()
+    request.mockRestore()
+    cancel.mockRestore()
+    now.mockRestore()
+  }
+})
+
+it('uses the bounded frame fallback for background views and publishes only after all reads', () => {
+  const view = fakeView(document.createElement('p'))
+  document.body.append(view.dom)
+  const publish = vi.fn()
+  const discard = vi.fn()
+  const settled = vi.fn()
+  view.dom.addEventListener(PARAGRAPH_MEASUREMENTS_SETTLED_EVENT, settled)
+  vi.useFakeTimers()
+  const request = vi.spyOn(globalThis, 'requestAnimationFrame').mockReturnValue(1)
+  const cancel = vi.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation(() => {})
+  let reads = 0
+  const measurement = new PhasedParagraphMeasurement(
+    view,
+    () => () => {
+      if (++reads === 2) return publish
+    },
+    discard,
+  )
+  try {
+    measurement.start()
+    expect(reads).toBe(0)
+    vi.advanceTimersByTime(PAINTED_FRAME_FALLBACK_MS)
+    expect(reads).toBe(1)
+    expect(publish).not.toHaveBeenCalled()
+    expect(settled).not.toHaveBeenCalled()
+    expect(hasPendingParagraphMeasurements(view)).toBe(true)
+    vi.advanceTimersByTime(PAINTED_FRAME_FALLBACK_MS)
+    expect(publish).toHaveBeenCalledTimes(1)
+    expect(settled).toHaveBeenCalledTimes(1)
+    expect(hasPendingParagraphMeasurements(view)).toBe(false)
+    expect(discard).not.toHaveBeenCalled()
+  } finally {
+    measurement.destroy()
+    view.dom.remove()
+    request.mockRestore()
+    cancel.mockRestore()
+    vi.useRealTimers()
+  }
+})
+
+it('discards a partial read and keeps the job pending when export parks the editor between frames', () => {
+  const view = fakeView(document.createElement('p'))
+  const app = document.createElement('div')
+  app.className = 'app'
+  app.append(view.dom)
+  document.body.append(app)
+  vi.useFakeTimers()
+  const request = vi.spyOn(globalThis, 'requestAnimationFrame').mockReturnValue(1)
+  const cancel = vi.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation(() => {})
+  const read = vi.fn()
+  const discard = vi.fn()
+  const publish = vi.fn()
+  const settled = vi.fn()
+  view.dom.addEventListener(PARAGRAPH_MEASUREMENTS_SETTLED_EVENT, settled)
+  let version = 0
+  const measurement = new PhasedParagraphMeasurement(
+    view,
+    () => {
+      const snapshot = ++version
+      let slices = 0
+      return () => {
+        read(snapshot)
+        if (++slices === 2) return () => publish(snapshot)
+      }
+    },
+    discard,
+  )
+  try {
+    measurement.start()
+    vi.advanceTimersByTime(PAINTED_FRAME_FALLBACK_MS)
+    expect(read.mock.calls).toEqual([[1]])
+    app.classList.add('pv-exporting')
+    flushPendingParagraphMeasurements(view)
+    expect(discard).toHaveBeenCalledOnce()
+    vi.advanceTimersByTime(2 * PAINTED_FRAME_FALLBACK_MS)
+    expect(read.mock.calls).toEqual([[1]])
+    expect(publish).not.toHaveBeenCalled()
+    expect(settled).not.toHaveBeenCalled()
+    expect(hasPendingParagraphMeasurements(view)).toBe(true)
+
+    app.classList.remove('pv-exporting')
+    vi.advanceTimersByTime(PAINTED_FRAME_FALLBACK_MS)
+    expect(read.mock.calls).toEqual([[1], [2]])
+    flushPendingParagraphMeasurements(view)
+    expect(read.mock.calls).toEqual([[1], [2], [2]])
+    expect(publish.mock.calls).toEqual([[2]])
+    expect(settled).toHaveBeenCalledOnce()
+    expect(hasPendingParagraphMeasurements(view)).toBe(false)
+  } finally {
+    measurement.destroy()
+    app.remove()
+    request.mockRestore()
+    cancel.mockRestore()
+    vi.useRealTimers()
   }
 })
 

@@ -1,7 +1,8 @@
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
-import type { Transaction } from '@tiptap/pm/state'
+import type { EditorState, Transaction } from '@tiptap/pm/state'
 import { AddMarkStep, RemoveMarkStep, ReplaceStep } from '@tiptap/pm/transform'
 import type { EditorView } from '@tiptap/pm/view'
+import { PAINTED_FRAME_FALLBACK_MS } from '../phased-content'
 
 /** CSS floats: the only layout where a paragraph's vertical position changes its line breaks */
 // wrap-around floats the paragraphs flow beside (explicit classes: an
@@ -162,6 +163,164 @@ interface ParagraphPosition {
   pos: number
 }
 
+type ReadParagraphs = (deadline: number) => (() => void) | undefined
+const paragraphMeasurements = new WeakMap<EditorView, Set<PhasedParagraphMeasurement>>()
+export const PARAGRAPH_MEASUREMENTS_SETTLED_EVENT = 'genoffice:paragraph-measurements-settled'
+// Both shrink extensions share the renderer with pagination and input.
+const PARAGRAPH_FRAME_BUDGET_MS = 6
+const PARAGRAPHS_PER_FRAME = 32
+const NATURAL_GAP_PARAGRAPHS_PER_FRAME = 4
+
+export function hasPendingParagraphMeasurements(view: EditorView): boolean {
+  const measurements = paragraphMeasurements.get(view)
+  if (measurements) for (const measurement of measurements) if (measurement.pending) return true
+  return false
+}
+
+export function paragraphDecorationsChanged(state: EditorState, previous: EditorState): boolean {
+  // Layout notifications separately cover direct DOM writes. A selection or
+  // metadata transaction alone must not throw away progress on a long open.
+  return state.plugins.some(
+    (plugin) => plugin.props.decorations && plugin.getState(state) !== plugin.getState(previous),
+  )
+}
+
+export function flushPendingParagraphMeasurements(view: EditorView): void {
+  let progressed: boolean
+  do {
+    progressed = false
+    for (const measurement of paragraphMeasurements.get(view) ?? []) {
+      if (measurement.flush()) progressed = true
+    }
+  } while (progressed && hasPendingParagraphMeasurements(view))
+}
+
+/** A phased open yields between reads, while publication and convergence use
+ * complete proposals. Ordinary editing keeps the existing synchronous path. */
+export class PhasedParagraphMeasurement {
+  private frame = 0
+  private frameFallback = 0
+  private inFrames = false
+  private flushing = false
+  private publishing = false
+  private queued = false
+  private read?: ReadParagraphs
+
+  constructor(
+    private view: EditorView,
+    private prepare: () => ReadParagraphs | undefined,
+    private discard: () => void,
+  ) {
+    const current = paragraphMeasurements.get(view) ?? new Set<PhasedParagraphMeasurement>()
+    current.add(this)
+    paragraphMeasurements.set(view, current)
+  }
+
+  get pending(): boolean {
+    return this.queued || this.publishing
+  }
+
+  start(): void {
+    this.inFrames = true
+    this.request()
+  }
+
+  request(): void {
+    this.cancel()
+    if (!this.inFrames) {
+      this.prepare()?.(Infinity)?.()
+      return
+    }
+    this.queued = true
+    this.schedule()
+  }
+
+  retryInFrames(): boolean {
+    if (!this.inFrames || this.flushing) return false
+    this.request()
+    return true
+  }
+
+  cancel(): void {
+    this.cancelFrame()
+    this.discardRead()
+    this.queued = false
+  }
+
+  flush(): boolean {
+    if (!this.queued || this.flushing || this.publishing) return false
+    this.cancelFrame()
+    this.flushing = true
+    let progressed = false
+    try {
+      while (this.queued && this.advance(Infinity)) progressed = true
+    } finally {
+      this.flushing = false
+      this.schedule()
+    }
+    return progressed
+  }
+
+  destroy(): void {
+    this.cancel()
+    paragraphMeasurements.get(this.view)?.delete(this)
+  }
+
+  private schedule(): void {
+    if (this.frame || !this.queued || this.flushing) return
+    const run = () => {
+      if (this.frame !== frame) return
+      this.cancelFrame()
+      this.advance(performance.now() + PARAGRAPH_FRAME_BUDGET_MS)
+      this.schedule()
+    }
+    const frame = requestAnimationFrame(run)
+    this.frame = frame
+    // Some background webviews receive few frames. Continue the same bounded
+    // reads there so an invisible editor can still finish layout.
+    this.frameFallback = window.setTimeout(run, PAINTED_FRAME_FALLBACK_MS)
+  }
+
+  private cancelFrame(): void {
+    if (this.frame) cancelAnimationFrame(this.frame)
+    if (this.frameFallback) window.clearTimeout(this.frameFallback)
+    this.frame = 0
+    this.frameFallback = 0
+  }
+
+  private discardRead(): void {
+    if (this.read) this.discard()
+    this.read = undefined
+  }
+
+  private advance(deadline: number): boolean {
+    // Export can park the editor after a pass started. Discard the partial
+    // proposal and keep the job pending until the live canvas is back.
+    const { dom } = this.view
+    if (!dom.isConnected || dom.closest('.app.pv-exporting')) {
+      this.discardRead()
+      return false
+    }
+    this.read ??= this.prepare()
+    const publish = this.read?.(deadline)
+    if (this.read && !publish) return true
+    this.queued = false
+    this.read = undefined
+    this.publishing = true
+    try {
+      publish?.()
+    } finally {
+      this.publishing = false
+    }
+    if (!this.queued) {
+      this.inFrames = false
+      if (!hasPendingParagraphMeasurements(this.view))
+        this.view.dom.dispatchEvent(new Event(PARAGRAPH_MEASUREMENTS_SETTLED_EVENT))
+    }
+    return true
+  }
+}
+
 /**
  * A paragraph whose compression re-wraps its own lines can answer differently
  * every round without ever repeating itself. Each answer fits the lines it
@@ -271,12 +430,30 @@ export class SettledParagraphCache<T> {
     this.previousResults = undefined
   }
 
+  discardMeasuredResults(): void {
+    if (!this.previousResults) return
+    for (const [node, previous] of this.previousResults) {
+      if (previous) this.results.set(node, previous)
+      else this.results.delete(node)
+    }
+    this.acceptMeasuredResults()
+  }
+
   measurePass(
     view: EditorView,
     paragraphs: ParagraphPosition[],
     read: (para: ParagraphPosition, el: HTMLElement, reuseNoOpWhile: ReuseNoOpWhile) => T | null,
     options?: { trackProposal: boolean },
   ): Array<T | null> {
+    return this.startMeasurePass(view, paragraphs, read, options)(Infinity)!
+  }
+
+  startMeasurePass(
+    view: EditorView,
+    paragraphs: ParagraphPosition[],
+    read: (para: ParagraphPosition, el: HTMLElement, reuseNoOpWhile: ReuseNoOpWhile) => T | null,
+    options?: { trackProposal: boolean },
+  ): (deadline: number) => Array<T | null> | undefined {
     this.beginPass(view)
     if (options?.trackProposal) this.previousResults = new Map()
     // Only a scoped reuse decision needs a geometry read before hiding gaps.
@@ -295,7 +472,7 @@ export class SettledParagraphCache<T> {
         independentBody.add(child)
       }
     }
-    const mounted = paragraphs.map((para) => {
+    const mounted = paragraphs.map((para, index) => {
       const el = roots.get(para.node) ?? view.nodeDOM(para.pos)
       const independentBodyParagraph =
         el instanceof HTMLElement &&
@@ -307,10 +484,9 @@ export class SettledParagraphCache<T> {
           : undefined
       const reusable =
         previous?.settled && !previous.coupled && previous.el === el ? previous : undefined
-      return { para, el, reusable, independentBodyParagraph }
+      return { para, el, reusable, independentBodyParagraph, index }
     })
-    const natural = new Set<HTMLElement>()
-    const gaps: HTMLElement[] = []
+    const natural = new Map<HTMLElement, HTMLElement[]>()
     for (const { para, el, reusable, independentBodyParagraph } of mounted) {
       if (!independentBodyParagraph || reusable || !(el instanceof HTMLElement)) continue
       if (natural.has(el)) continue
@@ -318,8 +494,7 @@ export class SettledParagraphCache<T> {
       if (own.length === 0) continue
       const previous = this.results.get(para.node)
       if (previous?.el === el && previous.excludedByStyle?.(getComputedStyle(el))) continue
-      natural.add(el)
-      for (const gap of own) gaps.push(gap)
+      natural.set(el, Array.from(own))
     }
     const readMounted = ({ para, el, reusable }: (typeof mounted)[number], hideBatch: boolean) => {
       if (reusable) {
@@ -337,24 +512,57 @@ export class SettledParagraphCache<T> {
           )
         : null
     }
-    let measured: Array<T | null>
-    if (natural.size < 2 || requiresFullWrapMeasure(view)) {
-      measured = mounted.map((item) => readMounted(item, false))
-    } else {
-      measured = new Array<T | null>(mounted.length)
-      withInlineGapsHidden(gaps, () => {
-        mounted.forEach((item, i) => {
-          if (item.independentBodyParagraph && item.el instanceof HTMLElement)
-            measured[i] = readMounted(item, natural.has(item.el))
-        })
-      })
-      // Restore the body gaps before reading any coupled or table paragraph.
-      mounted.forEach((item, i) => {
-        if (!item.independentBodyParagraph) measured[i] = readMounted(item, false)
-      })
+    const batched = natural.size >= 2 && !requiresFullWrapMeasure(view)
+    const shared: Array<{ item: (typeof mounted)[number]; gaps: HTMLElement[] }> = []
+    const individual: typeof mounted = []
+    for (const item of mounted) {
+      const gaps = batched && item.el instanceof HTMLElement ? natural.get(item.el) : undefined
+      if (gaps && !item.reusable) shared.push({ item, gaps })
+      else individual.push(item)
     }
-    this.rootWidth = width ?? view.dom.offsetWidth
-    return measured
+    const measured = new Array<T | null>(mounted.length)
+    let sharedIndex = 0
+    let individualIndex = 0
+    return (deadline) => {
+      // Float rectangles are in viewport coordinates, so they belong to the
+      // current task even if the editor state survives a scroll between reads.
+      this.floatBands.clear()
+      const synchronous = deadline === Infinity
+      const budget = synchronous ? Infinity : PARAGRAPHS_PER_FRAME
+      let reads = 0
+      const mayRead = () =>
+        synchronous || (reads < budget && (reads === 0 || performance.now() < deadline))
+      // Read ordinary and coupled paragraphs with every unrelated gap in place.
+      while (individualIndex < individual.length && mayRead()) {
+        const item = individual[individualIndex++]
+        measured[item.index] = readMounted(item, false)
+        reads++
+      }
+      if (individualIndex < individual.length) return undefined
+      if (sharedIndex < shared.length) {
+        if (!mayRead()) return undefined
+        const end = Math.min(
+          sharedIndex + (synchronous ? Infinity : NATURAL_GAP_PARAGRAPHS_PER_FRAME),
+          sharedIndex + budget - reads,
+          shared.length,
+        )
+        const gaps = new Set<HTMLElement>()
+        for (let i = sharedIndex; i < end; i++) {
+          for (const gap of shared[i].gaps) gaps.add(gap)
+        }
+        // A first read can spend the whole frame flushing Blink layout. Consume
+        // the bounded group once its gaps are hidden, then restore before yielding.
+        withInlineGapsHidden(Array.from(gaps), () => {
+          while (sharedIndex < end) {
+            const { item } = shared[sharedIndex++]
+            measured[item.index] = readMounted(item, true)
+          }
+        })
+      }
+      if (sharedIndex < shared.length) return undefined
+      this.rootWidth = width ?? view.dom.offsetWidth
+      return measured
+    }
   }
 
   measure(

@@ -10,7 +10,7 @@ import type { DocsEditorAction, DocsAiOperation } from '../shared/editor-action'
 import { submitDocsEditorAction } from './runtime/editor-actions'
 import { scriptFontHtml } from './editor/script-fonts'
 import { carryDocSeen } from './ai/tools'
-import { DOC_CSS_COMMITTED_EVENT } from './editor/cjk-punct-shrink'
+import { DOC_CSS_COMMITTED_EVENT, cjkPunctShrinkPluginKey } from './editor/cjk-punct-shrink'
 import { paginationActivity, trackPaginationActivity } from './pagination-activity'
 import { createDocumentStoryDiagnostic, disposeOwnedDiagnostic } from './document-story-diagnostic'
 import { observePaginationFonts } from './pagination-fonts'
@@ -303,7 +303,12 @@ import { newObstacleShadow, obstaclePlanDiffs } from './editor/obstacle-plan'
 import { MultipageGrid, snapshotCanvas, type CanvasSnapshot } from './components/MultipageGrid'
 import { layoutMultipage, multipageColumns, multipageZoomForColumns } from './multipage'
 import { setColumnLayout, WRAP_WIDTHS_COMMITTED_EVENT } from './editor/column-layout'
-import { hasCoupledWrapGeometry } from './editor/settled-measure'
+import {
+  PARAGRAPH_MEASUREMENTS_SETTLED_EVENT,
+  flushPendingParagraphMeasurements,
+  hasCoupledWrapGeometry,
+  hasPendingParagraphMeasurements,
+} from './editor/settled-measure'
 import { pageMargins } from './page-margins'
 import { syncLineNumbers } from './editor/line-numbers'
 import { formattingMarksPluginKey, sectionBreakMap } from './editor/formatting-marks'
@@ -1069,7 +1074,11 @@ export function App({
   /** the current pass's layout, after any pending pass: readers that need
    *  the document as it stands (TOC numbers, the preview snapshot) */
   const layoutNow = useCallback((): PageLayout | null => {
-    flushPaginationRef.current(prepareDocStylesRef.current())
+    const view = editorRef.current?.view
+    const needsTypography = view !== undefined && hasPendingParagraphMeasurements(view)
+    if (needsTypography) flushPendingParagraphMeasurements(view)
+    const stylesChanged = prepareDocStylesRef.current()
+    flushPaginationRef.current(stylesChanged || needsTypography)
     return pageLayoutRef.current
   }, [])
   const [showShortcuts, setShowShortcuts] = useState(false)
@@ -4250,6 +4259,14 @@ export function App({
     let flowRead: { pm: HTMLElement; reader: ReturnType<typeof createBlockMeasurer> } | undefined
     let timer: number | null = null
     let viewportAppendOnly = false
+    let waitingForParagraphs = false
+    let editedWhileMeasuring = false
+    let laidOutBeforeParagraphsSettled = false
+    const typographyOf = (state: Editor['state']) => ({
+      cjk: cjkPunctShrinkPluginKey.getState(state),
+      justify: justifyShrinkPluginKey.getState(state),
+    })
+    let measuredTypography: ReturnType<typeof typographyOf> | undefined
     const activity = trackPaginationActivity()
     const storyDiagnostic = createDocumentStoryDiagnostic(() => {
       const current = fileCtxRef.current.doc
@@ -4295,7 +4312,11 @@ export function App({
       const scrollRect = scroller.getBoundingClientRect()
       const origin = pmRect.top + mTopPx * factor
       viewportHeight = scrollRect.height
-      if (publishCoverage && trackStreamingCoverage && isPhasedContentPending()) {
+      if (
+        publishCoverage &&
+        trackStreamingCoverage &&
+        (isPhasedContentPending() || (editor && hasPendingParagraphMeasurements(editor.view)))
+      ) {
         streamingCoverage.publish(
           lastPassChildCount,
           scroller.scrollTop + pmRect.top + completePaperEnd * factor - scrollRect.top,
@@ -4527,6 +4548,24 @@ export function App({
       timer = null
       const viewportOnly = viewportAppendOnly
       viewportAppendOnly = false
+      const paragraphsPending = editor ? hasPendingParagraphMeasurements(editor.view) : false
+      // A complete layout computed against unpublished paragraph widths would
+      // immediately be invalidated when those widths are committed. Let the
+      // current pages serve the viewport while their next inputs are prepared.
+      if (
+        !synchronous &&
+        !forceFull &&
+        !editedWhileMeasuring &&
+        paragraphsPending &&
+        trackStreamingCoverage &&
+        !streamingCoverage.reachesUncovered(scroller.scrollTop + viewportHeight)
+      ) {
+        waitingForParagraphs = true
+        activity.update({ pending: true })
+        return
+      }
+      waitingForParagraphs = false
+      editedWhileMeasuring = false
       // An append offered for an earlier viewport can become irrelevant before
       // the scheduled pass starts. Edits, fonts, settlement and explicit layout
       // consumers still require the pending measurement.
@@ -4543,6 +4582,8 @@ export function App({
         activity.update({ pending: false })
         return
       }
+      laidOutBeforeParagraphsSettled = paragraphsPending
+      measuredTypography = editor ? typographyOf(editor.state) : undefined
       activity.update({ pending: false, active: true })
       lastPassAt = performance.now()
       const stylesChanged = prepareDocStylesRef.current()
@@ -4607,6 +4648,11 @@ export function App({
           if (dbg) dbg.fastPasses = fastPasses
         }
         locate(true)
+        // A width commit can start another typography pass during this layout.
+        if (editor && hasPendingParagraphMeasurements(editor.view)) {
+          laidOutBeforeParagraphsSettled = true
+          activity.update({ pending: true })
+        }
       } catch (error) {
         activity.update({ error: String(error) })
         throw error
@@ -6100,13 +6146,16 @@ export function App({
     const streamNeedsLayout = (viewportTop = scrollPosRef.current.top) =>
       streamingCoverage.needsLayout(editor?.state.doc.childCount ?? 0, viewportTop + viewportHeight)
     const requestVisibleStreamLayout = () => {
-      if (trackStreamingCoverage && isPhasedContentPending() && streamNeedsLayout())
-        onUpdate(null, lastPassChildCount, 'append')
+      if (!trackStreamingCoverage) return
+      const needsViewport = waitingForParagraphs
+        ? streamingCoverage.reachesUncovered(scrollPosRef.current.top + viewportHeight)
+        : isPhasedContentPending() && streamNeedsLayout()
+      if (needsViewport) onUpdate(null, lastPassChildCount, 'append')
     }
     const onUpdate = (
       fastIndex: number | null = null,
       dirtyIndex: number | null = fastIndex,
-      trigger: 'change' | 'follow-up' | 'append' = 'change',
+      trigger: 'change' | 'follow-up' | 'append' | 'settled' = 'change',
     ) => {
       if (disposed) return
       const streaming = isPhasedContentPending()
@@ -6138,6 +6187,13 @@ export function App({
       }
       if (timer) window.clearTimeout(timer)
       viewportAppendOnly = false
+      if (trigger === 'settled') {
+        // The final append is a completed load, with no further edits to
+        // debounce. remeasure still waits for unpublished paragraph geometry.
+        timer = window.setTimeout(remeasure)
+        activity.update({ pending: true })
+        return
+      }
       // a whole-document pass after every pause blocks typing on long
       // documents: wait longer when the last pass was slow (Word paginates in
       // the background too); short documents keep the 300 ms feel. A typed
@@ -6191,16 +6247,39 @@ export function App({
     const stopFonts = observePaginationFonts(document.fonts, onFontsChanged)
     scroller.addEventListener('scroll', onScroll, { passive: true })
     const streamResize = new ResizeObserver(() => {
-      if (!isPhasedContentPending()) return
+      if (!isPhasedContentPending() && !waitingForParagraphs) return
       viewportHeight = scroller.getBoundingClientRect().height
       requestVisibleStreamLayout()
     })
     if (trackStreamingCoverage) streamResize.observe(scroller)
     const onContentSettled = () => {
       selfScheduled = false
-      onUpdate()
+      onUpdate(null, null, editedWhileMeasuring ? 'change' : 'settled')
     }
     document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, onContentSettled)
+    const paragraphHost = editor?.view.dom
+    const onParagraphsSettled = () => {
+      if (!waitingForParagraphs && !laidOutBeforeParagraphsSettled) return
+      const finalTypography = editor ? typographyOf(editor.state) : undefined
+      laidOutBeforeParagraphsSettled = false
+      if (
+        !waitingForParagraphs &&
+        finalTypography?.cjk === measuredTypography?.cjk &&
+        finalTypography?.justify === measuredTypography?.justify
+      ) {
+        if (timer === null) activity.update({ pending: false })
+        return
+      }
+      // Typography can change wrapping without changing the document. Include
+      // it in an already queued pass, or resume the pass that waited for it.
+      measureMountedTail = true
+      fastEdits = null
+      dirtyFrom = null
+      viewportAppendOnly = false
+      if (timer === null) timer = window.setTimeout(remeasure)
+      activity.update({ pending: true })
+    }
+    paragraphHost?.addEventListener(PARAGRAPH_MEASUREMENTS_SETTLED_EVENT, onParagraphsSettled)
     const onDocUpdate = ({ transaction }: { transaction: Transaction }) => {
       resetWidthPassHistory(colWidthPass)
       const firstChanged = firstChangedTopLevelIndex(transaction)
@@ -6209,6 +6288,7 @@ export function App({
         firstChanged !== null &&
         firstChanged >= transaction.before.childCount &&
         transaction.doc.childCount > transaction.before.childCount
+      if (!appendedTail) editedWhileMeasuring = true
       // Still-unmounted originals already participate in section resolution.
       // Mounting their break nodes is an append, so the existing page coverage
       // decides when the newly mounted range needs layout.
@@ -6271,6 +6351,7 @@ export function App({
       scroller.removeEventListener('scroll', onScroll)
       streamResize.disconnect()
       document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, onContentSettled)
+      paragraphHost?.removeEventListener(PARAGRAPH_MEASUREMENTS_SETTLED_EVENT, onParagraphsSettled)
       editor?.off('update', onDocUpdate)
       editor?.off('transaction', onShrinkTr)
     }

@@ -3,7 +3,13 @@ import { Plugin, PluginKey, type EditorState } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { rangeSlot } from '../dom-range'
-import { SettledParagraphCache, noteFloatTransaction, type ReuseNoOpWhile } from './settled-measure'
+import {
+  PhasedParagraphMeasurement,
+  SettledParagraphCache,
+  noteFloatTransaction,
+  paragraphDecorationsChanged,
+  type ReuseNoOpWhile,
+} from './settled-measure'
 import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
 import { DOC_CSS_COMMITTED_EVENT } from './cjk-punct-shrink'
 import { WRAP_WIDTHS_COMMITTED_EVENT, type WrapWidthChanges } from './column-layout'
@@ -257,6 +263,8 @@ class JustifyShrinkView {
   private retryRaf = 0
   private retries = 0
   private pendingSettlement = false
+  private phasedDoc?: ProseMirrorNode
+  private measurement: PhasedParagraphMeasurement
   private resizeObserver?: ResizeObserver
   private lastDomWidth = -1
   private results = new SettledParagraphCache<MeasuredShrink[]>(
@@ -265,31 +273,39 @@ class JustifyShrinkView {
   )
   private onFontsLoaded = () => {
     this.invalidate()
-    this.measure()
+    this.measurement.request()
   }
   // style-level w:jc arrives with the doc stylesheet after setContent measured
   private onDocCss = () => {
     this.invalidate()
-    this.measure()
+    this.requestLayoutMeasurement()
   }
   private onWrapWidths = (event: Event) => {
+    this.measurement.cancel()
     const { detail } = event as CustomEvent<WrapWidthChanges>
     if (detail) {
       this.results.invalidateBlocks(this.view, detail)
       this.seenSigs.clear()
       this.frozen = false
     } else this.invalidate()
-    this.measure()
+    this.requestLayoutMeasurement()
   }
   private onPhasedSettled = () => {
-    if (this.pendingSettlement) this.measure()
+    if (!this.pendingSettlement) return
+    this.phasedDoc = this.view.state.doc
+    this.measurement.start()
   }
 
   constructor(
     private view: EditorView,
     private storage: JustifyShrinkStorage,
   ) {
-    this.measure()
+    this.measurement = new PhasedParagraphMeasurement(
+      view,
+      () => this.prepareMeasurement(),
+      () => this.results.discardMeasuredResults(),
+    )
+    this.measurement.request()
     document.fonts?.addEventListener('loadingdone', this.onFontsLoaded)
     document.addEventListener(DOC_CSS_COMMITTED_EVENT, this.onDocCss)
     view.dom.addEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onWrapWidths)
@@ -300,7 +316,7 @@ class JustifyShrinkView {
         if (w === this.lastDomWidth) return
         this.lastDomWidth = w
         this.invalidate()
-        this.measure()
+        this.measurement.request()
       })
       this.resizeObserver.observe(view.dom)
     }
@@ -308,6 +324,7 @@ class JustifyShrinkView {
 
   /** layout input changed (resize, fonts): every paragraph re-measures */
   private invalidate() {
+    this.measurement.cancel()
     this.results.clear()
     this.restartConvergence()
   }
@@ -320,19 +337,27 @@ class JustifyShrinkView {
     this.lastSig = ''
   }
 
+  private requestLayoutMeasurement() {
+    if (this.phasedDoc === this.view.state.doc) this.measurement.start()
+    else this.measurement.request()
+  }
+
   update(view: EditorView, prevState: EditorState) {
     if (view.state.doc !== prevState.doc) {
+      this.phasedDoc = undefined
       // untouched paragraphs keep their settled results (keyed on node identity)
       this.restartConvergence()
     } else if (
-      justifyShrinkPluginKey.getState(view.state) === justifyShrinkPluginKey.getState(prevState)
+      justifyShrinkPluginKey.getState(view.state) === justifyShrinkPluginKey.getState(prevState) &&
+      (!this.measurement.pending || !paragraphDecorationsChanged(view.state, prevState))
     ) {
       return
     }
-    this.measure()
+    this.measurement.request()
   }
 
   destroy() {
+    this.measurement.destroy()
     document.fonts?.removeEventListener('loadingdone', this.onFontsLoaded)
     document.removeEventListener(DOC_CSS_COMMITTED_EVENT, this.onDocCss)
     this.view.dom.removeEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onWrapWidths)
@@ -344,40 +369,38 @@ class JustifyShrinkView {
   private scheduleRetry() {
     if (this.retryRaf || this.retries >= MEASURE_RETRY_MAX) return
     this.retries++
+    if (this.measurement.retryInFrames()) return
     this.retryRaf = requestAnimationFrame(() => {
       this.retryRaf = 0
-      this.measure()
+      this.measurement.request()
     })
   }
 
-  private measure() {
+  private prepareMeasurement() {
     if (this.retryRaf) {
       cancelAnimationFrame(this.retryRaf)
       this.retryRaf = 0
     }
     const { view } = this
-    // a streamed tail is still landing: measured once, when it has (settled event)
+    // A streamed tail is still landing. Start the frame reads once it settles.
     this.pendingSettlement = isPhasedContentPending()
     if (this.pendingSettlement) return
     // PDF export parks the editor subtree (.app.pv-exporting); any layout
     // read here would force the parked document to re-lay out per print chunk
     if (view.dom.closest('.app.pv-exporting')) {
       this.retries = 0
-      this.scheduleRetry()
-      return
+      return () => () => this.scheduleRetry()
     }
     const old = justifyShrinkPluginKey.getState(view.state)
     if (!this.storage.enabled && !this.storage.expandBreakLines) {
       if (old && old !== DecorationSet.empty)
-        view.dispatch(
-          view.state.tr.setMeta(justifyShrinkPluginKey, []).setMeta('addToHistory', false),
-        )
+        return () => () =>
+          view.dispatch(
+            view.state.tr.setMeta(justifyShrinkPluginKey, []).setMeta('addToHistory', false),
+          )
       return
     }
-    if (!view.dom.isConnected) {
-      this.scheduleRetry()
-      return
-    }
+    if (!view.dom.isConnected) return () => () => this.scheduleRetry()
 
     const paras: Array<{ node: ProseMirrorNode; pos: number }> = []
     view.state.doc.descendants((node, pos) => {
@@ -386,11 +409,26 @@ class JustifyShrinkView {
       return false
     })
 
-    const shrinks: MeasuredShrink[] = []
-    let measurable = paras.length === 0
-    const measuredParas = this.results.measurePass(view, paras, (para, el, reuseNoOpWhile) =>
-      this.measureParagraph(para.node, para.pos, el, reuseNoOpWhile),
+    const read = this.results.startMeasurePass(
+      view,
+      paras,
+      (para, el, reuseNoOpWhile) => this.measureParagraph(para.node, para.pos, el, reuseNoOpWhile),
+      { trackProposal: this.measurement.pending },
     )
+    return (deadline: number) => {
+      const measured = read(deadline)
+      if (measured) return () => this.publishMeasurement(old, measured)
+    }
+  }
+
+  private publishMeasurement(
+    old: DecorationSet | undefined,
+    measuredParas: Array<MeasuredShrink[] | null>,
+  ) {
+    this.results.acceptMeasuredResults()
+    const { view } = this
+    const shrinks: MeasuredShrink[] = []
+    let measurable = measuredParas.length === 0
     for (const measured of measuredParas) {
       if (!measured) continue
       measurable = true
