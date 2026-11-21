@@ -575,16 +575,31 @@ class CjkPunctShrinkView {
     this.results.acceptMeasuredResults()
 
     if (shrinks.length === 0 && (!old || old === DecorationSet.empty)) return
-    const decos = shrinks.map((s) =>
-      Decoration.inline(
+    const decos = shrinks.map((s) => {
+      const style = shrinkStyle(s.ch, s.perChar, s.baseLs)
+      return Decoration.inline(
         s.from,
         s.from + 1,
-        { class: 'doc-cjkshrink', style: shrinkStyle(s.ch, s.perChar, s.baseLs) },
-        { hang: s.hang === true },
-      ),
-    )
+        { class: 'doc-cjkshrink', style },
+        { hang: s.hang === true, style },
+      )
+    })
     const next = DecorationSet.create(view.state.doc, decos)
-    if (old?.eq(next)) return
+    const rendered = old?.find() ?? []
+    const proposed = next.find()
+    if (
+      rendered.length === proposed.length &&
+      rendered.every((decoration, index) => {
+        const candidate = proposed[index]
+        return (
+          decoration.from === candidate.from &&
+          decoration.to === candidate.to &&
+          decoration.spec.style === candidate.spec.style &&
+          decoration.spec.hang === candidate.spec.hang
+        )
+      })
+    )
+      return
     view.dispatch(
       view.state.tr.setMeta(cjkPunctShrinkPluginKey, next).setMeta('addToHistory', false),
     )
