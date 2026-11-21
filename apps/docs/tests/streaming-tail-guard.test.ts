@@ -60,6 +60,45 @@ describe('appendedStreamedTail', () => {
     expect(tail).toEqual({ from: end, content: editor.state.doc.content.cut(end) })
   })
 
+  it('retains the trailing anchor widget and builds streamed table decorations at the same positions as a full load', () => {
+    const editor = createEditor()
+    const picture = (docxIndex: number): JsonNode => ({
+      type: 'docProtected',
+      attrs: {
+        blockType: 'image',
+        docxIndex,
+        imageWrap: 'square-left',
+        anchorLine: { spaceBefore: 120 },
+      },
+    })
+    const ruled: JsonNode = {
+      ...para('fill in the blank'),
+      attrs: { ruleOverlays: [{ xPx: 8, yPx: 16, widthPx: 32, spaceBeforePx: 0 }] },
+    }
+    const table: JsonNode = {
+      type: 'docTable',
+      content: [{ type: 'docTableRow', content: [{ type: 'docTableCell', content: [ruled] }] }],
+    }
+    const prefix = [ruled, picture(1)]
+    const tail = [para('following'), table, picture(2)]
+    editor.commands.setContent({ type: 'doc', content: prefix })
+    const selector = '.doc-anchor-line, .doc-rule-overlay, .doc-p-ruled'
+    const original = Array.from(editor.view.dom.querySelectorAll(selector))
+    expect(original).toHaveLength(3)
+    appendStreamedNodes(editor, tail as never)
+    const streamed = Array.from(editor.view.dom.querySelectorAll(selector))
+    expect(streamed).toHaveLength(6)
+    original.forEach((element, index) => expect(streamed[index]).toBe(element))
+    expect(streamed[2].nextElementSibling?.textContent).toBe('following')
+    expect(streamed[4].closest('td')).not.toBeNull()
+
+    const full = createEditor()
+    full.commands.setContent({ type: 'doc', content: [...prefix, ...tail] })
+    editor.commands.setTextSelection(1)
+    full.commands.setTextSelection(1)
+    expect(editor.view.dom.innerHTML).toBe(full.view.dom.innerHTML)
+  })
+
   it('rejects edits and streamed replacements that can change a mounted block', () => {
     const editor = createEditor()
     const end = editor.state.doc.content.size

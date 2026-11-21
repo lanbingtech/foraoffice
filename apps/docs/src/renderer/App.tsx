@@ -3229,10 +3229,36 @@ export function App({
    *  reuse the numId of an existing same-kind instance, otherwise fall back to creating a definition */
   useEffect(() => {
     if (!editor) return
-    const fill = () => {
+    let resolvedDoc: typeof editor.state.doc | null = null
+    const fill: Parameters<typeof editor.on<'update'>>[1] = ({
+      transaction,
+      appendedTransactions,
+    }) => {
+      const doc = editor.state.doc
+      // A verified append cannot invalidate the list IDs in its known prefix.
+      if (transaction.before === resolvedDoc) {
+        const updates = [transaction, ...appendedTransactions].filter((tr) => tr.docChanged)
+        if (
+          updates.at(-1)?.doc === doc &&
+          updates.every((tr) => {
+            const tail = appendedStreamedTail(tr)
+            if (!tail) return false
+            let missing = false
+            tail.content.descendants((node) => {
+              if (node.type.name !== 'docListItem') return !missing
+              if (node.attrs.numId === null) missing = true
+              return false
+            })
+            return !missing
+          })
+        ) {
+          resolvedDoc = doc
+          return
+        }
+      }
       const missing: Array<{ pos: number; attrs: Record<string, unknown> }> = []
       const reuse: Partial<Record<'bullet' | 'ordered', string>> = {}
-      editor.state.doc.descendants((node, pos) => {
+      doc.descendants((node, pos) => {
         if (node.type.name !== 'docListItem') return
         const kind = (node.attrs.kind as 'bullet' | 'ordered') ?? 'bullet'
         if (node.attrs.numId !== null) {
@@ -3241,7 +3267,10 @@ export function App({
         }
         missing.push({ pos, attrs: node.attrs })
       })
-      if (missing.length === 0) return
+      if (missing.length === 0) {
+        resolvedDoc = doc
+        return
+      }
       const idOf: Partial<Record<'bullet' | 'ordered', string | null>> = {}
       let tr = editor.state.tr
       for (const item of missing) {
