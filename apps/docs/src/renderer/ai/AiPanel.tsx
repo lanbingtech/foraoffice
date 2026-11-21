@@ -19,6 +19,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { aiRevisionAuthor } from './revision-author'
 import type { Editor } from '@tiptap/core'
+import type { Transaction } from '@tiptap/pm/state'
 import type { Block } from '@genoffice/docx-engine'
 import {
   AgentLoop,
@@ -30,7 +31,7 @@ import {
   type KbFileInfo,
   type MindMapTreeNode,
 } from '@genoffice/agent-core'
-import { redactTextBetween, type RedactableNode } from './redact-view'
+import { redactEditorRange } from './redact-view'
 import { imageGenerationAvailable, mediaAnalysisAvailable } from '@genoffice/ai-provider/browser'
 import type { AiSettings, AttachmentAddResult, AttachmentMeta } from '../../shared/ipc'
 import { ATTACHMENT_IMAGE_EXTS } from '../../shared/ipc'
@@ -80,6 +81,7 @@ import { KIND_LABEL } from '../components/ReviewingPane'
 import { STORY_LABEL } from '../editor/story-revisions'
 import { DOCS_CONTINUE_INSTRUCTION } from './continuation'
 import { waitForFullContent } from '../phased-content'
+import { appendedStreamedTail } from '../editor/streaming-tail-guard'
 import { currentDocGeneration } from '../file-actions'
 import { createFilesSkill } from './files-skill'
 import { createSkillsSkill } from './skills-skill'
@@ -992,11 +994,24 @@ export function AiPanel({
       if (editor.state.selection.empty) setScopePreviewOpen(false)
       setScopeTick((t) => t + 1)
     }
+    const updateScope = ({
+      transaction,
+      appendedTransactions = [],
+    }: {
+      transaction: Transaction
+      appendedTransactions?: readonly Transaction[]
+    }) => {
+      if (
+        !appendedStreamedTail(transaction) ||
+        appendedTransactions.some((tr) => tr.docChanged && !appendedStreamedTail(tr))
+      )
+        bump()
+    }
     editor.on('selectionUpdate', bump)
-    editor.on('update', bump)
+    editor.on('update', updateScope)
     return () => {
       editor.off('selectionUpdate', bump)
-      editor.off('update', bump)
+      editor.off('update', updateScope)
     }
   }, [editor])
 
@@ -1004,12 +1019,7 @@ export function AiPanel({
   const liveSelection = editor.state.selection
   const selectionText = liveSelection.empty
     ? ''
-    : redactTextBetween(
-        editor.getJSON() as RedactableNode,
-        liveSelection.from,
-        liveSelection.to,
-        '\n',
-      )
+    : redactEditorRange(editor.state.doc, liveSelection.from, liveSelection.to, '\n')
         .replace(/\s+/g, ' ')
         .trim()
   const hasScopeSelection = selectionText.length > 0
@@ -1022,9 +1032,7 @@ export function AiPanel({
   const selectionScopeQuote = (): AiScopeQuoteData | undefined => {
     const { from, to, empty } = editor.state.selection
     if (empty) return undefined
-    const text = redactTextBetween(editor.getJSON() as RedactableNode, from, to, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
+    const text = redactEditorRange(editor.state.doc, from, to, ' ').replace(/\s+/g, ' ').trim()
     if (!text) return undefined
     return {
       label: t('aiScopeSelection', { words: countWords(text) }),

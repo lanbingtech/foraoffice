@@ -1322,10 +1322,7 @@ test('production document performance and correctness evidence', async () => {
               .poll(() => scroller.evaluate((element) => element.scrollTop), { timeout: 3000 })
               .toBe(0)
           }
-          const origin =
-            owner && action !== 'go-to'
-              ? await calibrateNativeViewport(live.page, owner)
-              : undefined
+          const origin = owner ? await calibrateNativeViewport(live.page, owner) : undefined
           const capture = (previousGeneration?: number) =>
             observeViewport({
               page: live.page,

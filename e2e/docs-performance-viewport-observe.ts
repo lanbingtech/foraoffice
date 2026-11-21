@@ -225,6 +225,7 @@ export type RecordedViewportObservation = ViewportObservation & {
   after?: ViewportState
   actionPlan?: unknown
   receipt?: NativeReceipt
+  closeReceipt?: NativeReceipt
   screenshot?: string
 }
 
@@ -252,6 +253,27 @@ export async function observeViewport({
     observation: 'unavailable',
   }
   const input = page.locator('.find-panel input.find-goto-input')
+  const dismissGoTo = async () => {
+    const close = page.locator('.find-panel .find-close')
+    const ratio = record.before?.ratio
+    if (!owner) {
+      await close.click({ timeout: 3000 })
+      return
+    }
+    if (!origin || !ratio) throw new Error('Windows client-to-viewport calibration is missing')
+    const bounds = await close.boundingBox({ timeout: 3000 })
+    if (!bounds) throw new Error('The Go To close button has no screen coordinates')
+    const x = Math.round(origin.x + (bounds.x + bounds.width / 2) * ratio)
+    const y = Math.round(origin.y + (bounds.y + bounds.height / 2) * ratio)
+    // A stationary leg sends a native press and release at the close button.
+    record.closeReceipt = await sendNativeInput(owner, {
+      action: 'drag',
+      x,
+      y,
+      segments: [{ y, steps: 1, pauseMs: 1 }],
+    })
+    await close.waitFor({ state: 'detached', timeout: 3000 })
+  }
   let panelOpened = false
   let armed = false
   const inPhase = (state: ViewportState) =>
@@ -409,7 +431,7 @@ export async function observeViewport({
     }
     if (panelOpened) {
       try {
-        await page.locator('.find-panel .find-close').click({ timeout: 3000 })
+        await dismissGoTo()
       } catch (error) {
         record.reason = [record.reason, String(error)].filter(Boolean).join('\n')
         if (record.observation === 'captured') record.observation = 'failed'
