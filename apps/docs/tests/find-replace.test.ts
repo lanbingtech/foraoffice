@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Editor, type JSONContent } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import {
@@ -336,6 +336,12 @@ describe('go to', () => {
     expect(resolveGoToIndex('99', 0, 10)).toBe(9)
     expect(resolveGoToIndex('abc', 0, 10)).toBe(null)
     expect(resolveGoToIndex('1', 0, 0)).toBe(null)
+    const locateCurrent = vi.fn(() => 4)
+    expect(resolveGoToIndex('7', locateCurrent, 10)).toBe(6)
+    expect(resolveGoToIndex('invalid', locateCurrent, 10)).toBeNull()
+    expect(locateCurrent).not.toHaveBeenCalled()
+    expect(resolveGoToIndex('+2', locateCurrent, 10)).toBe(6)
+    expect(locateCurrent).toHaveBeenCalledTimes(1)
   })
 
   it('keeps the page number after a parity blank', () => {

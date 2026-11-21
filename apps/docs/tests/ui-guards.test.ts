@@ -1,10 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createElement } from 'react'
+import { createElement, createRef } from 'react'
 import { createRoot } from 'react-dom/client'
 import { act } from 'react'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
-import { FindPanel, findMatches, foldCase } from '../src/renderer/components/FindPanel'
+import {
+  FindPanel,
+  FindPanelHost,
+  findMatches,
+  foldCase,
+  type FindPanelHandle,
+} from '../src/renderer/components/FindPanel'
 import { SCAN_THRESHOLD } from '../src/renderer/editor/find'
 import {
   clampPictureTwips,
@@ -91,6 +97,28 @@ describe('clampPictureTwips', () => {
 describe('FindPanel', () => {
   afterEach(() => {
     vi.useRealTimers()
+  })
+
+  it('opens and closes Go To without rendering the editor host or clearing absent highlights', () => {
+    const editor = createEditor('hello world')
+    const panelRef = createRef<FindPanelHandle>()
+    const Host = vi.fn(() => createElement(FindPanelHost, { editor, panelRef, hasDocument: true }))
+    const { container, unmount } = render(createElement(Host))
+    const transactions = vi.fn()
+    editor.on('transaction', transactions)
+    try {
+      act(() => panelRef.current!.show('goto'))
+      expect(document.activeElement).toBe(container.querySelector('.find-goto-input'))
+      act(() => container.querySelector<HTMLButtonElement>('.find-close')!.click())
+      expect(container.querySelector('.find-panel')).toBeNull()
+      expect(transactions).not.toHaveBeenCalled()
+      act(() => panelRef.current!.show('find'))
+      expect(document.activeElement).toBe(container.querySelector('.find-input'))
+      expect(Host).toHaveBeenCalledTimes(1)
+    } finally {
+      unmount()
+      editor.destroy()
+    }
   })
 
   it('hides the Replace tab when the editor is read-only', () => {

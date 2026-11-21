@@ -131,7 +131,7 @@ export function blockIndexAtPos(view: EditorView, layout: PageLayout, pos: numbe
 export function pagePositions(view: EditorView, layout: PageLayout): Array<number | null> {
   const { blocks, slices, cuts } = layout
   const gaps = pageGapPositions(view.state)
-  const index = new BlockIndex(blocks)
+  let fallbackIndex: BlockIndex | undefined
   const positions: Array<number | null> = []
   slices.forEach((slice, i) => {
     if (!sliceStartsVisiblePage(slice, slices[i - 1])) return
@@ -142,7 +142,13 @@ export function pagePositions(view: EditorView, layout: PageLayout): Array<numbe
     else if (lead?.kind === 'tail') positions.push(view.state.doc.content.size)
     else if (lead?.kind === 'block') positions.push(blockPos(view, blocks[lead.block]))
     else if (lead && i > 0) positions.push(null)
-    else positions.push(blockPos(view, blocks[i === 0 ? 0 : index.firstAtTop(slice.start)]))
+    else
+      positions.push(
+        blockPos(
+          view,
+          blocks[i === 0 ? 0 : (fallbackIndex ??= new BlockIndex(blocks)).firstAtTop(slice.start)],
+        ),
+      )
   })
   return positions
 }
@@ -253,16 +259,17 @@ export function linePosition(view: EditorView, layout: PageLayout, line: number)
  */
 export function resolveGoToIndex(
   input: string,
-  current: number,
+  current: number | (() => number),
   count: number,
   dir: 1 | -1 = 1,
 ): number | null {
   if (count <= 0) return null
   const s = input.trim()
   const clamp = (i: number) => Math.max(0, Math.min(count - 1, i))
-  if (!s) return clamp(current + dir)
+  const currentIndex = () => (typeof current === 'number' ? current : current())
+  if (!s) return clamp(currentIndex() + dir)
   const rel = /^([+-])(\d+)$/.exec(s)
-  if (rel) return clamp(current + (rel[1] === '+' ? 1 : -1) * Number(rel[2]))
+  if (rel) return clamp(currentIndex() + (rel[1] === '+' ? 1 : -1) * Number(rel[2]))
   if (/^\d+$/.test(s)) return clamp(Number(s) - 1)
   return null
 }

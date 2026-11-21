@@ -346,7 +346,7 @@ import { saveUntilPersisted } from './save-until-persisted'
 import { SPELLCHECK_KEY, spellcheckEnabled } from './spellcheck-pref'
 import { createDocumentSummary } from './document-summary'
 import { useShallowStable, useStableCallbacks } from './use-stable'
-import { FindPanel } from './components/FindPanel'
+import { FindPanelHost, type FindPanelHandle } from './components/FindPanel'
 import { ZoomDialog } from './components/ZoomDialog'
 import { TrackChangesOptionsDialog } from './components/TrackChangesOptionsDialog'
 import {
@@ -1057,17 +1057,15 @@ export function App({
   const [splitView, setSplitView] = useState(false)
   const [showPagePreview, setShowPagePreview] = useState(false)
   const [splitHtml, setSplitHtml] = useState('')
-  const [showFind, setShowFind] = useState(false)
+  const findPanelRef = useRef<FindPanelHandle>(null)
   const [imageDragOver, setImageDragOver] = useState(false)
-  const [findFocusInput, setFindFocusInput] = useState(0)
-  const [findFocusReplace, setFindFocusReplace] = useState(0)
-  const [findFocusGoTo, setFindFocusGoTo] = useState(0)
   // last pagination pass, read by the Go To tab (page / section / line targets)
   const pageLayoutRef = useRef<PageLayout | null>(null)
   const annotationFirstPageRef = useRef<{ left: number; width: number } | undefined>(undefined)
   /** live section list of the last pass (header obstacles of the next pass) */
   const lastSecListRef = useRef<SectionInfo[] | null>(null)
   const cutsNow = useCallback(() => pageLayoutRef.current?.cuts, [])
+  const publishedPageLayout = useCallback(() => pageLayoutRef.current, [])
   const prepareDocStylesRef = useRef<() => boolean>(() => false)
   /** runs the debounced pagination pass now (set by the scheduler effect) */
   const flushPaginationRef = useRef<(force?: boolean) => void>(() => {})
@@ -4812,7 +4810,7 @@ export function App({
           flowRead = { pm, reader: createBlockMeasurer(pm) }
         }
         const { blocks, totalHeight, floats } =
-          linearFlow && flowRead && end === undefined
+          linearFlow && flowRead
             ? flowRead.reader.measure({
                 origin,
                 width: rect.width,
@@ -4833,6 +4831,7 @@ export function App({
                 planOf,
                 shadow: pageReaderShadow.enabled,
                 carryOf,
+                end,
               })
             : measureBlocks(pm, origin, factor, planOf, pageReaderShadow.enabled, carryOf, end)
         if (hasVertical)
@@ -6813,20 +6812,13 @@ export function App({
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
         e.preventDefault()
-        if (doc) {
-          // bump even when the panel is already open: focus returns to the find box
-          setShowFind(true)
-          setFindFocusInput((n) => n + 1)
-        }
+        if (doc) findPanelRef.current?.show('find')
       }
       // Word's replace: Ctrl+H everywhere (macOS Cmd+H is the system hide role,
       // which never reaches the renderer, so this branch is Ctrl+H there too)
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === 'h') {
         e.preventDefault()
-        if (doc) {
-          setShowFind(true)
-          setFindFocusReplace((n) => n + 1)
-        }
+        if (doc) findPanelRef.current?.show('replace')
       }
       // Go To: ⌥⌘G on the Mac (Word for Mac), Ctrl+G elsewhere (⇧⌘G stays Word Count)
       if (
@@ -6837,8 +6829,7 @@ export function App({
         doc
       ) {
         e.preventDefault()
-        setShowFind(true)
-        setFindFocusGoTo((n) => n + 1)
+        findPanelRef.current?.show('goto')
       }
       // Word dialog shortcuts: Font ⌘D / Paragraph ⌥⌘M / Hyperlink ⌘K
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === 'd' && doc && canEdit) {
@@ -7228,22 +7219,13 @@ export function App({
           setRibbonTabRequest({ tab: 'layout', nonce: Date.now() })
           break
         case 'find':
-          if (doc) {
-            setShowFind(true)
-            setFindFocusInput((n) => n + 1)
-          }
+          if (doc) findPanelRef.current?.show('find')
           break
         case 'replace':
-          if (doc) {
-            setShowFind(true)
-            setFindFocusReplace((n) => n + 1)
-          }
+          if (doc) findPanelRef.current?.show('replace')
           break
         case 'goto':
-          if (doc) {
-            setShowFind(true)
-            setFindFocusGoTo((n) => n + 1)
-          }
+          if (doc) findPanelRef.current?.show('goto')
           break
         case 'export-pdf':
           void exportPdf()
@@ -9313,14 +9295,8 @@ export function App({
         editor={editor}
         formatState={formatState}
         hasDoc={!!doc}
-        onFind={() => {
-          setShowFind(true)
-          setFindFocusInput((n) => n + 1)
-        }}
-        onReplace={() => {
-          setShowFind(true)
-          setFindFocusReplace((n) => n + 1)
-        }}
+        onFind={() => findPanelRef.current?.show('find')}
+        onReplace={() => findPanelRef.current?.show('replace')}
         blocks={doc?.parsed.blocks ?? EMPTY_BLOCKS}
         styles={ribbonStyles}
         docDefaults={doc?.parsed.docDefaults}
@@ -9445,22 +9421,12 @@ export function App({
         )}
         <div className="app-content">
           <div className={workspaceClass}>
-            {doc && showFind && (
-              <FindPanel
-                editor={editor}
-                onClose={() => {
-                  setShowFind(false)
-                  // else the next plain ⌘F remount would still see a truthy nonce
-                  // and land focus on the replace / go-to field
-                  setFindFocusReplace(0)
-                  setFindFocusGoTo(0)
-                }}
-                focusFindNonce={findFocusInput}
-                focusReplaceNonce={findFocusReplace}
-                focusGoToNonce={findFocusGoTo}
-                layout={() => pageLayoutRef.current}
-              />
-            )}
+            <FindPanelHost
+              editor={editor}
+              hasDocument={!!doc}
+              panelRef={findPanelRef}
+              layout={publishedPageLayout}
+            />
             {doc && showNav && (
               <NavPane
                 editor={editor}
@@ -9825,10 +9791,7 @@ export function App({
                   <button
                     className="status-item status-btn status-page"
                     data-tip={t('appGoToTitle')}
-                    onClick={() => {
-                      setShowFind(true)
-                      setFindFocusGoTo((n) => n + 1)
-                    }}
+                    onClick={() => findPanelRef.current?.show('goto')}
                   >
                     <span ref={pageStatusLabel} />
                   </button>

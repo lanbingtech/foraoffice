@@ -48,6 +48,27 @@ describe('natural-flow measurement state', () => {
 })
 
 describe('incremental flow measurement', () => {
+  it('retains already measured blocks while resizing the published range', () => {
+    const pm = flowOf([
+      { top: 0, height: 20, inner: 'prefix' },
+      { top: 20, height: 20, inner: 'old last block' },
+      { top: 40, height: 20, inner: 'later block' },
+    ])
+    const reader = createBlockMeasurer(pm)
+    const options = { origin: 0, factor: 1, width: 100, allowReuse: true }
+    try {
+      expect(reader.measure({ ...options, end: 2 }).totalHeight).toBe(40)
+      const expected = measureBlocks(pm, 0, 1)
+      const prefix = vi.spyOn(pm.children[0], 'getBoundingClientRect')
+      expect(reader.measure({ ...options, firstChangedChild: () => 2 })).toEqual(expected)
+      expect(prefix).not.toHaveBeenCalled()
+      expect(reader.measure({ ...options, end: 1 }).totalHeight).toBe(20)
+      expect(reader.measure(options)).toEqual(expected)
+    } finally {
+      reader.dispose()
+    }
+  })
+
   it.each(['img-wrap-square-left', 'img-wrap-topBottom'])(
     'reads the full flow when the outer image wrapper has %s',
     (name) => {

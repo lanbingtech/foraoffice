@@ -901,6 +901,8 @@ interface FlowRead {
   planOf?: PlanOf
   shadow?: boolean
   carryOf?: (pos: number) => number | undefined
+  /** Live DOM child index after the published measurement range. */
+  end?: number
 }
 
 // These boxes can affect earlier flow or gain geometry without a text/DOM edit.
@@ -991,6 +993,7 @@ export function createBlockMeasurer(pm: HTMLElement) {
   return {
     measure(input: FlowRead): MeasuredContent {
       invalidate(observer.takeRecords())
+      const end = input.end ?? pm.children.length
       const linear = !hasNonLocalFlow(pm)
       // Intrinsic image size can change without a DOM mutation, including
       // before a queued load event. An inline image invalidates its block.
@@ -1001,7 +1004,7 @@ export function createBlockMeasurer(pm: HTMLElement) {
         }
       const count = Math.min(
         frontier,
-        pm.children.length,
+        end,
         input.allowReuse && snapshot && linear && input.firstChangedChild
           ? Math.max(0, input.firstChangedChild() - 1)
           : Infinity,
@@ -1031,12 +1034,26 @@ export function createBlockMeasurer(pm: HTMLElement) {
               snapshot = value
             }
           : undefined,
+        end,
       )
-      positions = snapshot ? new Map(Array.from(pm.children, (child, i) => [child, i])) : new Map()
+      positions = new Map()
       images.clear()
-      if (snapshot)
-        for (const img of pm.querySelectorAll<HTMLImageElement>(CONTENT_IMAGE))
-          images.set(img, intrinsicImageGeometry(img))
+      if (snapshot) {
+        const bounded = end < pm.children.length
+        for (let i = 0; i < end; i++) {
+          const child = pm.children[i]
+          positions.set(child, i)
+          if (bounded) {
+            if (child instanceof HTMLImageElement && child.matches(CONTENT_IMAGE))
+              images.set(child, intrinsicImageGeometry(child))
+            for (const img of child.querySelectorAll<HTMLImageElement>(CONTENT_IMAGE))
+              images.set(img, intrinsicImageGeometry(img))
+          }
+        }
+        if (!bounded)
+          for (const img of pm.querySelectorAll<HTMLImageElement>(CONTENT_IMAGE))
+            images.set(img, intrinsicImageGeometry(img))
+      }
       frontier = positions.size
       width = input.width
       factor = input.factor

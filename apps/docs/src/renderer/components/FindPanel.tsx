@@ -1,7 +1,16 @@
 // Modified for ForaOffice from GenOffice v0.12.852.
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type Ref,
+} from 'react'
 import type { Editor } from '@tiptap/core'
 import { TextSelection, type Transaction } from '@tiptap/pm/state'
+import { DecorationSet } from '@tiptap/pm/view'
 import { useI18n, type StringKey } from '../i18n/locale'
 import { searchPluginKey } from '../editor/extensions'
 import {
@@ -62,6 +71,46 @@ interface FindPanelProps {
   focusGoToNonce?: number
   /** last pagination pass, for page / section / line targets */
   layout?: () => PageLayout | null
+}
+
+export interface FindPanelHandle {
+  show(tab: FindTab): void
+}
+
+export function FindPanelHost({
+  editor,
+  hasDocument,
+  layout,
+  panelRef,
+}: Pick<FindPanelProps, 'editor' | 'layout'> & {
+  hasDocument: boolean
+  panelRef: Ref<FindPanelHandle>
+}) {
+  const [request, setRequest] = useState({ open: false, find: 0, replace: 0, goto: 0 })
+  useImperativeHandle(
+    panelRef,
+    () => ({
+      show(tab) {
+        setRequest((current) => ({ ...current, open: true, [tab]: current[tab] + 1 }))
+      },
+    }),
+    [],
+  )
+  const close = useCallback(() => {
+    setRequest((current) => ({ open: false, find: current.find, replace: 0, goto: 0 }))
+  }, [])
+
+  if (!hasDocument || !request.open) return null
+  return (
+    <FindPanel
+      editor={editor}
+      onClose={close}
+      focusFindNonce={request.find}
+      focusReplaceNonce={request.replace}
+      focusGoToNonce={request.goto}
+      layout={layout}
+    />
+  )
 }
 
 const SCAN_DEBOUNCE_MS = 150
@@ -159,6 +208,8 @@ export function FindPanel({
 
   const highlight = useCallback(
     (ranges: FindMatch[], activeIndex: number) => {
+      if (ranges.length === 0 && searchPluginKey.getState(editor.state) === DecorationSet.empty)
+        return
       const shown =
         ranges.length > HIGHLIGHT_CAP && ranges[activeIndex]
           ? { ranges: [ranges[activeIndex]], activeIndex: 0 }
@@ -417,20 +468,26 @@ export function FindPanel({
     const caret = editor.state.selection.from
     const view = editor.view
     let positions: Array<number | null>
-    let current: number
+    let current: () => number
     if (target === 'page' || target === 'section') {
       if (!lay) return setGotoMiss(true)
       positions = target === 'page' ? pagePositions(view, lay) : sectionPositions(view, lay)
-      current = Math.max(0, lastAtOrBefore(positions, caret))
-      if (target === 'page' && lay.pageAtScreenY) {
-        const rect = view.coordsAtPos(caret, 1)
-        current = Math.max(0, lay.pageAtScreenY((rect.top + rect.bottom) / 2) - 1)
+      current = () => {
+        if (target === 'page' && lay.pageAtScreenY) {
+          const rect = view.coordsAtPos(caret, 1)
+          return Math.max(0, lay.pageAtScreenY((rect.top + rect.bottom) / 2) - 1)
+        }
+        return Math.max(0, lastAtOrBefore(positions, caret))
       }
     } else if (target === 'line') {
       if (!lay) return setGotoMiss(true)
       const total = lineCounts(lay).reduce((a, b) => a + b, 0)
-      current = lineIndexAtPos(view, lay, caret)
-      const idx = resolveGoToIndex(explicit ? gotoInput : '', current, total, dir)
+      const idx = resolveGoToIndex(
+        explicit ? gotoInput : '',
+        () => lineIndexAtPos(view, lay, caret),
+        total,
+        dir,
+      )
       if (idx === null) return setGotoMiss(true)
       const pos = linePosition(view, lay, idx + 1)
       if (pos === null) return setGotoMiss(true)
@@ -439,7 +496,7 @@ export function FindPanel({
       return
     } else {
       positions = gotoItems.map((i) => i.pos)
-      current = lastAtOrBefore(positions, caret)
+      current = () => lastAtOrBefore(positions, caret)
     }
     let idx: number | null
     if (target === 'bookmark' && explicit && gotoInput) {
