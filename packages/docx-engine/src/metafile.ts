@@ -86,32 +86,6 @@ function looksLikeWmf(bytes: Uint8Array): boolean {
 export interface MetafileRasterOptions {
   /** Longest raster side in device px; the converter scales down preserving the aspect ratio */
   maxSidePx?: number
-  /** Authored display size of a placeable WMF OLE preview, in CSS pixels. */
-  placeableWmfPreview?: { width: number; height: number }
-}
-
-function placeableWmfPreviewSide(
-  bytes: Uint8Array,
-  width: number,
-  height: number,
-): number | undefined {
-  if (
-    bytes.length < 40 ||
-    !Number.isFinite(width) ||
-    !Number.isFinite(height) ||
-    width <= 0 ||
-    height <= 0
-  )
-    return undefined
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  if (view.getUint32(0, true) !== 0x9ac6cdd7) return undefined
-  const logicalWidth = view.getInt16(10, true) - view.getInt16(6, true)
-  const logicalHeight = view.getInt16(12, true) - view.getInt16(8, true)
-  if (view.getUint16(14, true) === 0 || logicalWidth <= 0 || logicalHeight <= 0) return undefined
-  // Keep the WMF aspect ratio while allocating at least four samples per
-  // authored CSS pixel on both axes before the existing canvas limit.
-  const samplesPerUnit = 4 * Math.max(width / logicalWidth, height / logicalHeight)
-  return Math.ceil(Math.max(logicalWidth, logicalHeight) * samplesPerUnit)
 }
 
 export async function metafileToDataUrl(
@@ -130,15 +104,11 @@ export async function metafileToDataUrl(
     if (looksLikeEmf(u8)) isEmf = true
     else if (looksLikeWmf(u8)) isEmf = false
     else isEmf = EMF_MIMES.has(mime) || EMZ_MIMES.has(mime)
-    const preview = raster.placeableWmfPreview
-    const maxSidePx =
-      raster.maxSidePx ??
-      (!isEmf && preview ? placeableWmfPreviewSide(u8, preview.width, preview.height) : undefined)
     const opts = {
       dpiScale: 2,
       fontFamilyMap: FONT_FAMILY_MAP,
       symbolTextMap: decodeSymbolText,
-      ...(maxSidePx ? { maxWidth: maxSidePx, maxHeight: maxSidePx } : {}),
+      ...(raster.maxSidePx ? { maxWidth: raster.maxSidePx, maxHeight: raster.maxSidePx } : {}),
     }
     const result = isEmf
       ? await convertEmfToDataUrl(buffer, opts)

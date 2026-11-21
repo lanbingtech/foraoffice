@@ -933,7 +933,7 @@ test('production document performance and correctness evidence', async () => {
         operation: 'qt-core-pilot',
         status: 'completed',
         exercised: ['fresh-open', 'hot-open', ...edits, 'wheel'],
-        omitted: ['native-os-ime', 'save', 'pdf'],
+        omitted: ['native-os-ime', 'save', 'pdf', 'normal-drag', 'fast-drag', 'go-to'],
         eligibleForFormalComparison: false,
       })
       return
@@ -1467,7 +1467,7 @@ test('production document performance and correctness evidence', async () => {
       correctness,
       acceptance: {
         scope: corePilot
-          ? 'Qt core smoke observations only; no native OS IME, save or PDF validation'
+          ? 'Qt core smoke observes opens, edits and wheel scrolling; see the omitted scenarios in details'
           : 'automated scenario sampling only; ticket acceptance requires the reviewed three-host A/A evidence',
         nativeOsIme: nativeImeAcceptance,
         viewport,

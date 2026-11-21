@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import JSZip from 'jszip'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { parseDocx, saveDocx } from '../src/index'
+import { metafileToDataUrl } from '../src/metafile'
 import { buildDocx } from './helpers/build-docx'
 import { FakeOffscreenCanvas, installFakeCanvas } from './helpers/fake-canvas'
 
@@ -35,8 +36,10 @@ function oleEquationRun(previewRid: string, oleRid: string): string {
   )
 }
 
+const PREVIEW_REL =
+  '<Relationship Id="%RID%" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.%EXT%"/>'
 const RELS =
-  '<Relationship Id="rId30" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.%EXT%"/>' +
+  PREVIEW_REL.replace('%RID%', 'rId30') +
   '<Relationship Id="rId31" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/oleObject1.bin"/>'
 
 function fixture(name: string): string {
@@ -53,11 +56,9 @@ afterAll(() => {
   restore()
 })
 
-async function parseEquation(preview: string, ext: string, inline = false) {
+async function parseEquation(preview: string, ext: string) {
   const bytes = await buildDocx({
-    bodyXml: inline
-      ? `<w:p><w:r><w:t>Formula:</w:t></w:r>${oleEquationRun('rId30', 'rId31')}</w:p>`
-      : oleEquationXml('rId30', 'rId31'),
+    bodyXml: oleEquationXml('rId30', 'rId31'),
     extraRels: RELS.replace('%EXT%', ext),
     binaryParts: [
       {
@@ -95,43 +96,79 @@ describe('MathType equation previews', () => {
     expect(block?.imageDataUrl).toMatch(/^data:image\/png;base64,/)
   })
 
-  it.each([false, true])(
-    'limits a high-coordinate WMF to its display size (inline: %s)',
-    async (inline) => {
-      const preview = Buffer.from(fixture('ole-icon.wmf'), 'base64')
-      preview.writeInt16LE(-10, 6)
-      preview.writeInt16LE(-20, 8)
-      preview.writeInt16LE(7190, 10)
-      preview.writeInt16LE(3980, 12)
-      preview.writeUInt16LE(7600, 14)
-      let checksum = 0
-      for (let offset = 0; offset < 20; offset += 2) checksum ^= preview.readUInt16LE(offset)
-      preview.writeUInt16LE(checksum, 20)
+  it('shares the full-resolution metafile across block and inline references', async () => {
+    const preview = Buffer.from(fixture('ole-icon.wmf'), 'base64')
+    preview.writeInt16LE(-10, 6)
+    preview.writeInt16LE(-20, 8)
+    preview.writeInt16LE(7190, 10)
+    preview.writeInt16LE(3980, 12)
+    preview.writeUInt16LE(7600, 14)
+    let checksum = 0
+    for (let offset = 0; offset < 20; offset += 2) checksum ^= preview.readUInt16LE(offset)
+    preview.writeUInt16LE(checksum, 20)
 
-      const encode = vi.spyOn(FakeOffscreenCanvas.prototype, 'convertToBlob')
-      try {
-        const parsed = await parseEquation(preview.toString('base64'), 'wmf', inline)
-        const block = parsed.blocks[0]!
-        const inlineImage = block.runs?.find((run) => run.image)?.image
-        expect(
-          inline
-            ? [inlineImage?.widthPx, inlineImage?.heightPx]
-            : [block.imageWidthPx, block.imageHeightPx],
-        ).toEqual([96, 48])
-        expect(encode.mock.contexts).toHaveLength(1)
-        const canvas = encode.mock.contexts[0] as FakeOffscreenCanvas
-        expect([canvas.width, canvas.height]).toEqual([384, 213])
-        const saved = await saveDocx(parsed, [{ kind: 'original', docxIndex: block.docxIndex! }])
-        const archive = await JSZip.loadAsync(saved)
-        expect(await archive.file('word/media/image1.wmf')!.async('nodebuffer')).toEqual(preview)
-        expect(await archive.file('word/embeddings/oleObject1.bin')!.async('base64')).toBe(
-          'AAECAwQ=',
-        )
-      } finally {
-        encode.mockRestore()
+    const encode = vi.spyOn(FakeOffscreenCanvas.prototype, 'convertToBlob')
+    try {
+      await metafileToDataUrl(preview, 'image/x-wmf')
+      const full = encode.mock.contexts[0] as FakeOffscreenCanvas
+      expect(full.width).toBeGreaterThan(96 * 5)
+      encode.mockClear()
+      const refs = ['rId30', 'rId32', 'rId33']
+      const bodyXml =
+        oleEquationXml(refs[0], 'rId31') +
+        refs
+          .slice(1)
+          .map((id) => `<w:p><w:r><w:t>Formula:</w:t></w:r>${oleEquationRun(id, 'rId31')}</w:p>`)
+          .join('')
+      const bytes = await buildDocx({
+        bodyXml,
+        extraRels:
+          RELS.replace('%EXT%', 'wmf') +
+          refs
+            .slice(1)
+            .map((id) => PREVIEW_REL.replace('%RID%', id).replace('%EXT%', 'wmf'))
+            .join(''),
+        binaryParts: [
+          {
+            path: 'word/media/image1.wmf',
+            base64: preview.toString('base64'),
+            extension: 'wmf',
+            contentType: 'image/x-wmf',
+          },
+          {
+            path: 'word/embeddings/oleObject1.bin',
+            base64: 'AAECAwQ=',
+            extension: 'bin',
+            contentType: 'application/vnd.openxmlformats-officedocument.oleObject',
+          },
+        ],
+      })
+      const parsed = await parseDocx(bytes)
+      const [block, ...inlines] = parsed.blocks.filter((entry) =>
+        entry.originalXml?.includes('<w:object'),
+      )
+      expect(encode.mock.contexts).toHaveLength(1)
+      expect(inlines).toHaveLength(2)
+      expect(block?.imageDataUrl).toMatch(/^data:image\/png;base64,/)
+      expect([block?.imageWidthPx, block?.imageHeightPx]).toEqual([96, 48])
+      for (const inline of inlines) {
+        const image = inline.runs?.find((run) => run.image)?.image
+        expect(image?.dataUrl).toBe(block.imageDataUrl)
+        expect([image?.widthPx, image?.heightPx]).toEqual([96, 48])
       }
-    },
-  )
+      const canvas = encode.mock.contexts[0] as FakeOffscreenCanvas
+      expect([canvas.width, canvas.height]).toEqual([full.width, full.height])
+      const saved = await saveDocx(
+        parsed,
+        parsed.blocks.map((entry) => ({ kind: 'original', docxIndex: entry.docxIndex! })),
+      )
+      const archive = await JSZip.loadAsync(saved)
+      expect(await archive.file('word/media/image1.wmf')!.async('nodebuffer')).toEqual(preview)
+      expect(await archive.file('word/embeddings/oleObject1.bin')!.async('base64')).toBe('AAECAwQ=')
+    } finally {
+      encode.mockRestore()
+    }
+  })
 
   it('shows the equation when it shares the paragraph with text', async () => {
     const bytes = await buildDocx({

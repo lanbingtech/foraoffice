@@ -490,7 +490,6 @@ export async function parseDocx(
     themeColors: theme.colors,
     themeFonts: theme.fonts,
     mediaByRid,
-    olePreviewSizes: uniqueOlePreviewSizes(documentXml),
     externalTxbxByRid,
     referenceOnlyComments,
     sectionAt,
@@ -758,7 +757,6 @@ interface BuildContext {
   themeFonts?: ThemeFonts | null
   /** pre-resolved a:blip rId -> data/external URL for pictures inside w:tbl (extractCell is sync, media reads are async) */
   mediaByRid?: Map<string, string>
-  olePreviewSizes?: Map<string, { width: number; height: number }>
   /** pre-fetched external textbox parts (wps:txbx r:txbx -> word/txbx*.xml content; extractTextboxes is sync) */
   externalTxbxByRid?: Map<string, string>
   /** comment ids anchored only by a bare w:commentReference (no range markers anywhere in document.xml, LibreOffice style) */
@@ -8953,17 +8951,11 @@ async function mediaDataUrl(
   rels: Map<string, RelInfo>,
   rId: string,
   sourcePath = 'word/document.xml',
-  previewSize?: { width: number; height: number },
 ): Promise<string | null> {
   const rel = rels.get(rId)
   if (!rel || rel.targetMode === 'External') return null
   const partPath = resolveRelationshipTargetPath(sourcePath, rel.target)
-  if (!partPath) return null
-  // A sized preview is local to its relationship use. Other references to
-  // the same ZIP part must not inherit its raster dimensions.
-  return previewSize
-    ? readMediaPartDataUrl(zip, partPath, previewSize)
-    : mediaPartDataUrl(zip, partPath)
+  return partPath ? mediaPartDataUrl(zip, partPath) : null
 }
 
 /** one string per media part: a picture anchored on thousands of paragraphs
@@ -8981,19 +8973,12 @@ function mediaPartDataUrl(zip: JSZip, partPath: string): Promise<string | null> 
   return pending
 }
 
-async function readMediaPartDataUrl(
-  zip: JSZip,
-  partPath: string,
-  previewSize?: { width: number; height: number },
-): Promise<string | null> {
+async function readMediaPartDataUrl(zip: JSZip, partPath: string): Promise<string | null> {
   const file = zip.file(partPath)
   if (!file) return null
   const mime = await imagePartMime(zip, partPath)
   if (!mime) return null
-  if (isMetafileMime(mime))
-    return metafileToDataUrl(await file.async('arraybuffer'), mime, {
-      placeableWmfPreview: previewSize,
-    })
+  if (isMetafileMime(mime)) return metafileToDataUrl(await file.async('arraybuffer'), mime)
   if (isTiffMime(mime)) return tiffToDataUrlAsync(await file.async('arraybuffer'))
   return mediaPartSrc(zip, file, partPath, mime)
 }
@@ -9153,7 +9138,6 @@ async function resolveBlipMedia(xml: string, ctx: BuildContext): Promise<void> {
       ctx.rels,
       rId,
       ctx.sourcePath ?? 'word/document.xml',
-      ctx.olePreviewSizes?.get(rId),
     )
     if (dataUrl) media.set(rId, dataUrl)
   }
@@ -9546,29 +9530,6 @@ function vmlObjectPreviewSize(xml: string): { width?: number; height?: number } 
   }
 }
 
-function uniqueOlePreviewSizes(
-  xml: string,
-): Map<string, { width: number; height: number }> | undefined {
-  if (!xml.includes('<w:object')) return undefined
-  const sizes = new Map<string, { width: number; height: number }>()
-  for (const [obj] of xml.matchAll(/<w:object\b[^>]*>[\s\S]*?<\/w:object>/g)) {
-    const images = [...obj.matchAll(/<v:imagedata\b[^>]*\br:id\s*=\s*["']([^"']+)["']/g)]
-    if (images.length !== 1 || obj.indexOf('<w:object', 1) !== -1) continue
-    const { width, height } = vmlObjectPreviewSize(obj)
-    if (width && height) sizes.set(images[0][1], { width, height })
-  }
-  if (sizes.size === 0) return undefined
-  // The inline media cache is keyed by relationship ID. A shared ID can be
-  // displayed at different sizes, so leave all of its usages unscaled here.
-  const seen = new Set<string>()
-  for (const [, rId] of xml.matchAll(/\br:(?:id|embed|link)\s*=\s*["']([^"']+)["']/g)) {
-    if (!sizes.has(rId)) continue
-    if (seen.has(rId)) sizes.delete(rId)
-    else seen.add(rId)
-  }
-  return sizes
-}
-
 /**
  * OLE embed degrade: the original packages a preview picture
  * (v:imagedata) and declares its kind (o:OLEObject ProgID) — surface both
@@ -9597,9 +9558,8 @@ async function oleDisplay(
   if (file && path) {
     const mime = await imagePartMime(ctx.zip, path)
     if (isMetafileMime(mime)) {
-      const converted = await metafileToDataUrl(await file.async('arraybuffer'), mime, {
-        placeableWmfPreview: { width: out.imageWidthPx ?? 0, height: out.imageHeightPx ?? 0 },
-      })
+      // Inline and block previews share the archive part and its raster.
+      const converted = await mediaPartDataUrl(ctx.zip, path)
       if (converted) out.imageDataUrl = converted
     } else if (mime) {
       out.imageDataUrl = await mediaPartSrc(ctx.zip, file, path, mime)

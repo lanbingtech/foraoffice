@@ -162,6 +162,8 @@ public static class GuardedTitleClick {
       }
       if (!snapshot.ContainsKey(root) || snapshot[root].OwnerWindow != IntPtr.Zero)
         throw new InvalidOperationException("The exact native root owner was not observed");
+      if (original != null && snapshot[root].Thread != original[root].Thread)
+        throw new InvalidOperationException("The test window root thread changed");
       foreach (var member in snapshot.Values) {
         if (member.OwnerWindow != IntPtr.Zero && !snapshot.ContainsKey(member.OwnerWindow))
           throw new InvalidOperationException("The test window family has an unverified native owner");
@@ -189,14 +191,16 @@ public static class GuardedTitleClick {
       public bool RootTopmost { get; set; }
       public int TopmostCount { get; set; }
     }
-    public BandReceipt ObserveBand() {
-      var current = RequireUnchangedFamily();
+    public BandReceipt ObserveBand(bool requireUnchangedFamily) {
+      var current = requireUnchangedFamily ? RequireUnchangedFamily() : ReadFamily();
       var observed = new BandReceipt { RootTopmost = current[root].Topmost };
       foreach (var member in current.Values) if (member.Topmost) observed.TopmostCount++;
       return observed;
     }
     public void RequestBand(bool topmost) {
-      var current = RequireUnchangedFamily();
+      // The same verified root may open or close owned popups during activation.
+      // Undo a promotion even if this invalidates the measurement.
+      var current = topmost ? RequireUnchangedFamily() : ReadFamily();
       if (topmost && !AllInBand(current, false))
         throw new InvalidOperationException("The test window family left the original band before promotion");
       // HWND_TOPMOST and HWND_NOTOPMOST propagate through the verified owner family.
@@ -284,7 +288,7 @@ function Find-OwnedCaption {
 function Confirm-FamilyBand($Family,[bool]$Topmost) {
   $timer=[System.Diagnostics.Stopwatch]::StartNew()
   do {
-    $observed=$Family.ObserveBand()
+    $observed=$Family.ObserveBand($Topmost)
     if (($Topmost -and $observed.RootTopmost) -or (!$Topmost -and $observed.TopmostCount -eq 0)) {
       return $observed
     }
@@ -341,7 +345,7 @@ try {
   if (!$before -and $owned.Count -and [GuardedTitleClick]::GetForegroundWindow() -ne $window) {
     Assert-OwnedWindow -RequireVisible
     if ($promotionRequested) {
-      if (!$family.ObserveBand().RootTopmost) {throw 'Owned test root changed band before the caption click'}
+      if (!$family.ObserveBand($true).RootTopmost) {throw 'Owned test root changed band before the caption click'}
     } elseif ($raiseRequested -and [GuardedTitleClick]::IsTopmost($window) -ne $originalTopmost) {
       throw 'Owned test window left its original Z-order band'
     }
@@ -361,6 +365,7 @@ try {
     $family.RequestBand($false)
     $restorationObserved=Confirm-FamilyBand $family $false
     $familyRestored=$true
+    $null=$family.ObserveBand($true)
   }
   if ($null -ne $originalTopmost) {
     Assert-OwnedWindow
