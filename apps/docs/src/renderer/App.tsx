@@ -266,7 +266,7 @@ import {
 import {
   GAP_BAND,
   alignGapHfStrips,
-  alignTableGapFills,
+  syncPageGapGeometry,
   clearFloatShifts,
   floatFlowChangedMeta,
   insideFloatTable,
@@ -275,7 +275,6 @@ import {
   floatShiftsOf,
   setOversizeClips,
   setPageGaps,
-  stampGapFlowTops,
   canvasZoomOf,
   rowFillsSig,
   setRowFills,
@@ -298,6 +297,7 @@ import {
   PAGE_TURN_SEL,
   type PageFrame,
 } from './editor/pagination-gaps'
+import { installScreenImageReadiness } from './editor/screen-image-readiness'
 import { syncWrapObstacles } from './editor/wrap-obstacles'
 import { newObstacleShadow, obstaclePlanDiffs } from './editor/obstacle-plan'
 import { MultipageGrid, snapshotCanvas, type CanvasSnapshot } from './components/MultipageGrid'
@@ -4249,6 +4249,7 @@ export function App({
     let restoreNaturalFlow: (() => void) | undefined
     let flowRead: { pm: HTMLElement; reader: ReturnType<typeof createBlockMeasurer> } | undefined
     let timer: number | null = null
+    let viewportAppendOnly = false
     const activity = trackPaginationActivity()
     const storyDiagnostic = createDocumentStoryDiagnostic(() => {
       const current = fileCtxRef.current.doc
@@ -4524,6 +4525,24 @@ export function App({
     const remeasure = (forceFull = false, synchronous = false) => {
       if (disposed) return
       timer = null
+      const viewportOnly = viewportAppendOnly
+      viewportAppendOnly = false
+      // An append offered for an earlier viewport can become irrelevant before
+      // the scheduled pass starts. Edits, fonts, settlement and explicit layout
+      // consumers still require the pending measurement.
+      if (
+        viewportOnly &&
+        !synchronous &&
+        !forceFull &&
+        isPhasedContentPending() &&
+        !streamNeedsLayout(scroller.scrollTop)
+      ) {
+        measureMountedTail = false
+        dirtyFrom = Infinity
+        fastEdits = new Set()
+        activity.update({ pending: false })
+        return
+      }
       activity.update({ pending: false, active: true })
       lastPassAt = performance.now()
       const stylesChanged = prepareDocStylesRef.current()
@@ -5855,24 +5874,23 @@ export function App({
         stage('commit')
         // in-table gap bands live in the spanning cell's coordinate space:
         // re-anchor them to the paper before the strips are measured/aligned
-        alignTableGapFills(pm, factor)
+        syncPageGapGeometry(pm, factor, ledgered ? { cuts, marginTop: mTopPx } : undefined)
         stage('tableGapFills')
         if ((secWSpecs.length > 0 || mirrorMargins) && section) {
           const cSet = secList?.[0]?.settings ?? section
           alignGapHfStrips(pm, pageLeftOf(cSet) + twipsToPx(cSet.marginLeft), factor)
         }
         stage('hfStrips')
-        // after setPageGaps: widget insertion is synchronous, so anchor rects are final
-        if (ledgered)
-          stampGapFlowTops(pm, cuts, pm.getBoundingClientRect().top + mTopPx * factor, factor)
-        syncFloatShifts(
-          pm,
-          floats,
-          pm.getBoundingClientRect().top + mTopPx * factor,
-          factor,
-          mTopPx - twipsToPx((sections[0]?.settings ?? section)?.marginTop ?? 0),
-          ledgered ? { cuts, carries } : undefined,
-        )
+        if (floats.length > 0) {
+          syncFloatShifts(
+            pm,
+            floats,
+            pm.getBoundingClientRect().top + mTopPx * factor,
+            factor,
+            mTopPx - twipsToPx((sections[0]?.settings ?? section)?.marginTop ?? 0),
+            ledgered ? { cuts, carries } : undefined,
+          )
+        }
         stage('floatShifts')
         // Word keeps anchored objects on the page: cell boxes lifted past the
         // paper top by a negative anchor offset are pushed back down
@@ -6079,11 +6097,8 @@ export function App({
       setLayoutRev((v) => v + 1)
       refreshToc?.()
     }
-    const streamNeedsLayout = () =>
-      streamingCoverage.needsLayout(
-        editor?.state.doc.childCount ?? 0,
-        scrollPosRef.current.top + viewportHeight,
-      )
+    const streamNeedsLayout = (viewportTop = scrollPosRef.current.top) =>
+      streamingCoverage.needsLayout(editor?.state.doc.childCount ?? 0, viewportTop + viewportHeight)
     const requestVisibleStreamLayout = () => {
       if (trackStreamingCoverage && isPhasedContentPending() && streamNeedsLayout())
         onUpdate(null, lastPassChildCount, 'append')
@@ -6105,7 +6120,11 @@ export function App({
       // would either never fire (dense chunks) or pay a whole-document pass
       // per chunk (sparse ones); keep the pass already due and pace new ones
       if (streaming) {
-        if (timer) return
+        if (timer !== null) {
+          viewportAppendOnly &&= trigger === 'append'
+          return
+        }
+        viewportAppendOnly = trackStreamingCoverage && trigger === 'append'
         // a whole-document pass grows with the streamed content; keep it to a
         // fraction of the streaming time so the tail lands sooner
         const gap = Math.min(
@@ -6118,6 +6137,7 @@ export function App({
         return
       }
       if (timer) window.clearTimeout(timer)
+      viewportAppendOnly = false
       // a whole-document pass after every pause blocks typing on long
       // documents: wait longer when the last pass was slow (Word paginates in
       // the background too); short documents keep the 300 ms feel. A typed
@@ -8193,6 +8213,11 @@ export function App({
     }
     scrollPosRef.current = { left: 0, top: 0 }
   }
+  useEffect(() => {
+    const pane = scrollContainerRef.current
+    if (!editor || !pane || !hasRuntimeDocument) return
+    return installScreenImageReadiness(editor.view.dom, pane)
+  }, [editor, hasRuntimeDocument, runtimeIdentity])
   useEffect(() => {
     if (runtimeDocumentRef.current) {
       docsAnnotations.activate()

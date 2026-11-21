@@ -8,7 +8,7 @@ import {
   alignGapHfStrips,
   canvasZoomOf,
   setPageGaps,
-  alignTableGapFills,
+  syncPageGapGeometry,
   makeGapEl,
   pageFramesFromGaps,
   syncCutOverlays,
@@ -23,7 +23,7 @@ import {
   syncPageBorders,
   syncFloatShifts,
 } from '../src/renderer/editor/pagination-gaps'
-import { leadDropsSpaceBefore } from '../src/renderer/pagination-cuts'
+import { leadDropsSpaceBefore, type PageCut } from '../src/renderer/pagination-cuts'
 import { measureBlocks } from '../src/renderer/pagination-measure'
 import {
   createLineRectsCache,
@@ -659,7 +659,7 @@ describe('clampCellImageTops', () => {
   })
 })
 
-describe('alignTableGapFills', () => {
+describe('syncPageGapGeometry', () => {
   /** paper at x=0, 816 wide; the gap cell follows its table's box */
   const pmWithFill = (cellLeft: number, cellWidth: number) => {
     const pm = document.createElement('div')
@@ -675,7 +675,7 @@ describe('alignTableGapFills', () => {
   it('re-anchors the fill to the paper box (issue #174: indented full-width table)', () => {
     // table starts 32px right of the paper edge and spills past the right margin
     const { pm, fill } = pmWithFill(32, 794)
-    alignTableGapFills(pm, 1)
+    syncPageGapGeometry(pm, 1)
     expect(fill.style.left).toBe('-32px')
     expect(fill.style.width).toBe('816px')
     expect(fill.style.right).toBe('auto')
@@ -683,7 +683,7 @@ describe('alignTableGapFills', () => {
 
   it('widens a narrower-than-paper table band to the full paper width', () => {
     const { pm, fill } = pmWithFill(196, 424) // centered half-width table
-    alignTableGapFills(pm, 1)
+    syncPageGapGeometry(pm, 1)
     expect(fill.style.left).toBe('-196px')
     expect(fill.style.width).toBe('816px')
   })
@@ -691,17 +691,35 @@ describe('alignTableGapFills', () => {
   it('divides zoomed rect deltas by the zoom factor', () => {
     const { pm, fill } = pmWithFill(64, 1588)
     pm.getBoundingClientRect = () => ({ left: 0, width: 1632 }) as DOMRect
-    alignTableGapFills(pm, 2)
+    syncPageGapGeometry(pm, 2)
     expect(fill.style.left).toBe('-32px')
     expect(fill.style.width).toBe('816px')
   })
 
   it('is idempotent: the cell rect does not move with the fill styles', () => {
     const { pm, fill } = pmWithFill(32, 794)
-    alignTableGapFills(pm, 1)
-    alignTableGapFills(pm, 1)
+    syncPageGapGeometry(pm, 1)
+    syncPageGapGeometry(pm, 1)
     expect(fill.style.left).toBe('-32px')
     expect(fill.style.width).toBe('816px')
+  })
+
+  it('reads page-turn positions and table coordinates before changing the fill', () => {
+    const { pm, fill } = pmWithFill(32, 794)
+    const rootRect = vi.fn(() => ({ left: 0, top: 100, width: 816 }) as DOMRect)
+    pm.getBoundingClientRect = rootRect
+    const gap = pm.querySelector('tr')!
+    gap.getBoundingClientRect = () => {
+      expect(fill.style.left).toBe('')
+      return { top: 612 } as DOMRect
+    }
+    const cuts = [{ gapOffsetPx: 8 }, { gap: { kind: 'table' } }] as PageCut[]
+
+    syncPageGapGeometry(pm, 1, { cuts, marginTop: 96 })
+
+    expect(cuts[1].gap?.flowTopPx).toBe(408)
+    expect(rootRect).toHaveBeenCalledTimes(1)
+    expect(fill.style.left).toBe('-32px')
   })
 
   it('differing-width documents: the fill covers the table’s own centered page, not the paper', () => {
@@ -713,7 +731,7 @@ describe('alignTableGapFills', () => {
     cell.getBoundingClientRect = () => ({ left: 120 + 96, width: 624 }) as DOMRect
     pm.appendChild(gap)
     const fill = cell.firstElementChild as HTMLElement
-    alignTableGapFills(pm, 1)
+    syncPageGapGeometry(pm, 1)
     expect(fill.style.left).toBe('-96px')
     expect(fill.style.width).toBe('816px')
   })

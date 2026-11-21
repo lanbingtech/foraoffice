@@ -576,21 +576,6 @@ export function isPageTurn(el: Element): boolean {
   return el.classList.contains('page-gap') && !el.classList.contains('page-gap-carry')
 }
 
-/** one read after setPageGaps: where the page-turn widgets landed, in flow px
- *  from `origin` (the first page's content top on screen) */
-export function stampGapFlowTops(
-  pm: HTMLElement,
-  cuts: readonly PageCut[],
-  origin: number,
-  factor: number,
-): void {
-  const tops = Array.from(pm.querySelectorAll<HTMLElement>(PAGE_TURN_SEL)).map(
-    (el) => (el.getBoundingClientRect().top - origin) / factor,
-  )
-  if (!learnGapFlowTops(cuts, tops))
-    pageReaderShadow.report('gapCount', tops.length, cuts.filter((c) => c.gap).length)
-}
-
 /** gap builder output → PageCut gap facts (applyGapLedger); carry spacers have no page */
 export function gapLedgerOf(
   gaps: readonly PageGapSpec[],
@@ -2260,15 +2245,31 @@ export function clampCellImageTops(pm: HTMLElement, factor: number): void {
  * Strips and floating images inside the fill then live in paper coordinates,
  * same as block/inline gap boxes.
  */
-export function alignTableGapFills(pm: HTMLElement, factor: number): void {
+export function syncPageGapGeometry(
+  pm: HTMLElement,
+  factor: number,
+  ledger?: { cuts: readonly PageCut[]; marginTop: number },
+): void {
   const fills = pm.querySelectorAll<HTMLElement>('.page-gap-table-fill')
-  if (fills.length === 0) return
+  const turns = ledger && pm.querySelectorAll<HTMLElement>(PAGE_TURN_SEL)
+  if (fills.length === 0 && !turns?.length) {
+    if (ledger && !learnGapFlowTops(ledger.cuts, []))
+      pageReaderShadow.report('gapCount', 0, ledger.cuts.filter((cut) => cut.gap).length)
+    return
+  }
   // 0.1px-rounded without forced decimals: serialized style values round-trip
   // ('-32.0px' would read back as '-32px' and defeat the dirty checks)
   const px = (v: number) => `${Math.round(v * 10) / 10}px`
   const pmRect = pm.getBoundingClientRect()
-  // measure every cell before the first style write (one layout, not one per fill)
+  // Snapshot flow and table coordinates from the same committed layout. Fills and
+  // header/footer strips are out of flow, so their presentation can follow these reads.
   const cellLefts = Array.from(fills, (fill) => fill.parentElement?.getBoundingClientRect().left)
+  if (ledger && turns) {
+    const origin = pmRect.top + ledger.marginTop * factor
+    const tops = Array.from(turns, (el) => (el.getBoundingClientRect().top - origin) / factor)
+    if (!learnGapFlowTops(ledger.cuts, tops))
+      pageReaderShadow.report('gapCount', tops.length, ledger.cuts.filter((cut) => cut.gap).length)
+  }
   Array.from(fills).forEach((fill, i) => {
     const cellLeft = cellLefts[i]
     if (cellLeft === undefined) return

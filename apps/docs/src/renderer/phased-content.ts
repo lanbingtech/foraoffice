@@ -1,3 +1,4 @@
+import type { Run, TableModel, TextboxDisplay } from '@genoffice/docx-engine'
 import type { PmNode } from './editor/convert'
 
 /**
@@ -38,16 +39,101 @@ export interface PhasedContentHost {
  *  measurers skip the tail's chunks and measure the whole document once) */
 export const PHASED_CONTENT_SETTLED_EVENT = 'genoffice:phased-content-settled'
 
-/** blocks in the first synchronous mount: overfills the first screens at any zoom */
+/** Maximum ordinary blocks in the first synchronous mount. */
 export const PHASE1_BLOCKS = 64
-/** maximum blocks appended in one scheduled chunk */
+/** Maximum ordinary blocks appended in one scheduled chunk. */
 export const PHASE_CHUNK_BLOCKS = 128
-/** Reserve part of the pagination task budget for painting and queued input.
- * Keep a lower bound because every append also updates the existing editor. */
+/** Reserve part of the task budget for painting and queued input. */
 const PHASE_APPEND_BUDGET_MS = 24
-const PHASE_MIN_CHUNK_BLOCKS = 16
-/** documents at or below this many top-level blocks mount in one pass as before */
+/** Documents with at most this much ordinary content mount in one pass. */
 export const PHASED_MIN_BLOCKS = 192
+const ORDINARY_BLOCK_WORK = 4
+const SINGLE_MOUNT_WORK = PHASED_MIN_BLOCKS * ORDINARY_BLOCK_WORK
+const MAX_APPEND_WORK = PHASE_CHUNK_BLOCKS * ORDINARY_BLOCK_WORK
+const CHARS_PER_MOUNT_WORK = 128
+
+function textMountWork(text: string | undefined): number {
+  return Math.floor((text?.length ?? 0) / CHARS_PER_MOUNT_WORK)
+}
+
+function runsMountWork(runs: readonly Run[], limit: number): number {
+  let work = 1
+  for (const run of runs) {
+    work += 1 + textMountWork(run.text)
+    if (work >= limit) return limit
+  }
+  return Math.min(work, limit)
+}
+
+function nestedTableMountWork(table: TableModel, limit: number): number {
+  let work = 1 + (table.colWidthsPct?.length ?? 0)
+  for (const row of table.rows) {
+    if (++work >= limit) return limit
+    for (const cell of row) {
+      if (++work >= limit) return limit
+      if (cell.vMerge === 'continue') continue
+      if (cell.richParas?.length) {
+        for (const para of cell.richParas) {
+          work += runsMountWork(para.runs, limit - work)
+          if (work >= limit) return limit
+        }
+      } else {
+        for (const para of cell.paras) {
+          work += 1 + textMountWork(para)
+          if (work >= limit) return limit
+        }
+      }
+      for (const nested of cell.nestedTables ?? []) {
+        work += nestedTableMountWork(nested, limit - work)
+        if (work >= limit) return limit
+      }
+      if (cell.anchoredBoxes?.length) {
+        work += textboxMountWork(cell.anchoredBoxes, limit - work)
+        if (work >= limit) return limit
+      }
+    }
+  }
+  return Math.min(work, limit)
+}
+
+function textboxMountWork(boxes: readonly TextboxDisplay[], limit: number): number {
+  let work = 0
+  for (const box of boxes) {
+    // Even a one-line editable box creates its own view and plugin state.
+    work += box.readOnly ? 1 : 2 * ORDINARY_BLOCK_WORK
+    if (work >= limit) return limit
+    for (const para of box.paras) {
+      work += runsMountWork(para.runs, limit - work)
+      if (work >= limit) return limit
+      for (const cell of para.cells ?? []) {
+        if (++work >= limit) return limit
+        for (const runs of cell.paras) {
+          work += runsMountWork(runs, limit - work)
+          if (work >= limit) return limit
+        }
+      }
+    }
+  }
+  return work
+}
+
+function nodeMountWork(node: PmNode, limit: number): number {
+  let work = 1 + (node.marks?.length ?? 0) + textMountWork(node.text)
+  if (node.type === 'docTable' && Array.isArray(node.attrs?.colWidthsPct))
+    work += node.attrs.colWidthsPct.length
+  // These views build content from model attributes outside the node descendants.
+  const table = (node.type === 'docNestedTable' ? node.attrs?.model : node.attrs?.table) as
+    TableModel | undefined
+  if (Array.isArray(table?.rows) && work < limit) work += nestedTableMountWork(table, limit - work)
+  const boxes = node.type === 'docCellBoxes' ? node.attrs?.boxes : node.attrs?.textboxes
+  if (Array.isArray(boxes) && work < limit)
+    work += textboxMountWork(boxes as TextboxDisplay[], limit - work)
+  for (const child of node.content ?? []) {
+    if (work >= limit) break
+    work += nodeMountWork(child, limit - work)
+  }
+  return Math.min(work, limit)
+}
 
 /** bumping the token cancels the pending tail (its chunks become no-ops) */
 let token = 0
@@ -119,20 +205,43 @@ export function setContentPhased(
   const my = replaceStream()
   if (my !== token) return
   const content = pmDoc.content ?? []
-  if (content.length <= PHASED_MIN_BLOCKS) {
+  const weights: number[] = []
+  const batchFrom = (start: number, budget: number) => {
+    let end = start
+    let work = 0
+    while (end < content.length) {
+      const next = (weights[end] ??= Math.max(
+        ORDINARY_BLOCK_WORK,
+        nodeMountWork(content[end], SINGLE_MOUNT_WORK + 1),
+      ))
+      // Always make progress, but give an oversized block its own transaction.
+      if (end > start && work + next > budget) break
+      work += next
+      end++
+      if (work >= budget) break
+    }
+    return { end, work }
+  }
+  if (
+    content.length <= 1 ||
+    (content.length <= PHASED_MIN_BLOCKS &&
+      batchFrom(0, SINGLE_MOUNT_WORK).end === content.length &&
+      weights.every((work) => work <= MAX_APPEND_WORK))
+  ) {
     host.setContent(pmDoc)
     return
   }
+  const firstEnd = batchFrom(0, PHASE1_BLOCKS * ORDINARY_BLOCK_WORK).end
   const remaining = new Map<number, number>()
   if (host.owner) {
-    for (let i = PHASE1_BLOCKS; i < content.length; i++) {
+    for (let i = firstEnd; i < content.length; i++) {
       const index = content[i].attrs?.docxIndex
       if (typeof index === 'number') remaining.set(index, (remaining.get(index) ?? 0) + 1)
     }
     unmountedSource = { owner: host.owner, has: (index) => remaining.has(index) }
   }
   try {
-    host.setContent({ ...pmDoc, content: content.slice(0, PHASE1_BLOCKS) })
+    host.setContent({ ...pmDoc, content: content.slice(0, firstEnd) })
   } catch (error) {
     if (my === token) unmountedSource = null
     throw error
@@ -150,9 +259,9 @@ export function setContentPhased(
   cancelPending = release
   host.setLoading(true)
   if (my !== token) return
-  let index = PHASE1_BLOCKS
-  let chunkSize = PHASE_CHUNK_BLOCKS
-  let previous: { finished: number; dispatchMs: number; count: number } | undefined
+  let index = firstEnd
+  let budget = MAX_APPEND_WORK
+  let previous: { finished: number; dispatchMs: number; work: number } | undefined
   // a refused chunk remounted the whole document: whatever the user typed
   // before is gone with it, and an undo must not bring the truncated
   // pre-remount document back
@@ -178,14 +287,15 @@ export function setContentPhased(
       // against dispatch work and any delay beyond the intentional timer wait.
       const late = Math.max(0, now() - previous.finished - PAINTED_FRAME_FALLBACK_MS)
       const scale = PHASE_APPEND_BUDGET_MS / Math.max(0.1, previous.dispatchMs + late)
-      chunkSize = Math.min(
-        PHASE_CHUNK_BLOCKS,
-        chunkSize * 2,
-        Math.max(PHASE_MIN_CHUNK_BLOCKS, Math.floor(previous.count * scale)),
+      budget = Math.min(
+        MAX_APPEND_WORK,
+        budget * 2,
+        Math.max(ORDINARY_BLOCK_WORK, Math.floor(previous.work * scale)),
       )
     }
-    const chunk = content.slice(index, index + chunkSize)
-    index += chunk.length
+    const { end, work } = batchFrom(index, budget)
+    const chunk = content.slice(index, end)
+    index = end
     for (const node of chunk) {
       const source = node.attrs?.docxIndex
       if (typeof source !== 'number') continue
@@ -198,7 +308,7 @@ export function setContentPhased(
       const started = now()
       host.appendNodes(chunk)
       const finished = now()
-      previous = { finished, dispatchMs: finished - started, count: chunk.length }
+      previous = { finished, dispatchMs: finished - started, work }
     } catch {
       if (my !== token) return
       // a refused chunk falls back to the one-pass mount instead of leaving the file truncated

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   MAX_PARA_ROUNDS,
   SettledParagraphCache,
+  hasCoupledWrapGeometry,
   measureNatural,
   noteFloatTransaction,
   topLevelBlockDom,
@@ -11,6 +12,14 @@ import type { EditorView } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
+import { DOC_CSS_COMMITTED_EVENT } from '../src/renderer/editor/cjk-punct-shrink'
+import { appendStreamedNodes } from '../src/renderer/file-actions'
+import {
+  cancelPhasedContent,
+  PHASED_CONTENT_SETTLED_EVENT,
+  PHASED_MIN_BLOCKS,
+  setContentPhased,
+} from '../src/renderer/phased-content'
 
 function fakeView(el: HTMLElement) {
   return {
@@ -100,6 +109,7 @@ describe('SettledParagraphCache', () => {
 
       const split = document.createElement('span')
       split.className = 'doc-col-split-float'
+      split.style.cssFloat = 'left'
       split.getBoundingClientRect = () => ({ top: 0, bottom: 20 }) as DOMRect
       elements[0].prepend(split)
       cache.invalidateBlocks(view, new Set([elements[0]]))
@@ -152,12 +162,122 @@ describe('SettledParagraphCache', () => {
 
     const float = document.createElement('div')
     float.className = 'doc-table-float-left'
-    root.appendChild(float)
+    float.style.cssFloat = 'left'
     const withFloat = viewOf(document.createElement('div'))
-    withFloat.dom.append(...root.childNodes)
+    withFloat.dom.append(float, ...root.childNodes)
     cache.clear()
     cache.measurePass(withFloat, paragraphs, individually)
     expect(gaps.map((gap) => gap.style.display)).toEqual(['', ''])
+  })
+
+  it('batches body gaps independently of a cell float and keeps cell gaps local', () => {
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <p><span class="page-gap-inline"></span></p>
+      <table><tbody><tr><td>
+        <span class="doc-cell-boxes" style="float:left"></span>
+        <p><span class="page-gap-inline"></span></p>
+        <p><span class="page-gap-inline"></span></p>
+      </td></tr></tbody></table>
+      <p><span class="page-gap-inline"></span></p>`
+    const paragraphs = Array.from(root.querySelectorAll('p'), (_, pos) => ({
+      node: {} as ProseMirrorNode,
+      pos,
+    }))
+    const elements = Array.from(root.querySelectorAll('p'))
+    const gaps = Array.from(root.querySelectorAll<HTMLElement>('.page-gap-inline'))
+    const view = { dom: root, nodeDOM: (pos: number) => elements[pos] } as unknown as EditorView
+    const cache = new SettledParagraphCache<number[]>(shiftAll, () => true)
+    const gapDisplays = [
+      ['none', '', '', 'none'],
+      ['', 'none', '', ''],
+      ['', '', 'none', ''],
+      ['none', '', '', 'none'],
+    ]
+    const read = vi.fn(({ pos }: { pos: number }) => {
+      expect(gaps.map((gap) => gap.style.display)).toEqual(gapDisplays[pos])
+      return [pos]
+    })
+    expect(cache.measurePass(view, paragraphs, read)).toEqual([[0], [1], [2], [3]])
+    expect(gaps.map((gap) => gap.style.display)).toEqual(['', '', '', ''])
+
+    const unaffected = [0, 3].map((pos) => vi.spyOn(elements[pos], 'getBoundingClientRect'))
+    cache.invalidateBlocks(view, new Set([root.querySelector('table')!]))
+    read.mockImplementation(({ pos }) => [pos])
+    read.mockClear()
+    expect(cache.measurePass(view, paragraphs, read)).toEqual([[0], [1], [2], [3]])
+    expect(read.mock.calls.map(([{ pos }]) => pos)).toEqual([1, 2])
+    for (const spy of unaffected) expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('batches body gaps ahead of a float while keeping its anchor and later gaps local', () => {
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <p><span class="page-gap-inline"></span></p>
+      <p><span class="page-gap-inline"></span></p>
+      <p><span class="doc-inline-img--wrap-square-right" style="float: right"></span>
+        <span class="page-gap-inline"></span></p>
+      <p><span class="page-gap-inline"></span></p>`
+    const elements = Array.from(root.querySelectorAll('p'))
+    const paragraphs = elements.map((_, pos) => ({ node: {} as ProseMirrorNode, pos }))
+    const gaps = Array.from(root.querySelectorAll<HTMLElement>('.page-gap-inline'))
+    const view = { dom: root, nodeDOM: (pos: number) => elements[pos] } as unknown as EditorView
+    const cache = new SettledParagraphCache<number[]>(shiftAll)
+    const gapDisplays = [
+      ['none', 'none', '', ''],
+      ['none', 'none', '', ''],
+      ['', '', 'none', ''],
+      ['', '', '', 'none'],
+    ]
+
+    expect(
+      cache.measurePass(view, paragraphs, ({ pos }) => {
+        expect(gaps.map((gap) => gap.style.display)).toEqual(gapDisplays[pos])
+        return [pos]
+      }),
+    ).toEqual([[0], [1], [2], [3]])
+  })
+
+  it('does not read or couple paragraphs to a wrap marker that CSS does not float', () => {
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <div class="img-wrap-square-left" style="position:absolute"></div>
+      <p><span class="page-gap-inline"></span></p>
+      <p><span class="page-gap-inline"></span></p>`
+    const elements = Array.from(root.querySelectorAll('p'))
+    const gaps = Array.from(root.querySelectorAll<HTMLElement>('.page-gap-inline'))
+    const view = { dom: root, nodeDOM: (pos: number) => elements[pos] } as unknown as EditorView
+    const paragraphs = elements.map((_, pos) => ({ node: {} as ProseMirrorNode, pos }))
+    const rect = vi.spyOn(root.children[0], 'getBoundingClientRect')
+    const cache = new SettledParagraphCache<number[]>(shiftAll)
+
+    expect(hasCoupledWrapGeometry(view)).toBe(false)
+    expect(
+      cache.measurePass(view, paragraphs, ({ pos }) => {
+        expect(gaps.map((gap) => gap.style.display)).toEqual(['none', 'none'])
+        return [pos]
+      }),
+    ).toEqual([[0], [1]])
+    expect(rect).not.toHaveBeenCalled()
+  })
+
+  it('reads a cell float only when measuring a paragraph in its cell', () => {
+    const root = document.createElement('div')
+    root.innerHTML = `<p>body</p><table><tbody><tr>
+      <td><div class="doc-cell-boxes" style="float:left"></div><p>anchored cell</p></td>
+      <td><p>other cell</p></td>
+      </tr></tbody></table>`
+    const elements = Array.from(root.querySelectorAll('p'))
+    const view = { dom: root, nodeDOM: (pos: number) => elements[pos] } as unknown as EditorView
+    const paragraphs = elements.map((_, pos) => ({ node: {} as ProseMirrorNode, pos }))
+    const rect = vi.spyOn(root.querySelector('.doc-cell-boxes')!, 'getBoundingClientRect')
+    const cache = new SettledParagraphCache<number[]>(shiftAll)
+    const read = ({ pos }: { pos: number }) => [pos]
+
+    expect(cache.measurePass(view, [paragraphs[0], paragraphs[2]], read)).toEqual([[0], [2]])
+    expect(rect).not.toHaveBeenCalled()
+    expect(cache.measurePass(view, paragraphs, read)).toEqual([[0], [1], [2]])
+    expect(rect).toHaveBeenCalledTimes(1)
   })
 
   it('re-measures until two consecutive passes agree, then reuses the result', () => {
@@ -281,6 +401,7 @@ describe('SettledParagraphCache', () => {
     expect(fn).toHaveBeenCalledTimes(2)
     const float = document.createElement('div')
     float.className = 'doc-table doc-table-float-left'
+    float.style.cssFloat = 'left'
     float.getBoundingClientRect = () => ({ top: 40, bottom: 80 }) as DOMRect
     view.dom.appendChild(float)
     noteFloatTransaction(nodeInsert(editor))
@@ -299,6 +420,25 @@ describe('SettledParagraphCache', () => {
     pass()
     pass()
     expect(fn).toHaveBeenCalledTimes(5)
+  })
+
+  it('remeasures a paragraph when the adjacent exclusion changes shape without resizing it', () => {
+    const el = document.createElement('p')
+    const view = fakeView(el)
+    const float = document.createElement('div')
+    float.className = 'doc-table-float-left'
+    float.style.cssFloat = 'left'
+    let right = 25
+    float.getBoundingClientRect = () => ({ top: 0, bottom: 20, left: 0, right }) as DOMRect
+    el.getBoundingClientRect = () => ({ top: 0, bottom: 20, width: 100 }) as DOMRect
+    sized(el, () => ({ width: 100, height: 20 }))
+    view.dom.append(float, el)
+    const cache = new SettledParagraphCache<number[]>(shiftAll, () => true)
+    const pass = () => cache.measurePass(view, [{ node, pos: 0 }], () => [right])
+
+    expect(pass()).toEqual([[25]])
+    right = 26.5
+    expect(pass()).toEqual([[26.5]])
   })
 
   it('keeps a settled paragraph across an edit elsewhere and re-bases its positions', () => {
@@ -482,6 +622,70 @@ describe('SettledParagraphCache', () => {
     pass()
     expect(scan).toHaveBeenCalledTimes(2)
   })
+})
+
+it('does not remeasure a Docs editor when it has no phased layout waiting to settle', () => {
+  const editor = makeEditor()
+  document.body.append(editor.view.dom)
+  try {
+    editor.storage.cjkPunctShrink.enabled = true
+    editor.storage.justifyShrink.enabled = true
+    editor.commands.setContent('<p>文字，文字</p><p>one two three</p>')
+    const width = vi.fn(() => 100)
+    Object.defineProperty(editor.view.dom, 'offsetWidth', { get: width })
+    document.dispatchEvent(new Event(DOC_CSS_COMMITTED_EVENT))
+    expect(width).toHaveBeenCalledTimes(2)
+    width.mockClear()
+
+    document.dispatchEvent(new Event(PHASED_CONTENT_SETTLED_EVENT))
+    expect(width).not.toHaveBeenCalled()
+  } finally {
+    editor.view.dom.remove()
+  }
+})
+
+it('measures the newly mounted paragraphs once when the phased layout settles', () => {
+  const editor = makeEditor()
+  document.body.append(editor.view.dom)
+  const width = vi.fn(() => 100)
+  Object.defineProperty(editor.view.dom, 'offsetWidth', { get: width })
+  editor.storage.cjkPunctShrink.enabled = true
+  editor.storage.justifyShrink.enabled = true
+  const tasks: Array<() => void> = []
+  const content = Array.from({ length: PHASED_MIN_BLOCKS + 1 }, (_, i) => ({
+    type: 'docParagraph',
+    content: [{ type: 'text', text: i % 2 === 0 ? '文字，文字' : 'one two three' }],
+  }))
+  try {
+    setContentPhased(
+      {
+        owner: editor,
+        setContent: (doc) => editor.commands.setContent(doc),
+        appendNodes: (nodes) => {
+          appendStreamedNodes(editor, nodes)
+          expect(width).not.toHaveBeenCalled()
+        },
+        isDestroyed: () => false,
+        resetHistory: () => {
+          // Reconfiguring editor plugins recreates the measurement views.
+          editor.view.updateState(editor.state.reconfigure({ plugins: [...editor.state.plugins] }))
+          expect(width).not.toHaveBeenCalled()
+        },
+        setLoading: () => {},
+        getDirty: () => false,
+        setDirty: () => {},
+      },
+      { type: 'doc', content },
+      (task) => tasks.push(task),
+    )
+    width.mockClear()
+    while (tasks.length) tasks.shift()?.()
+    expect(width).toHaveBeenCalledTimes(2)
+    expect(editor.state.doc.childCount).toBe(content.length)
+  } finally {
+    cancelPhasedContent()
+    editor.view.dom.remove()
+  }
 })
 
 describe('measureNatural', () => {

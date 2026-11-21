@@ -33,11 +33,29 @@ function requiresFullWrapMeasure(view: Pick<EditorView, 'dom'>): boolean {
 }
 
 export function hasCoupledWrapGeometry(view: Pick<EditorView, 'dom'>): boolean {
-  return requiresFullWrapMeasure(view) || view.dom.querySelector(FLOAT_SELECTOR) !== null
+  return (
+    requiresFullWrapMeasure(view) ||
+    Array.from(view.dom.querySelectorAll(FLOAT_SELECTOR)).some(isFloat)
+  )
 }
 
-/** float bands of one editor state, shared by every cache measuring against it */
-const floatBandsByState = new WeakMap<object, number[][]>()
+interface FloatElement {
+  element: Element
+  context: Element
+}
+
+interface FloatBand {
+  top: number
+  bottom: number
+  shape: string
+}
+
+// Cell floats stay in their cell's formatting context. A band host likewise
+// contains its own full-width wrapTopAndBottom float (display: flow-root).
+const LOCAL_FLOW = 'td, th, .doc-band-host'
+
+/** Float elements of one editor state, shared by every cache measuring against it. */
+const floatsByState = new WeakMap<object, FloatElement[]>()
 /** the float elements of the last scan of one editor; null once a transaction may have added one */
 let floatScan: { dom: Element; els: Element[] } | null = null
 
@@ -59,26 +77,42 @@ export function noteFloatTransaction(tr: Transaction): void {
   }
 }
 
-function floatBandsOf(view: EditorView): number[][] {
+function isFloat(element: Element): boolean {
+  // A floating table can be flowed in place by the paginator.
+  if (element.classList.contains('doc-table-float-flow')) return false
+  const style = getComputedStyle(element)
+  return style.cssFloat !== '' && style.cssFloat !== 'none' && style.display !== 'none'
+}
+
+function floatsOf(view: EditorView): FloatElement[] {
   const state = (view as { state?: object }).state
-  const cached = state && floatBandsByState.get(state)
+  const cached = state && floatsByState.get(state)
   if (cached) return cached
   if (!floatScan || floatScan.dom !== view.dom || floatScan.els.some((f) => !f.isConnected))
     floatScan = { dom: view.dom, els: Array.from(view.dom.querySelectorAll(FLOAT_SELECTOR)) }
-  // a floating table the paginator flows in place (doc-table-float-flow, a
-  // decoration class) is not a float for this pass
-  const bands = floatScan.els
-    .filter((f) => !f.classList.contains('doc-table-float-flow'))
-    .map((f) => {
-      const r = f.getBoundingClientRect()
-      const cs = getComputedStyle(f)
-      return [
-        r.top - (parseFloat(cs.marginTop) || 0),
-        r.bottom + (parseFloat(cs.marginBottom) || 0),
-      ]
-    })
-  if (state) floatBandsByState.set(state, bands)
-  return bands
+  const floats = floatScan.els.filter(isFloat).map((element) => ({
+    element,
+    context: element.parentElement?.closest(LOCAL_FLOW) ?? view.dom,
+  }))
+  if (state) floatsByState.set(state, floats)
+  return floats
+}
+
+function readFloatBand(element: Element): FloatBand {
+  const r = element.getBoundingClientRect()
+  const cs = getComputedStyle(element)
+  return {
+    top: r.top - (parseFloat(cs.marginTop) || 0),
+    bottom: r.bottom + (parseFloat(cs.marginBottom) || 0),
+    shape: JSON.stringify([r.left, r.right, cs.marginLeft, cs.marginRight, cs.shapeOutside]),
+  }
+}
+
+function firstBodyFloatBlock(root: HTMLElement, floats: FloatElement[]): Element | undefined {
+  // The selector scan orders the floats by their document position.
+  let owner = floats.find((float) => float.context === root)?.element
+  while (owner?.parentElement && owner.parentElement !== root) owner = owner.parentElement
+  return owner
 }
 
 /**
@@ -110,6 +144,7 @@ interface Entry<T> {
   /** position-independent identity of the result */
   key: string
   rectKey: string
+  coupled: boolean
   result: T
   settled: boolean
   /** distinct results seen so far */
@@ -152,7 +187,8 @@ export const MAX_PARA_ROUNDS = 3
 export class SettledParagraphCache<T> {
   private results = new Map<ProseMirrorNode, Entry<T>>()
   private previousResults?: Map<ProseMirrorNode, Entry<T> | undefined>
-  private floatBands: number[][] = []
+  private floats: FloatElement[] = []
+  private floatBands = new Map<Element, FloatBand>()
   private gen = 0
   private wrapVersion = 0
   private scopedPass = false
@@ -178,7 +214,7 @@ export class SettledParagraphCache<T> {
   invalidateBlocks(view: EditorView, blocks: ReadonlySet<HTMLElement>): void {
     if (blocks.size === 0) return
     this.wrapVersion++
-    floatBandsByState.delete(view.state)
+    floatsByState.delete(view.state)
     if (floatScan?.dom === view.dom) floatScan = null
     // Balancing a common CSS column flow couples the paragraphs on both
     // sides of a changed block. Independent blocks retain their own results.
@@ -186,7 +222,7 @@ export class SettledParagraphCache<T> {
       this.clear()
       return
     }
-    this.scopedPass = this.floatBands.length === 0
+    this.scopedPass = true
     for (const [node, entry] of this.results) {
       let el: HTMLElement | null = entry.el
       while (el && el !== view.dom) {
@@ -199,13 +235,14 @@ export class SettledParagraphCache<T> {
     }
   }
 
-  /** once per pass: vertical bands beside which text wraps; drops paragraphs the previous pass never visited */
+  /** Start a new read pass and drop paragraphs the previous pass never visited. */
   beginPass(view: EditorView): void {
     this.gen++
     this.previousResults = undefined
     for (const [node, entry] of this.results)
       if (entry.gen < this.gen - 1) this.results.delete(node)
-    this.floatBands = floatBandsOf(view)
+    this.floats = floatsOf(view)
+    this.floatBands.clear()
   }
 
   /** The current boxes were measured with the still-published decorations.
@@ -242,62 +279,82 @@ export class SettledParagraphCache<T> {
   ): Array<T | null> {
     this.beginPass(view)
     if (options?.trackProposal) this.previousResults = new Map()
-    const width = view.dom.offsetWidth
-    const canReuse = this.scopedPass && this.rootWidth === width && this.floatBands.length === 0
+    // Only a scoped reuse decision needs a geometry read before hiding gaps.
+    const width = this.scopedPass && this.results.size > 0 ? view.dom.offsetWidth : undefined
+    const canReuse = width !== undefined && this.rootWidth === width
     this.scopedPass = false
-    this.rootWidth = width
     const roots = topLevelBlockDom(view)
+    const firstFloat = firstBodyFloatBlock(view.dom, this.floats)
+    const independentBody = new Set<Element>()
+    // A CSS float only affects its anchor and subsequent content in the same
+    // formatting context. Hiding gaps before that anchor cannot change the
+    // wrap of the earlier body paragraphs.
+    if (firstFloat) {
+      for (const child of view.dom.children) {
+        if (child === firstFloat) break
+        independentBody.add(child)
+      }
+    }
     const mounted = paragraphs.map((para) => {
       const el = roots.get(para.node) ?? view.nodeDOM(para.pos)
-      const previous = canReuse ? this.results.get(para.node) : undefined
-      const reusable = previous?.settled && previous.el === el ? previous : undefined
-      return { para, el, reusable }
+      const independentBodyParagraph =
+        el instanceof HTMLElement &&
+        el.parentElement === view.dom &&
+        (!firstFloat || independentBody.has(el))
+      const previous =
+        canReuse && (independentBodyParagraph || this.floats.length === 0)
+          ? this.results.get(para.node)
+          : undefined
+      const reusable =
+        previous?.settled && !previous.coupled && previous.el === el ? previous : undefined
+      return { para, el, reusable, independentBodyParagraph }
     })
     const natural = new Set<HTMLElement>()
     const gaps: HTMLElement[] = []
-    // In normal flow, removing one paragraph's gap changes later paragraphs'
-    // vertical position but not their width. Columns, floats and cells may couple them.
-    if (this.floatBands.length === 0) {
-      for (const { para, el, reusable } of mounted) {
-        if (
-          reusable ||
-          !(el instanceof HTMLElement) ||
-          el.parentElement !== view.dom ||
-          natural.has(el)
-        )
-          continue
-        const own = el.querySelectorAll<HTMLElement>('.page-gap-inline')
-        if (own.length === 0) continue
-        const previous = this.results.get(para.node)
-        if (previous?.el === el && previous.excludedByStyle?.(getComputedStyle(el))) continue
-        natural.add(el)
-        for (const gap of own) gaps.push(gap)
-      }
+    for (const { para, el, reusable, independentBodyParagraph } of mounted) {
+      if (!independentBodyParagraph || reusable || !(el instanceof HTMLElement)) continue
+      if (natural.has(el)) continue
+      const own = el.querySelectorAll<HTMLElement>('.page-gap-inline')
+      if (own.length === 0) continue
+      const previous = this.results.get(para.node)
+      if (previous?.el === el && previous.excludedByStyle?.(getComputedStyle(el))) continue
+      natural.add(el)
+      for (const gap of own) gaps.push(gap)
     }
-    const batch =
-      natural.size > 1 &&
-      !(Number(getComputedStyle(view.dom).columnCount) > 1) &&
-      !view.dom.querySelector(
-        '.doc-hf-wrap-float, .doc-col-split-float, .doc-para-frame-float, .doc-textbox-side, .has-drop-cap',
-      )
-    return withInlineGapsHidden(batch ? gaps : [], () =>
-      mounted.map(({ para, el, reusable }) => {
-        if (reusable) {
-          reusable.gen = this.gen
-          return this.resultAt(reusable, para.pos)
-        }
-        return el instanceof HTMLElement
-          ? this.measure(
-              view,
-              para.node,
-              para.pos,
-              (dom, reuse) => read(para, dom, reuse),
-              el,
-              batch && natural.has(el),
-            )
-          : null
-      }),
-    )
+    const readMounted = ({ para, el, reusable }: (typeof mounted)[number], hideBatch: boolean) => {
+      if (reusable) {
+        reusable.gen = this.gen
+        return this.resultAt(reusable, para.pos)
+      }
+      return el instanceof HTMLElement
+        ? this.measure(
+            view,
+            para.node,
+            para.pos,
+            (dom, reuse) => read(para, dom, reuse),
+            el,
+            hideBatch,
+          )
+        : null
+    }
+    let measured: Array<T | null>
+    if (natural.size < 2 || requiresFullWrapMeasure(view)) {
+      measured = mounted.map((item) => readMounted(item, false))
+    } else {
+      measured = new Array<T | null>(mounted.length)
+      withInlineGapsHidden(gaps, () => {
+        mounted.forEach((item, i) => {
+          if (item.independentBodyParagraph && item.el instanceof HTMLElement)
+            measured[i] = readMounted(item, natural.has(item.el))
+        })
+      })
+      // Restore the body gaps before reading any coupled or table paragraph.
+      mounted.forEach((item, i) => {
+        if (!item.independentBodyParagraph) measured[i] = readMounted(item, false)
+      })
+    }
+    this.rootWidth = width ?? view.dom.offsetWidth
+    return measured
   }
 
   measure(
@@ -330,11 +387,12 @@ export class SettledParagraphCache<T> {
       )
         return this.resultAt(prev, pos)
     }
-    const measure = () => this.measureEl(node, pos, el, measureParagraph, prev)
+    const measure = () => this.measureEl(view, node, pos, el, measureParagraph, prev)
     return natural ? measure() : measureNatural(el, measure)
   }
 
   private measureEl(
+    view: EditorView,
     node: ProseMirrorNode,
     pos: number,
     el: HTMLElement,
@@ -343,10 +401,28 @@ export class SettledParagraphCache<T> {
   ): T | null {
     // layout px: a page-zoom transform changes no line break
     let rectKey = `${el.offsetHeight}:${el.offsetWidth}`
-    if (this.floatBands.length > 0) {
-      const r = el.getBoundingClientRect()
-      if (this.floatBands.some(([top, bottom]) => r.top < bottom && r.bottom > top))
-        rectKey = `${this.wrapVersion}:${r.top}:${rectKey}`
+    let coupled = false
+    let rect: DOMRect | undefined
+    for (const { context, element } of this.floats) {
+      if (context !== view.dom && !context.contains(el)) continue
+      const ownsFloat = el.contains(element)
+      const order = el.compareDocumentPosition(element)
+      if (
+        !ownsFloat &&
+        !(order & Node.DOCUMENT_POSITION_DISCONNECTED) &&
+        order & Node.DOCUMENT_POSITION_FOLLOWING
+      )
+        continue
+      // Hiding the gap may move a float anchored inside this paragraph.
+      let band = ownsFloat ? undefined : this.floatBands.get(element)
+      if (!band) {
+        band = readFloatBand(element)
+        if (!ownsFloat) this.floatBands.set(element, band)
+      }
+      rect ??= el.getBoundingClientRect()
+      if (rect.top >= band.bottom || rect.bottom <= band.top) continue
+      coupled = true
+      rectKey += `:${this.wrapVersion}:${band.top - rect.top}:${band.bottom - rect.top}:${band.shape}`
     }
     if (prev?.settled && prev.rectKey === rectKey) return this.resultAt(prev, pos)
 
@@ -365,6 +441,7 @@ export class SettledParagraphCache<T> {
       el,
       key,
       rectKey,
+      coupled,
       result,
       settled:
         (prev !== undefined && prev.key === key) ||

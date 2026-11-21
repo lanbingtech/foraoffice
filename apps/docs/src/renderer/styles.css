@@ -3771,7 +3771,7 @@ th[data-rev-fmt] {
 }
 
 /* .page-gap-paper is each gap kind's paper-wide box (the gap itself, or the
-   table gap's fill re-anchored by alignTableGapFills): 0/100% are the paper edges */
+   table gap's fill re-anchored by syncPageGapGeometry): 0/100% are the paper edges */
 .page-gap-paper::after {
   inset: 0;
   background-image:
@@ -5550,7 +5550,7 @@ th[data-rev-fmt] {
 }
 
 /* absolute: height 100% of an auto-height td resolves to 0, hiding the bands.
-   left/width are re-anchored to the paper box by alignTableGapFills (inline
+   left/width are re-anchored to the paper box by syncPageGapGeometry (inline
    styles): the cell's own box follows the table, not the paper */
 .page-gap-table-fill {
   position: absolute;

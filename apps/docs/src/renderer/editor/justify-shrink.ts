@@ -256,6 +256,7 @@ class JustifyShrinkView {
   private frozen = false
   private retryRaf = 0
   private retries = 0
+  private pendingSettlement = false
   private resizeObserver?: ResizeObserver
   private lastDomWidth = -1
   private results = new SettledParagraphCache<MeasuredShrink[]>(
@@ -281,8 +282,7 @@ class JustifyShrinkView {
     this.measure()
   }
   private onPhasedSettled = () => {
-    this.invalidate()
-    this.measure()
+    if (this.pendingSettlement) this.measure()
   }
 
   constructor(
@@ -357,7 +357,8 @@ class JustifyShrinkView {
     }
     const { view } = this
     // a streamed tail is still landing: measured once, when it has (settled event)
-    if (isPhasedContentPending()) return
+    this.pendingSettlement = isPhasedContentPending()
+    if (this.pendingSettlement) return
     // PDF export parks the editor subtree (.app.pv-exporting); any layout
     // read here would force the parked document to re-lay out per print chunk
     if (view.dom.closest('.app.pv-exporting')) {
