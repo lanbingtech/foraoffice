@@ -19,13 +19,12 @@ import {
 } from '../editor/find'
 import {
   GOTO_TARGETS,
-  blockIndexAtPos,
   lineCounts,
   lineIndexAtPos,
   linePosition,
   listGoToItems,
-  pageOfBlock,
   pagePositions,
+  pagePositionWithoutGap,
   resolveGoToIndex,
   sectionPositions,
   type GoToTarget,
@@ -101,11 +100,22 @@ function lastAtOrBefore(positions: Array<number | null>, caret: number): number 
 }
 
 /** place the caret at `pos` (nearest valid text position) and bring it on screen */
-function jumpTo(editor: Editor, pos: number): void {
+function jumpTo(editor: Editor, pos: number, centerCaret = false): void {
   const { state, view } = editor
   const clamped = Math.max(0, Math.min(pos, state.doc.content.size))
   const sel = TextSelection.near(state.doc.resolve(clamped), 1)
-  view.dispatch(state.tr.setSelection(sel).scrollIntoView())
+  if (centerCaret) {
+    view.dispatch(state.tr.setSelection(sel))
+    const scroller = view.dom.closest('.editor-scroll')
+    if (scroller) {
+      const caret = view.coordsAtPos(sel.from, 1)
+      const viewport = scroller.getBoundingClientRect()
+      scroller.scrollTop += (caret.top + caret.bottom - viewport.top - viewport.bottom) / 2
+      return
+    }
+  } else {
+    view.dispatch(state.tr.setSelection(sel).scrollIntoView())
+  }
   const { node } = view.domAtPos(sel.from)
   const el = node instanceof HTMLElement ? node : node.parentElement
   el?.scrollIntoView({ block: 'center' })
@@ -411,11 +421,11 @@ export function FindPanel({
     if (target === 'page' || target === 'section') {
       if (!lay) return setGotoMiss(true)
       positions = target === 'page' ? pagePositions(view, lay) : sectionPositions(view, lay)
-      const bi = blockIndexAtPos(view, lay, caret)
-      current =
-        target === 'page'
-          ? pageOfBlock(lay, Math.max(bi, 0)) - 1
-          : Math.max(0, lastAtOrBefore(positions, caret))
+      current = Math.max(0, lastAtOrBefore(positions, caret))
+      if (target === 'page' && lay.pageAtScreenY) {
+        const rect = view.coordsAtPos(caret, 1)
+        current = Math.max(0, lay.pageAtScreenY((rect.top + rect.bottom) / 2) - 1)
+      }
     } else if (target === 'line') {
       if (!lay) return setGotoMiss(true)
       const total = lineCounts(lay).reduce((a, b) => a + b, 0)
@@ -436,10 +446,17 @@ export function FindPanel({
       idx = gotoItems.findIndex((i) => i.label === gotoInput)
       if (idx < 0) idx = null
     } else idx = resolveGoToIndex(explicit ? gotoInput : '', current, positions.length, dir)
-    const pos = idx === null ? null : positions[idx]
-    if (pos === null || pos === undefined) return setGotoMiss(true)
+    const positionAt = (index: number) =>
+      positions[index] ??
+      (target === 'page' && lay ? pagePositionWithoutGap(view, lay, index) : null)
+    let pos = idx === null ? null : positionAt(idx)
+    if (idx !== null && target === 'page' && (!explicit || !gotoInput.trim())) {
+      for (let next = idx + dir; pos === null && next >= 0 && next < positions.length; next += dir)
+        pos = positionAt(next)
+    }
+    if (pos === null) return setGotoMiss(true)
     setGotoMiss(false)
-    jumpTo(editor, pos)
+    jumpTo(editor, pos, target === 'page')
   }
 
   const chip = (on: boolean, label: string, tip: StringKey, onClick: () => void) => (

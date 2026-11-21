@@ -48,6 +48,41 @@ function expectPageFrame(el: Element) {
 }
 
 describe('column and mixed-paper layout between an edit and the next pagination pass', () => {
+  it('reports the blocks whose text geometry actually changed', () => {
+    const editor = openEditor()
+    const [first, second] = Array.from(editor.view.dom.children) as HTMLElement[]
+    const spec = (el: HTMLElement, widthPx = contentWidth) => ({
+      el,
+      widthPx,
+      contentWPx: contentWidth,
+      marginLeftPx: 75.6,
+      marginRightPx: 75.6,
+      pageDx,
+      dx: 0,
+      dy: 0,
+    })
+
+    expect(setColumnLayout(editor.view, [spec(first), { ...spec(second), dy: 16 }])).toEqual(
+      new Set(),
+    )
+    expect(setColumnLayout(editor.view, [spec(first), spec(second, contentWidth + 0.25)])).toEqual(
+      new Set([second]),
+    )
+    expect(
+      setColumnLayout(editor.view, [
+        spec(first),
+        { ...spec(second, contentWidth + 0.25), charSpacePt: -0.25 },
+      ]),
+    ).toEqual(new Set([second]))
+    expect(
+      setColumnLayout(editor.view, [
+        spec(first),
+        { ...spec(second, contentWidth + 0.25), charSpacePt: -0.25, sectionPageStart: true },
+      ]),
+    ).toEqual(new Set([second]))
+    expect(setColumnLayout(editor.view, [spec(first)])).toEqual(new Set([second]))
+  })
+
   it.each([0, 5, 15])('keeps both paragraph frames when Enter splits at offset %i', (offset) => {
     const editor = openEditor()
     for (const el of Array.from(editor.view.dom.children)) expectPageFrame(el)

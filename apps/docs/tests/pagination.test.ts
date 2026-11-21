@@ -25,7 +25,6 @@ import {
   sectionGridPitchSpecs,
   sectionPageStartSpecs,
   sectionTopMarginSpecs,
-  wrapWidthSig,
   docGridPitchPt,
   sectionCharSpaceSpecs,
   docCharSpacePt,
@@ -1102,31 +1101,6 @@ describe('sectionPageStartSpecs — page-opening sections clear the previous sec
     const specs = sectionPageStartSpecs(blocks, secsList)
     expect(specs.map((sp) => blocks.findIndex((b) => b.el === sp.el))).toEqual([3, 4, 7])
     expect(specs.every((sp) => sp.sectionPageStart)).toBe(true)
-  })
-})
-
-describe('wrapWidthSig — specs that move line breaks re-trigger one pass', () => {
-  const el = (idx: number) => {
-    const e = document.createElement('p')
-    e.dataset.idx = String(idx)
-    return e
-  }
-
-  it('changes when a section-start clear appears, like a wrap width does', () => {
-    const width = { el: el(1), dx: 0, dy: 0, widthPx: 400.2, contentWPx: 380.4 }
-    const clear = { el: el(5), dx: 0, dy: 0, sectionPageStart: true as const }
-    const base = wrapWidthSig([width])
-    expect(wrapWidthSig([width, clear])).not.toBe(base)
-    expect(wrapWidthSig([clear])).not.toBe(wrapWidthSig([]))
-  })
-
-  it('is stable across passes for the same specs', () => {
-    const specs = [
-      { el: el(1), dx: 0, dy: 0, widthPx: 400.2, contentWPx: 380.4 },
-      { el: el(5), dx: 0, dy: 0, sectionPageStart: true as const },
-    ]
-    expect(wrapWidthSig(specs)).toBe(wrapWidthSig(specs.map((s) => ({ ...s }))))
-    expect(wrapWidthSig([{ ...specs[0], widthPx: 400.4 }])).toBe(wrapWidthSig([specs[0]]))
   })
 })
 

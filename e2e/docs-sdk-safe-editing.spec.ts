@@ -16,12 +16,14 @@ type FixtureWindow = Window & {
   editor: DocsEditorHandle
   ready: boolean
   fixture: { saved: number[]; saves: number; savePath: string }
+  viewportCommitProbe?: { renderers: number; commits: number }
 }
 
 async function withHostedDocument(
   original: Buffer,
   run: (page: Page) => Promise<void>,
   autoSave = false,
+  beforeOpen?: (page: Page) => Promise<void>,
 ) {
   const root = resolve(__dirname, '../apps/docs/out/embedded')
   const savePath = test.info().outputPath('hosted-saved.docx')
@@ -86,6 +88,7 @@ async function withHostedDocument(
   try {
     browser = await launchSdkTestHost()
     const page = await browser.newPage()
+    await beforeOpen?.(page)
     await page.exposeFunction(
       'persistFixtureSave',
       async (data: number[], requestedPath?: string) => {
@@ -109,6 +112,161 @@ async function withHostedDocument(
     await new Promise<void>((done) => server.close(() => done()))
   }
 }
+
+test('scrolling keeps the visible page and navigation in sync without a React root commit', async () => {
+  const pages = Array.from({ length: 8 }, (_, index) => {
+    const pageBreak = index === 0 ? '' : '<w:pPr><w:pageBreakBefore/></w:pPr>'
+    return `<w:p>${pageBreak}<w:r><w:t>Viewport paragraph ${index + 1}</w:t></w:r></w:p>`
+  }).join('')
+  const source = await buildDocx({ bodyXml: pages })
+
+  await withHostedDocument(
+    Buffer.from(source),
+    async (page) => {
+      const status = page.locator('.status-page')
+      const pane = page.locator('.nav-pane')
+      const scroller = page.locator('.editor-scroll')
+      const first = scroller.locator('.doc-page > p', { hasText: /^Viewport paragraph 1$/ })
+      const second = scroller.locator('.doc-page > p', { hasText: /^Viewport paragraph 2$/ })
+      await expect(status).toHaveText(/^Page \d+ of 8$/)
+      await page.getByRole('button', { name: 'View', exact: true }).click()
+      await page.getByRole('button', { name: 'Navigation Pane', exact: true }).click()
+      await pane.getByRole('tab', { name: 'Pages', exact: true }).click()
+      await expect(pane.locator('.nav-thumb')).toHaveCount(8)
+      await expect(pane.locator('.nav-thumb.on .nav-thumb-slot')).not.toHaveCount(0)
+      await first.evaluate((paragraph) => {
+        paragraph.closest<HTMLElement>('[contenteditable="true"]')!.focus({ preventScroll: true })
+        const range = document.createRange()
+        range.selectNodeContents(paragraph)
+        const selection = window.getSelection()!
+        selection.removeAllRanges()
+        selection.addRange(range)
+      })
+      const selection = () =>
+        page.evaluate(() => ({
+          text: window.getSelection()?.toString(),
+          focus: document.activeElement?.classList.contains('ProseMirror'),
+        }))
+      await expect.poll(selection).toEqual({ text: 'Viewport paragraph 1', focus: true })
+      const trigger = page.locator('.ai-ask-trigger')
+      await expect(trigger).toBeVisible()
+      const triggerTop = () => trigger.evaluate((element) => (element as HTMLElement).style.top)
+      const initialTriggerTop = await triggerTop()
+      const visiblePage = async () => Number((await status.textContent())?.match(/Page (\d+)/)?.[1])
+      const startingPage = await visiblePage()
+      await expect(pane.locator('.nav-thumb[aria-current="page"]')).toHaveAccessibleName(
+        `Page ${startingPage}`,
+      )
+
+      const pageDistance = await second.evaluate((paragraph) => {
+        const previous = paragraph.parentElement!.querySelector('p')!
+        return paragraph.getBoundingClientRect().top - previous.getBoundingClientRect().top
+      })
+      const bounds = await scroller.boundingBox()
+      if (!bounds) throw new Error('Missing document scroll area')
+      const moveToPage = () =>
+        page.mouse.move(bounds.x + bounds.width - 25, bounds.y + bounds.height / 2)
+      await moveToPage()
+      const commits = () =>
+        page.evaluate(() => (window as unknown as FixtureWindow).viewportCommitProbe!)
+      expect((await commits()).renderers).toBeGreaterThan(0)
+      const before = (await commits()).commits
+
+      await page.mouse.wheel(0, pageDistance)
+      await expect.poll(visiblePage).toBeGreaterThan(startingPage)
+      await expect(pane.locator('.nav-thumb[aria-current="page"]')).toHaveAccessibleName(
+        `Page ${await visiblePage()}`,
+      )
+      await expect(pane.locator('.nav-thumb.on .nav-thumb-slot')).not.toHaveCount(0)
+      await expect.poll(selection).toEqual({ text: 'Viewport paragraph 1', focus: true })
+      await expect.poll(triggerTop).not.toBe(initialTriggerTop)
+      const duringScroll = (await commits()).commits - before
+
+      await page.mouse.wheel(0, -pageDistance)
+      await expect.poll(visiblePage).toBe(startingPage)
+      await trigger.click()
+      const input = page.locator('.ai-ask-pop-input')
+      const popover = page.locator('.ai-ask-pop')
+      await expect(input).toBeFocused()
+      await input.fill('Keep this draft while scrolling')
+      const popoverTop = () => popover.evaluate((element) => (element as HTMLElement).style.top)
+      const initialPopoverTop = await popoverTop()
+      await moveToPage()
+      const beforePopoverScroll = (await commits()).commits
+      await page.mouse.wheel(0, pageDistance / 6)
+      await expect.poll(popoverTop).not.toBe(initialPopoverTop)
+      await expect(input).toBeFocused()
+      await expect(input).toHaveValue('Keep this draft while scrolling')
+      const duringPopoverScroll = (await commits()).commits - beforePopoverScroll
+      await input.press('Escape')
+      await expect(popover).toHaveCount(0)
+
+      await page.keyboard.press('End')
+      const wordCount = page.locator('.status-wordcount')
+      const beforePasteWordCount = await wordCount.textContent()
+      await scroller.locator('.ProseMirror[contenteditable="true"]').evaluate((editor) => {
+        const clipboardData = new DataTransfer()
+        clipboardData.setData('text/html', '<p>Paste options anchor probe</p>')
+        clipboardData.setData('text/plain', 'Paste options anchor probe')
+        editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true }))
+      })
+      const pasteChip = page.getByTestId('paste-options-chip')
+      await expect(pasteChip).toBeVisible()
+      await expect(wordCount).not.toHaveText(beforePasteWordCount ?? '')
+      const pasteChipTop = () => pasteChip.evaluate((element) => element.style.top)
+      const initialPasteChipTop = await pasteChipTop()
+      await moveToPage()
+      const beforePasteChipScroll = (await commits()).commits
+      await page.mouse.wheel(0, pageDistance / 9)
+      await expect.poll(pasteChipTop).not.toBe(initialPasteChipTop)
+      const duringPasteChipScroll = (await commits()).commits - beforePasteChipScroll
+
+      await pane.getByRole('button', { name: 'Page 8', exact: true }).click()
+      await expect(status).toHaveText('Page 8 of 8')
+      await expect(pane.locator('.nav-thumb[aria-current="page"]')).toHaveAccessibleName('Page 8')
+      await page.keyboard.press('End')
+      await page.keyboard.type(' edited')
+      await expect(scroller.getByText('Viewport paragraph 8 edited', { exact: true })).toBeVisible()
+      const navBody = pane.locator('.nav-body')
+      const navScroll = () => navBody.evaluate((element) => element.scrollTop)
+      expect(await navScroll()).toBeGreaterThan(0)
+      await navBody.evaluate((element) => (element.scrollTop = 0))
+      const oldSlot = await pane
+        .getByRole('button', { name: 'Page 1', exact: true })
+        .locator('.nav-thumb-slot')
+        .first()
+        .elementHandle()
+      const zoom = page.locator('.zoom-value')
+      const oldZoom = await zoom.textContent()
+      await page.getByRole('button', { name: '+', exact: true }).click()
+      await expect(zoom).not.toHaveText(oldZoom ?? '')
+      await expect.poll(() => oldSlot.evaluate((element) => element.isConnected)).toBe(false)
+      await expect(status).toHaveText('Page 8 of 8')
+      await expect(pane.locator('.nav-thumb[aria-current="page"]')).toHaveAccessibleName('Page 8')
+      expect(await navScroll()).toBe(0)
+      expect({
+        selection: duringScroll,
+        popover: duringPopoverScroll,
+        pasteOptions: duringPasteChipScroll,
+      }).toEqual({ selection: 0, popover: 0, pasteOptions: 0 })
+    },
+    false,
+    (page) =>
+      page.addInitScript(() => {
+        const probe = { renderers: 0, commits: 0 }
+        Object.assign(window, {
+          viewportCommitProbe: probe,
+          __REACT_DEVTOOLS_GLOBAL_HOOK__: {
+            supportsFiber: true,
+            inject: () => ++probe.renderers,
+            onCommitFiberRoot: () => {
+              probe.commits++
+            },
+          },
+        })
+      }),
+  )
+})
 
 test('saving after an edit preserves a PAGEREF cache for a bookmark in a split paragraph', async () => {
   const tocEntry = (title: string, bookmark: string, cachedPage: string) =>

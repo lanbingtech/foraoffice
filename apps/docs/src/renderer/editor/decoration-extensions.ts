@@ -24,7 +24,10 @@ import {
 } from './para-border-merge'
 import { rangeSlot } from '../dom-range'
 import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
-import { DOC_CSS_COMMITTED_EVENT, WRAP_WIDTHS_COMMITTED_EVENT } from './cjk-punct-shrink'
+import { DOC_CSS_COMMITTED_EVENT } from './cjk-punct-shrink'
+import { WRAP_WIDTHS_COMMITTED_EVENT, type WrapWidthChanges } from './column-layout'
+import { hasCoupledWrapGeometry } from './settled-measure'
+import { TopLevelPositions } from './top-level-pos'
 import { appendsAtEnd, touchedTopLevelBlocks } from './touched-blocks'
 import { blockDecorationPlugin } from './local-edit'
 
@@ -524,14 +527,33 @@ const MEASURE_SIGS_MAX = 8
 /** times the tab measurer gave up converging (read by the pagination debug snapshot) */
 export const tabLayoutDiag = { freezes: 0 }
 
+function tabDecorationsInRanges(
+  decorations: DecorationSet,
+  ranges: readonly { from: number; to: number }[],
+): Decoration[] {
+  if (ranges.length === 0) return []
+  const candidates = decorations
+    .find(ranges[0].from, ranges[ranges.length - 1].to)
+    .sort((a, b) => a.from - b.from)
+  let index = 0
+  return candidates.filter(({ from, to }) => {
+    while (index < ranges.length && ranges[index].to <= from) index++
+    const range = ranges[index]
+    return range && range.from <= from && to <= range.to
+  })
+}
+
 class TabLayoutView {
-  private lastSig = ''
+  private lastMeasurement?: { blocks?: ReadonlySet<HTMLElement>; signature: string }
   private seenSigs = new Set<string>()
   private frozen = false
   private retryRaf = 0
+  private retryScope?: ReadonlySet<HTMLElement>
+  private dispatchScope?: ReadonlySet<HTMLElement>
   private retries = 0
   private resizeObserver?: ResizeObserver
   private lastDomWidth = -1
+  private positions: TopLevelPositions
   /** tab paragraph heights before the last decoration dispatch */
   private heightsBefore = new Map<number, number>()
   /** toc entries already sized, keyed by element; the gap they were given */
@@ -545,18 +567,30 @@ class TabLayoutView {
     this.invalidate()
     this.measure()
   }
+  private onWrapWidths = (event: Event) => {
+    const { detail } = event as CustomEvent<WrapWidthChanges>
+    if (detail?.size === 0) return
+    const blocks = this.retryRaf
+      ? detail && this.retryScope && new Set([...this.retryScope, ...detail])
+      : detail
+    this.invalidate()
+    // Across floats and CSS columns, changing one block's height can change
+    // the line widths in a different block even if its own width stayed put.
+    this.measure(blocks && !hasCoupledWrapGeometry(this.view) ? blocks : undefined)
+  }
 
   constructor(
     private view: EditorView,
     private storage: TabStopStorage,
   ) {
+    this.positions = new TopLevelPositions(view)
     this.measure()
     document.fonts?.addEventListener('loadingdone', this.onFontsLoaded)
     document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, this.onPhasedSettled)
     // section wrap widths / document CSS land after the first measure and
     // re-wrap TOC titles without touching the editor root's width
     document.addEventListener(DOC_CSS_COMMITTED_EVENT, this.onPhasedSettled)
-    document.addEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onPhasedSettled)
+    view.dom.addEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onWrapWidths)
     if (typeof ResizeObserver !== 'undefined') {
       // width-only trigger: height changes on every keystroke
       this.resizeObserver = new ResizeObserver(() => {
@@ -574,21 +608,24 @@ class TabLayoutView {
   private invalidate() {
     this.seenSigs.clear()
     this.frozen = false
+    this.retries = 0
   }
 
   update(view: EditorView, prevState: EditorState) {
     if (view.state.doc !== prevState.doc) {
       this.invalidate()
-    } else if (
+      this.measure()
+      return
+    }
+    if (
       // selection-only transactions change neither the doc nor tab layout; the
       // plugin-state check keeps the measure→decorate→re-measure convergence alive
       tabStopPluginKey.getState(view.state) === tabStopPluginKey.getState(prevState)
     ) {
       return
-    } else {
-      this.signalReflow()
     }
-    this.measure()
+    this.signalReflow()
+    this.measure(this.dispatchScope)
   }
 
   private paraHeight(pos: number): number | null {
@@ -608,76 +645,97 @@ class TabLayoutView {
     document.fonts?.removeEventListener('loadingdone', this.onFontsLoaded)
     document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, this.onPhasedSettled)
     document.removeEventListener(DOC_CSS_COMMITTED_EVENT, this.onPhasedSettled)
-    document.removeEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onPhasedSettled)
+    this.view.dom.removeEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onWrapWidths)
     this.resizeObserver?.disconnect()
     if (this.retryRaf) cancelAnimationFrame(this.retryRaf)
   }
 
   /** initial-load dispatches measure before the DOM is measurable; retry on rAF (bounded) */
-  private scheduleRetry() {
+  private scheduleRetry(blocks?: ReadonlySet<HTMLElement>) {
     if (this.retryRaf || this.retries >= MEASURE_RETRY_MAX) return
     this.retries++
+    this.retryScope = blocks
     this.retryRaf = requestAnimationFrame(() => {
       this.retryRaf = 0
-      this.measure()
+      this.retryScope = undefined
+      this.measure(blocks)
     })
   }
 
-  private measure() {
+  private measure(blocks?: ReadonlySet<HTMLElement>) {
     if (this.retryRaf) {
       cancelAnimationFrame(this.retryRaf)
       this.retryRaf = 0
+      this.retryScope = undefined
     }
     const { view } = this
     // a streamed tail is still landing: measured once, when it has (settled event)
     if (isPhasedContentPending()) return
     if (!view.dom.isConnected) {
-      this.scheduleRetry()
+      this.scheduleRetry(blocks)
       return
     }
 
-    this.layoutTocLines()
+    const roots = blocks && [...blocks].filter((el) => el.parentElement === view.dom)
+    this.layoutTocLines(roots)
 
-    const paras: Array<{ node: ProseMirrorNode; pos: number }> = []
-    view.state.doc.descendants((node, pos) => {
+    const rootsByPosition = new Map<number, HTMLElement>()
+    for (const root of roots ?? []) {
+      const range = this.positions.of(root)
+      if (range) rootsByPosition.set(range.from, root)
+    }
+    const paras: Array<{ node: ProseMirrorNode; pos: number; el: HTMLElement | null }> = []
+    const addPara = (node: ProseMirrorNode, pos: number) => {
       if (!node.isTextblock) return true
       let hasTab = paraHasTabCache.get(node)
       if (hasTab === undefined) {
         hasTab = node.textContent.includes('\t')
         paraHasTabCache.set(node, hasTab)
       }
-      if (hasTab) paras.push({ node, pos })
+      if (hasTab) {
+        const el = rootsByPosition.get(pos) ?? view.nodeDOM(pos)
+        paras.push({ node, pos, el: el instanceof HTMLElement ? el : null })
+      }
       return false
-    })
+    }
+    const { doc } = view.state
+    if (roots) {
+      doc.forEach((node, pos) => {
+        if (rootsByPosition.has(pos) && addPara(node, pos))
+          node.descendants((child, offset) => addPara(child, pos + 1 + offset))
+      })
+    } else {
+      doc.descendants(addPara)
+    }
 
     this.heightsBefore = new Map()
     for (const para of paras) {
-      const h = this.paraHeight(para.pos)
-      if (h !== null) this.heightsBefore.set(para.pos, h)
+      if (para.el) this.heightsBefore.set(para.pos, para.el.getBoundingClientRect().height)
     }
 
     const paraRanges: Array<{ from: number; to: number }> = []
     const tabs: MeasuredTab[] = []
-    let measurable = false
+    let retry = false
     // Chromium lays tabs out in left-aligned space and only then justifies the
     // line (Word order too), so justified paragraphs are measured with their
     // justification suspended: the stretched spaces would otherwise inflate
     // every later tab's x and segment width and feed back into the targets.
     // Change only the tab paragraphs so unrelated body styles stay valid.
-    const measuring =
-      paras.length === 0
-        ? []
-        : Array.from(view.dom.querySelectorAll('.has-tab-stops')).filter(
-            (el) => el.closest('.ProseMirror') === view.dom,
-          )
+    const measuring = paras.flatMap(({ el }) =>
+      el?.classList.contains('has-tab-stops') && el.closest('.ProseMirror') === view.dom
+        ? [el]
+        : [],
+    )
     const observer = (view as { domObserver?: { stop(): void; start(): void } }).domObserver
     if (measuring.length > 0) observer?.stop()
     try {
       measuring.forEach((el) => el.classList.add('doc-tabs-measuring'))
       for (const para of paras) {
-        const measured = this.measureParagraph(para.node, para.pos)
-        if (!measured) continue
-        measurable = true
+        const measured = this.measureParagraph(para.node, para.pos, para.el)
+        if (!measured) {
+          retry = true
+          continue
+        }
         paraRanges.push({ from: para.pos, to: para.pos + para.node.nodeSize })
         tabs.push(...measured)
       }
@@ -686,33 +744,28 @@ class TabLayoutView {
       if (measuring.length > 0) observer?.start()
     }
 
-    if (paras.length > 0 && !measurable) {
-      this.scheduleRetry()
+    if (retry && paraRanges.length === 0) {
+      this.scheduleRetry(blocks)
       return
     }
-    this.retries = 0
-
-    const sig = JSON.stringify([paraRanges, tabs])
-    if (sig === this.lastSig) return
     if (this.frozen) return
-    if (this.seenSigs.has(sig) || this.seenSigs.size >= MEASURE_SIGS_MAX) {
-      // oscillation: keep the current decorations until an edit/resize/font
-      // load invalidates, instead of dispatching (and recursing) forever
-      this.frozen = true
-      tabLayoutDiag.freezes++
-      console.warn('[docs] tab-stop layout did not converge; keeping current tab decorations')
+
+    const signature = JSON.stringify([paraRanges, tabs])
+    const recheck = () => {
+      if (roots && retry) this.scheduleRetry(blocks)
+      else this.retries = 0
+    }
+    if (this.lastMeasurement?.blocks === blocks && this.lastMeasurement?.signature === signature) {
+      recheck()
       return
     }
-    this.seenSigs.add(sig)
-    this.lastSig = sig
-
-    const old = tabStopPluginKey.getState(view.state)
-    if (tabs.length === 0 && paraRanges.length === 0 && (!old || old === DecorationSet.empty))
-      return
+    const old = tabStopPluginKey.getState(view.state) ?? DecorationSet.empty
 
     const decos: Decoration[] = []
     for (const r of paraRanges)
-      decos.push(Decoration.node(r.from, r.to, { class: 'has-tab-stops' }))
+      decos.push(
+        Decoration.node(r.from, r.to, { class: 'has-tab-stops' }, { class: 'has-tab-stops' }),
+      )
     for (const t of tabs) {
       // the wrap's forced break and a glyph leader share ::before; the blank
       // line has no text to lead to, so the break wins
@@ -723,19 +776,48 @@ class TabLayoutView {
       const glue = t.glue && !fixed ? ' doc-tab-glue' : ''
       const box = fixed ? ' doc-tab-fixed' : ''
       const wrap = t.wrap ? ' doc-tab-wrap' : ''
-      decos.push(
-        Decoration.inline(
-          t.pos,
-          t.pos + 1,
-          {
-            class: `doc-tab${leader}${underline}${collapse}${glue}${box}${wrap}`,
-            style: fixed ? `width:${t.fixed}px` : `tab-size:${t.cssSize}px`,
-          },
-          { wrap: t.wrap },
-        ),
-      )
+      const attrs = {
+        class: `doc-tab${leader}${underline}${collapse}${glue}${box}${wrap}`,
+        style: fixed ? `width:${t.fixed}px` : `tab-size:${t.cssSize}px`,
+      }
+      decos.push(Decoration.inline(t.pos, t.pos + 1, attrs, { ...attrs, wrap: t.wrap }))
     }
-    view.dispatch(view.state.tr.setMeta(tabStopPluginKey, decos).setMeta('addToHistory', false))
+    const previous = roots
+      ? tabDecorationsInRanges(old, paraRanges)
+      : old.find().sort((a, b) => a.from - b.from)
+    decos.sort((a, b) => a.from - b.from)
+    if (
+      previous.length === decos.length &&
+      previous.every(
+        (d, i) =>
+          d.from === decos[i].from &&
+          d.to === decos[i].to &&
+          d.spec.class === decos[i].spec.class &&
+          d.spec.style === decos[i].spec.style,
+      )
+    ) {
+      this.lastMeasurement = { blocks, signature }
+      recheck()
+      return
+    }
+    if (this.seenSigs.has(signature) || this.seenSigs.size >= MEASURE_SIGS_MAX) {
+      // Keep the current decorations when the layout oscillates.
+      this.frozen = true
+      tabLayoutDiag.freezes++
+      console.warn('[docs] tab-stop layout did not converge; keeping current tab decorations')
+      return
+    }
+    this.seenSigs.add(signature)
+    this.lastMeasurement = { blocks, signature }
+
+    const previousScope = this.dispatchScope
+    this.dispatchScope = blocks
+    try {
+      const next = roots ? old.remove(previous).add(doc, decos) : DecorationSet.create(doc, decos)
+      view.dispatch(view.state.tr.setMeta(tabStopPluginKey, next).setMeta('addToHistory', false))
+    } finally {
+      this.dispatchScope = previousScope
+    }
   }
 
   /**
@@ -746,9 +828,14 @@ class TabLayoutView {
    * copy the inline style with the markup. Entries whose height moved tell the
    * paginator through the tab reflow meta.
    */
-  private layoutTocLines() {
+  private layoutTocLines(roots?: readonly HTMLElement[]) {
     const { view } = this
-    const lines = view.dom.querySelectorAll<HTMLElement>('.doc-toc-line')
+    const selector = '.doc-toc-line'
+    const lines = roots
+      ? roots.flatMap((root) =>
+          root.matches(selector) ? [root] : [...root.querySelectorAll<HTMLElement>(selector)],
+        )
+      : view.dom.querySelectorAll<HTMLElement>(selector)
     if (lines.length === 0) return
     const changed: Array<{ el: HTMLElement; before: number }> = []
     const pending: Array<{ tail: HTMLElement; gap: string; el: HTMLElement }> = []
@@ -807,10 +894,13 @@ class TabLayoutView {
   }
 
   /** null = paragraph not measurable right now (hidden, not mounted...) */
-  private measureParagraph(node: ProseMirrorNode, pos: number): MeasuredTab[] | null {
+  private measureParagraph(
+    node: ProseMirrorNode,
+    pos: number,
+    el: HTMLElement | null,
+  ): MeasuredTab[] | null {
     const { view } = this
-    const el = view.nodeDOM(pos)
-    if (!(el instanceof HTMLElement) || el.offsetWidth === 0) return null
+    if (!el || el.offsetWidth === 0) return null
     const rect = el.getBoundingClientRect()
     if (rect.width === 0) return null
     // rects are in screen px (affected by the page zoom transform); widths we
@@ -1080,7 +1170,8 @@ export const TabStopExtension = Extension.create({
         state: {
           init: () => DecorationSet.empty,
           apply(tr, old) {
-            const meta = tr.getMeta(tabStopPluginKey) as Decoration[] | undefined
+            const meta = tr.getMeta(tabStopPluginKey) as DecorationSet | Decoration[] | undefined
+            if (meta instanceof DecorationSet) return meta
             if (meta) return DecorationSet.create(tr.doc, meta)
             return old.map(tr.mapping, tr.doc)
           },

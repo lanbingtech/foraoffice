@@ -10310,6 +10310,10 @@ body.docs-crop-active
   cursor: pointer;
 }
 
+.ai-ask-trigger[hidden] {
+  display: none;
+}
+
 .ai-ask-trigger:hover {
   background: var(--hover);
 }

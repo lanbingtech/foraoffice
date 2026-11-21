@@ -756,6 +756,7 @@ export type PageGapSpec = {
 /** The widget owns its paper geometry, header/footer strips and notes.
  * ProseMirror manages the shell's placement in the editable document. */
 class GapWidgetContents {
+  page?: number
   private el: HTMLElement | null = null
   private kind: GapKind | undefined
   private paper: HTMLElement | null = null
@@ -788,6 +789,7 @@ class GapWidgetContents {
   }
 
   update(gap: PageGapSpec): void {
+    this.page = gap.page
     this.metrics = gap.metrics
     this.pullUp = gap.pullUp
     if (this.el && this.kind) applyGapMetrics(this.el, this.kind, gap.metrics, gap.pullUp)
@@ -808,6 +810,18 @@ class GapWidgetContents {
       if (this.paper) for (const strip of this.strips ?? []) this.paper.appendChild(strip)
     }
   }
+}
+
+/** Page starts use the same positions as the mounted gap widgets. Positions
+ * follow ProseMirror edits while the next pagination pass is pending. */
+export function pageGapPositions(state: EditorState): ReadonlyMap<number, number> {
+  const starts = new Map<number, number>()
+  for (const deco of key.getState(state)?.find(undefined, undefined, (spec) => spec.contents) ??
+    []) {
+    const { contents } = deco.spec as GapWidgetSpec
+    if (contents?.page !== undefined) starts.set(contents.page, deco.from)
+  }
+  return starts
 }
 
 export function setPageGaps(

@@ -7,6 +7,7 @@ import { SettledParagraphCache, noteFloatTransaction, type ReuseNoOpWhile } from
 import { sameLine } from './justify-shrink'
 import { rangeSlot } from '../dom-range'
 import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
+import { WRAP_WIDTHS_COMMITTED_EVENT, type WrapWidthChanges } from './column-layout'
 
 /**
  * Word's CJK line breaking (settings characterSpacingControl =
@@ -144,10 +145,6 @@ export interface CjkPunctShrinkStorage {
 
 /** dispatched on document after the doc-scoped <style> commits (App) */
 export const DOC_CSS_COMMITTED_EVENT = 'genoffice:doc-css'
-/** the paginator applied per-block wrap widths (section widths, columns,
- *  letter-spacing): the line breaks the shrink loops measured are stale */
-export const WRAP_WIDTHS_COMMITTED_EVENT = 'genoffice:wrap-widths'
-
 export function measuresAlignment(textAlign: string, legacyLayout: boolean): boolean {
   return textAlign === 'justify' || legacyLayout
 }
@@ -423,6 +420,15 @@ class CjkPunctShrinkView {
     this.invalidate()
     this.measure()
   }
+  private onWrapWidths = (event: Event) => {
+    const { detail } = event as CustomEvent<WrapWidthChanges>
+    if (detail) {
+      this.results.invalidateBlocks(this.view, detail)
+      this.seenSigs.clear()
+      this.frozen = false
+    } else this.invalidate()
+    this.measure()
+  }
   private onPhasedSettled = () => {
     this.invalidate()
     this.measure()
@@ -435,7 +441,7 @@ class CjkPunctShrinkView {
     this.measure()
     document.fonts?.addEventListener('loadingdone', this.onFontsLoaded)
     document.addEventListener(DOC_CSS_COMMITTED_EVENT, this.onDocCss)
-    document.addEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onDocCss)
+    view.dom.addEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onWrapWidths)
     document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, this.onPhasedSettled)
     if (typeof ResizeObserver !== 'undefined') {
       this.resizeObserver = new ResizeObserver(() => {
@@ -476,7 +482,7 @@ class CjkPunctShrinkView {
   destroy() {
     document.fonts?.removeEventListener('loadingdone', this.onFontsLoaded)
     document.removeEventListener(DOC_CSS_COMMITTED_EVENT, this.onDocCss)
-    document.removeEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onDocCss)
+    this.view.dom.removeEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onWrapWidths)
     document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, this.onPhasedSettled)
     this.resizeObserver?.disconnect()
     if (this.retryRaf) cancelAnimationFrame(this.retryRaf)

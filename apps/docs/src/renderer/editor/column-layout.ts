@@ -9,6 +9,11 @@ import type { LayoutBatch } from './pagination-gaps'
 import { columnDecoration, mapColumnDecorations } from './column-layout-recovery'
 
 const key = new PluginKey<DecorationSet>('columnLayout')
+export const WRAP_WIDTHS_COMMITTED_EVENT = 'genoffice:wrap-widths'
+/** Null indicates that simultaneous changes can affect blocks outside the set. */
+export type WrapWidthChanges = ReadonlySet<HTMLElement> | null
+
+const committedWrap = new WeakMap<EditorView, Map<HTMLElement, string>>()
 
 /**
  * Mixed-column canvas layout (documents whose sections disagree on column
@@ -156,11 +161,12 @@ export function setColumnLayout(
   view: EditorView,
   specs: ColumnBlockSpec[],
   batch?: LayoutBatch,
-): void {
+): ReadonlySet<HTMLElement> {
   const decos: Decoration[] = []
   const positions = new TopLevelPositions(view)
   const styleOf = new Map<HTMLElement, { style: string; cls: string }>()
   const splitOf = new Map<HTMLElement, string>()
+  const nextWrap = new Map<HTMLElement, string>()
   for (const spec of specs) {
     if (spec.split)
       splitOf.set(
@@ -172,6 +178,21 @@ export function setColumnLayout(
           spec.split.rtl,
         ),
       )
+    const wrapInputs = [
+      spec.widthPx === undefined ? undefined : round2(spec.widthPx),
+      spec.contentWPx === undefined ? undefined : round2(spec.contentWPx),
+      spec.contentWPx === undefined ? undefined : round2(spec.marginLeftPx ?? 0),
+      spec.contentWPx === undefined ? undefined : round2(spec.marginRightPx ?? 0),
+      spec.gridPitchPt === undefined ? undefined : round2(spec.gridPitchPt),
+      spec.charSpacePt === undefined ? undefined : round4(spec.charSpacePt),
+      spec.charSpaceSbPt === undefined ? undefined : round4(spec.charSpaceSbPt),
+      spec.vertical?.mode,
+      spec.vertical?.firstOnPage,
+      spec.sectionPageStart,
+      splitOf.get(spec.el),
+    ]
+    if (wrapInputs.some((value) => value !== undefined))
+      nextWrap.set(spec.el, JSON.stringify(wrapInputs))
     const style =
       (spec.widthPx !== undefined ? `--col-w:${round2(spec.widthPx)}px;` : '') +
       (spec.contentWPx !== undefined
@@ -215,8 +236,19 @@ export function setColumnLayout(
     if (batch) batch.set(key, next)
     else view.dispatch(view.state.tr.setMeta(key, next).setMeta('addToHistory', false))
   }
-  if (batch) batch.then(() => patchNodeViews(view, styleOf, splitOf))
-  else patchNodeViews(view, styleOf, splitOf)
+  const changed = new Set<HTMLElement>()
+  const previousWrap = committedWrap.get(view)
+  for (const [el, inputs] of nextWrap) if (previousWrap?.get(el) !== inputs) changed.add(el)
+  if (previousWrap)
+    for (const el of previousWrap.keys())
+      if (!nextWrap.has(el) && view.dom.contains(el)) changed.add(el)
+  const commit = () => {
+    patchNodeViews(view, styleOf, splitOf)
+    committedWrap.set(view, nextWrap)
+  }
+  if (batch) batch.then(commit)
+  else commit()
+  return changed
 }
 
 /**

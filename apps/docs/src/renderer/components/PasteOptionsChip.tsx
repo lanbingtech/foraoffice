@@ -11,7 +11,7 @@
  * coordinates, the AiAskPopover pattern); repositions while the document
  * scrolls and hides on any other document change.
  */
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Editor } from '@tiptap/core'
 import type { EditorState, Transaction } from '@tiptap/pm/state'
 import { useI18n, type StringKey } from '../i18n/locale'
@@ -73,7 +73,6 @@ export function PasteOptionsChip({ editor }: { editor: Editor }) {
   const { t } = useI18n()
   const [chip, setChip] = useState<ChipState | null>(null)
   const [open, setOpen] = useState(false)
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
   // setDefaultPasteMode writes localStorage — bump to re-read it in render
   const [, setPrefTick] = useState(0)
   const reapplying = useRef(false)
@@ -130,19 +129,20 @@ export function PasteOptionsChip({ editor }: { editor: Editor }) {
   }, [editor])
 
   // anchor at the end of the pasted content; follow scrolling
-  useEffect(() => {
-    if (!chip) {
-      setPos(null)
-      return
-    }
+  useLayoutEffect(() => {
+    const root = rootRef.current
+    if (!chip || !root) return
     const place = () => {
       try {
         const max = editor.state.doc.content.size
         const coords = editor.view.coordsAtPos(Math.min(chip.to, max))
         const left = Math.min(coords.right + GAP, window.innerWidth - EDGE - 32)
         const top = Math.min(coords.bottom + GAP, window.innerHeight - EDGE - 32)
-        setPos({ left: Math.max(EDGE, left), top: Math.max(EDGE, top) })
+        root.style.left = `${Math.max(EDGE, left)}px`
+        root.style.top = `${Math.max(EDGE, top)}px`
+        root.style.visibility = ''
       } catch {
+        root.style.visibility = 'hidden'
         setChip(null)
       }
     }
@@ -179,7 +179,7 @@ export function PasteOptionsChip({ editor }: { editor: Editor }) {
     }
   }, [editor, chip, open])
 
-  if (!chip || !pos) return null
+  if (!chip) return null
 
   const applyMode = (mode: PasteMode) => {
     if (mode === chip.mode) {
@@ -220,7 +220,7 @@ export function PasteOptionsChip({ editor }: { editor: Editor }) {
     <div
       ref={rootRef}
       className="paste-chip"
-      style={{ left: pos.left, top: pos.top }}
+      style={{ visibility: 'hidden' }}
       data-testid="paste-options-chip"
     >
       <button

@@ -17,12 +17,13 @@ import {
   lineAtOffset,
   lineIndexAtPos,
   listGoToItems,
+  pagePositions,
   resolveGoToIndex,
-  visiblePageStartBlocks,
   type PageLayout,
 } from '../src/renderer/editor/goto'
 import type { EditorView } from '@tiptap/pm/view'
 import { findMatches } from '../src/renderer/components/FindPanel'
+import { setPageGaps } from '../src/renderer/editor/pagination-gaps'
 
 // non-ASCII fixtures are built from code points (public-hygiene: no CJK literals in tests)
 const cp = (...codes: number[]) => String.fromCodePoint(...codes)
@@ -337,19 +338,49 @@ describe('go to', () => {
     expect(resolveGoToIndex('1', 0, 0)).toBe(null)
   })
 
-  it('maps visible pages to their first blocks, skipping parity blanks', () => {
-    const blocks = [
-      { top: 0, height: 100 },
-      { top: 100, height: 100 },
-      { top: 200, height: 100 },
-      { top: 300, height: 100 },
-    ]
+  it('keeps the page number after a parity blank', () => {
+    const editor = createEditor([para('one'), para('two'), para('three'), para('four')])
+    const blocks: PageLayout['blocks'] = []
+    editor.state.doc.forEach((_, pos, i) => {
+      blocks.push({ top: i * 100, height: 100, el: editor.view.nodeDOM(pos) as HTMLElement })
+    })
     const slices = [
       { start: 0, end: 200, section: 0 },
       { start: 200, end: 200, section: 0 },
       { start: 200, end: 400, section: 0 },
     ]
-    expect(visiblePageStartBlocks(layoutOf({ blocks, slices, sections: [] }))).toEqual([0, 2])
+    expect(pagePositions(editor.view, layoutOf({ blocks, slices, sections: [] }))).toEqual([
+      1,
+      null,
+      11,
+    ])
+  })
+
+  it('uses the actual page-turn position when several pages start inside one block', () => {
+    const editor = createEditor([para('First second third'), para('Fourth')])
+    const { view } = editor
+    const first = view.nodeDOM(0) as HTMLElement
+    const last = view.nodeDOM(editor.state.doc.firstChild!.nodeSize) as HTMLElement
+    const metrics = { marginTop: 0, marginBottom: 0, marginLeft: 0, marginRight: 0 }
+    setPageGaps(view, [
+      { page: 1, pos: 7, metrics },
+      { page: 2, pos: 14, metrics },
+      { page: 3, el: last, metrics },
+    ])
+    const layout = layoutOf({
+      blocks: [
+        { top: 0, height: 300, el: first },
+        { top: 300, height: 100, el: last },
+      ],
+      slices: Array.from({ length: 4 }, (_, index) => ({
+        start: index * 100,
+        end: (index + 1) * 100,
+        section: 0,
+      })),
+      sections: [],
+    })
+
+    expect(pagePositions(view, layout)).toEqual([1, 7, 14, editor.state.doc.firstChild!.nodeSize])
   })
 
   it('resolves the caret line inside its block, not the block start', () => {

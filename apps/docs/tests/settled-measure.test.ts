@@ -55,6 +55,68 @@ const nodeInsert = (editor: Editor) =>
 describe('SettledParagraphCache', () => {
   const node = {} as ProseMirrorNode
 
+  it('invalidates text inside a changed block and keeps unrelated settled results', () => {
+    const root = document.createElement('div')
+    root.innerHTML = '<p>first</p><table><tbody><tr><td><p>cell</p></td></tr></tbody></table>'
+    const elements = Array.from(root.querySelectorAll('p'))
+    const widths = elements.map((element) => {
+      const width = vi.fn(() => 200)
+      Object.defineProperty(element, 'offsetWidth', { get: width })
+      return width
+    })
+    const view = {
+      dom: root,
+      nodeDOM: (pos: number) => elements[pos],
+    } as unknown as EditorView
+    const paragraphs = elements.map((_, pos) => ({ node: {} as ProseMirrorNode, pos }))
+    const cache = new SettledParagraphCache<number[]>(shiftAll, () => true)
+    const measure = vi.fn(({ pos }: { pos: number }) => [pos])
+    expect(cache.measurePass(view, paragraphs, measure)).toEqual([[0], [1]])
+    cache.invalidateBlocks(view, new Set([root.querySelector('table')!]))
+    widths.forEach((read) => read.mockClear())
+    measure.mockClear()
+    expect(cache.measurePass(view, paragraphs, measure)).toEqual([[0], [1]])
+    expect(measure).toHaveBeenCalledTimes(1)
+    expect(measure.mock.calls[0][0].pos).toBe(1)
+    expect(widths[0]).not.toHaveBeenCalled()
+  })
+
+  it('rechecks a neighbouring paragraph when a committed split float changes its wrap', () => {
+    const root = document.createElement('div')
+    root.innerHTML = '<p>first</p><p>second</p>'
+    document.body.appendChild(root)
+    try {
+      const elements = Array.from(root.querySelectorAll('p'))
+      elements[1].getBoundingClientRect = () => ({ top: 10, bottom: 30 }) as DOMRect
+      const view = {
+        dom: root,
+        state: {},
+        nodeDOM: (pos: number) => elements[pos],
+      } as unknown as EditorView
+      const paragraphs = elements.map((_, pos) => ({ node: {} as ProseMirrorNode, pos }))
+      const cache = new SettledParagraphCache<number[]>(shiftAll, () => true)
+      const measure = vi.fn(({ pos }: { pos: number }) => [pos])
+      cache.measurePass(view, paragraphs, measure)
+
+      const split = document.createElement('span')
+      split.className = 'doc-col-split-float'
+      split.getBoundingClientRect = () => ({ top: 0, bottom: 20 }) as DOMRect
+      elements[0].prepend(split)
+      cache.invalidateBlocks(view, new Set([elements[0]]))
+      measure.mockClear()
+      cache.measurePass(view, paragraphs, measure)
+      expect(measure.mock.calls.map(([para]) => para.pos)).toEqual([0, 1])
+
+      split.remove()
+      cache.invalidateBlocks(view, new Set([elements[0]]))
+      measure.mockClear()
+      cache.measurePass(view, paragraphs, measure)
+      expect(measure.mock.calls.map(([para]) => para.pos)).toEqual([0, 1])
+    } finally {
+      root.remove()
+    }
+  })
+
   it('reads independent paragraphs with their inline gaps hidden in one pass', () => {
     const root = document.createElement('div')
     root.innerHTML = '<p><span class="page-gap-inline"></span></p>'.repeat(2)

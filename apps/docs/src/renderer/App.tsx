@@ -10,7 +10,7 @@ import type { DocsEditorAction, DocsAiOperation } from '../shared/editor-action'
 import { submitDocsEditorAction } from './runtime/editor-actions'
 import { scriptFontHtml } from './editor/script-fonts'
 import { carryDocSeen } from './ai/tools'
-import { DOC_CSS_COMMITTED_EVENT, WRAP_WIDTHS_COMMITTED_EVENT } from './editor/cjk-punct-shrink'
+import { DOC_CSS_COMMITTED_EVENT } from './editor/cjk-punct-shrink'
 import { paginationActivity, trackPaginationActivity } from './pagination-activity'
 import { createDocumentStoryDiagnostic, disposeOwnedDiagnostic } from './document-story-diagnostic'
 import { observePaginationFonts } from './pagination-fonts'
@@ -234,7 +234,6 @@ import {
   blockInlineExtraPx,
   sectionVertical,
   sectionPageStartSpecs,
-  wrapWidthSig,
   sectionTopMarginSpecs,
   sectionWidthSpecs,
   mirrorMarginSpecs,
@@ -303,7 +302,8 @@ import { syncWrapObstacles } from './editor/wrap-obstacles'
 import { newObstacleShadow, obstaclePlanDiffs } from './editor/obstacle-plan'
 import { MultipageGrid, snapshotCanvas, type CanvasSnapshot } from './components/MultipageGrid'
 import { layoutMultipage, multipageColumns, multipageZoomForColumns } from './multipage'
-import { setColumnLayout } from './editor/column-layout'
+import { setColumnLayout, WRAP_WIDTHS_COMMITTED_EVENT } from './editor/column-layout'
+import { hasCoupledWrapGeometry } from './editor/settled-measure'
 import { pageMargins } from './page-margins'
 import { syncLineNumbers } from './editor/line-numbers'
 import { formattingMarksPluginKey, sectionBreakMap } from './editor/formatting-marks'
@@ -501,6 +501,7 @@ import {
 } from './editor/revision-view'
 import { setInlineComments } from './editor/balloon-markers'
 import { NavPane } from './components/NavPane'
+import { ViewportPage } from './viewport-page'
 import { loadLeftPane, saveLeftPane, type LeftPane } from './components/pane-width'
 import {
   commentsView,
@@ -952,7 +953,27 @@ export function App({
   const [evenOddHfDirty, setEvenOddHfDirty] = useState(false)
   const [mirrorMargins, setMirrorMargins] = useState(false)
   const [mirrorMarginsDirty, setMirrorMarginsDirty] = useState(false)
-  const [pageInfo, setPageInfo] = useState({ current: 1, total: 1 })
+  const [pageTotal, setPageTotal] = useState(1)
+  const [viewportPage] = useState(() => new ViewportPage())
+  const pageStatusLabel = useRef<HTMLSpanElement>(null)
+  const publishPage = useCallback(
+    (current: number, total: number) => {
+      const totalChanged = total !== viewportPage.snapshot.total
+      viewportPage.publish(current, total)
+      if (totalChanged) setPageTotal(total)
+    },
+    [viewportPage],
+  )
+  useLayoutEffect(() => {
+    const label = pageStatusLabel.current
+    if (!label) return
+    // Scroll-only updates are presentation. A React commit would traverse the
+    // entire focused contenteditable to preserve its selection.
+    return viewportPage.observe((info) => {
+      const text = t('appPageOf', info)
+      if (label.textContent !== text) label.textContent = text
+    })
+  }, [doc, lang, viewportPage])
   // last page's number for the document-end footer: text for the page marker, num for
   // even/odd parity (section restarts / pageNumberFmt make both differ from the physical count)
   const [lastPageNo, setLastPageNo] = useState<{ text: string; num: number } | null>(null)
@@ -1004,7 +1025,7 @@ export function App({
     restingHfAreaVariant(kind, {
       titlePg,
       evenOddHf,
-      pageCount: pageInfo.total,
+      pageCount: pageTotal,
       ...(lastPageNo ? { lastPageNo: lastPageNo.num } : {}),
     })
   const headerAreaView = areaView('header')
@@ -2421,7 +2442,7 @@ export function App({
     setHfVariantsDirty,
     sectionHfEdits,
     setSectionHfEdits,
-    pageCount: pageInfo.total,
+    pageCount: pageTotal,
     hfLinks,
     setHfLinks,
     titlePg,
@@ -3083,9 +3104,9 @@ export function App({
         case 'TIME':
           return now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
         case 'NUMPAGES':
-          return String(pageInfo.total)
+          return String(viewportPage.snapshot.total)
         case 'PAGE':
-          return String(pageInfo.current)
+          return String(viewportPage.snapshot.current)
         case 'FILENAME':
           return doc?.fileName ?? ''
         case 'MERGEFIELD': {
@@ -3097,7 +3118,7 @@ export function App({
           return ''
       }
     },
-    [pageInfo, doc],
+    [viewportPage, doc],
   )
 
   const insertField = useCallback(
@@ -4184,7 +4205,7 @@ export function App({
   // status-bar page number: real page slicing (same algorithm as the pagination preview). Edits remeasure with debounce; scrolling only relocates
   useEffect(() => {
     if (!doc || !section) {
-      setPageInfo({ current: 1, total: 1 })
+      publishPage(1, 1)
       setLastPageNo(null)
       setEdgeSectionPages(null)
       pageLayoutRef.current = null
@@ -4264,8 +4285,6 @@ export function App({
       onUpdate(null, dirtyIndex, 'follow-up')
     }
     const followUp = (why: string) => followUpAt(why, null)
-    let secWidthSig = ''
-    let charSpaceSig = ''
     const colWidthPass = newWidthPassState()
     const pmEl = () => document.querySelector('.editor-scroll .ProseMirror') as HTMLElement | null
     const locate = (publishCoverage = false) => {
@@ -4335,9 +4354,7 @@ export function App({
       }
       const current = cutPage ?? pageLookup.fromSlices(domY ?? flowY())
       const total = pageLookup.total
-      setPageInfo((prev) =>
-        prev.current === current && prev.total === total ? prev : { current, total },
-      )
+      publishPage(current, total)
     }
     const onScroll = () => {
       if (scrollFrame) return
@@ -5855,7 +5872,8 @@ export function App({
           }
           layoutSpecs = [...mergedSpecs.values()]
         }
-        setColumnLayout(editor.view, layoutSpecs, layoutBatch)
+        const changedWrapBlocks = setColumnLayout(editor.view, layoutSpecs, layoutBatch)
+        const hadCoupledWrap = changedWrapBlocks.size > 0 && hasCoupledWrapGeometry(editor.view)
         stage('columnLayout')
         const tCommit0 = performance.now()
         layoutBatch.commit()
@@ -5928,32 +5946,13 @@ export function App({
           rowFillSig = fSig
           followUp('rowFills')
         }
-        // freshly applied wrap widths (section widths, unequal column widths,
-        // vertical-text line lengths) change line breaks: one follow-up remeasure with them in the DOM
-        const wSig = wrapWidthSig([...secWSpecs, ...colSpecs, ...vertSpecs, ...sectStartSpecs])
-        let wrapWidthsChanged = false
-        if (wSig !== secWidthSig) {
-          secWidthSig = wSig
-          wrapWidthsChanged = true
-          followUp('width')
+        if (colGranted) followUp('columns')
+        if (changedWrapBlocks.size > 0) {
+          if (!colGranted) followUp('width')
+          const lostCoupling = hadCoupledWrap && !hasCoupledWrapGeometry(editor.view)
+          const detail = obstaclesChanged || lostCoupling ? null : changedWrapBlocks
+          editor.view.dom.dispatchEvent(new CustomEvent(WRAP_WIDTHS_COMMITTED_EVENT, { detail }))
         }
-        if (colGranted) {
-          wrapWidthsChanged = true
-          followUp('columns')
-        }
-        // freshly applied per-block letter-spacing changes line breaks the same way
-        const cSig =
-          charSpecs.length === 0
-            ? ''
-            : `${charSpecs.length}:${[...new Set(charSpecs.map((s) => s.charSpacePt))].join(',')}`
-        if (cSig !== charSpaceSig) {
-          charSpaceSig = cSig
-          wrapWidthsChanged = true
-          followUp('charSpace')
-        }
-        // the shrink loops measured line breaks the new widths just moved;
-        // their re-decision rides the follow-up pass already scheduled
-        if (wrapWidthsChanged) document.dispatchEvent(new Event(WRAP_WIDTHS_COMMITTED_EVENT))
         // the last page paints as a full sheet like the ones above it:
         // extend the canvas to that page's paper bottom, measured from the last gap
         const bands = pagePaperEdges(cuts, mTopPx).filter((e) => e.gap.kind !== 'cut')
@@ -6097,6 +6096,13 @@ export function App({
         })
       }
       pageLookup = buildPageLookup(slices, pageCuts, mTopPx)
+      if (pageLayoutRef.current) {
+        const lookup = pageLookup
+        pageLayoutRef.current.pageAtScreenY = (y) => {
+          const top = pm.getBoundingClientRect().top
+          return lookup.fromCuts(y, top, factor) ?? lookup.fromSlices((y - top) / factor - mTopPx)
+        }
+      }
       setLayoutRev((v) => v + 1)
       refreshToc?.()
     }
@@ -6279,6 +6285,7 @@ export function App({
     doc,
     docCss,
     multipageMode,
+    publishPage,
     section,
     sections,
     zoom,
@@ -6486,7 +6493,7 @@ export function App({
       return true
     })
     setStats({
-      pages: pageInfo.total,
+      pages: pageTotal,
       words: countWords(text),
       asianChars: asianCharCount(text),
       nonAsianWords: nonAsianWordCount(text),
@@ -6495,7 +6502,7 @@ export function App({
       paragraphs,
       lines,
     })
-  }, [editor, zoom, pageInfo.total])
+  }, [editor, zoom, pageTotal])
 
   // Review > Editor, the Tools menu and Word's F7 all run the same AI proofread
   // behind the one-time whole-document-rewrite acknowledgement
@@ -7335,8 +7342,8 @@ export function App({
     sections[0]?.pageNumberStart ?? 1,
     sections[0]?.pageNumberFmt,
   )
-  const lastPageNoText = lastPageNo?.text ?? String(pageInfo.total)
-  const lastPageIdx = Math.max(0, pageInfo.total - 1)
+  const lastPageNoText = lastPageNo?.text ?? String(pageTotal)
+  const lastPageIdx = Math.max(0, pageTotal - 1)
   /** open the strip editor for `kind` on page `pageIdx` (default: the document's first header / last footer) */
   const openHfEditor = (kind: 'header' | 'footer', pageIdx?: number) => {
     hfEditorRef.current?.exit()
@@ -9216,7 +9223,8 @@ export function App({
                 editor={editor}
                 doc={editor.state.doc}
                 zoom={zoom / 100}
-                pageInfo={pageInfo}
+                pageTotal={pageTotal}
+                viewportPage={viewportPage}
                 onClose={closeNav}
                 cuts={cutsNow}
               />
@@ -9343,7 +9351,7 @@ export function App({
                               commitHfAt(0, 'header', target.variant, next, target.owner)
                             }}
                             pageNo={firstPageNoText}
-                            pageTotal={pageInfo.total}
+                            pageTotal={pageTotal}
                             sectionPages={edgeSectionPages?.first}
                             sectionLabel={hfSectionLabel('header', 0)}
                             editRequest={
@@ -9416,7 +9424,7 @@ export function App({
                               )
                             }}
                             pageNo={lastPageNoText}
-                            pageTotal={pageInfo.total}
+                            pageTotal={pageTotal}
                             sectionPages={edgeSectionPages?.last}
                             linked={hfLinkedAt(lastSectionIdx, 'footer', footerAreaView)}
                             sectionLabel={hfSectionLabel('footer', lastSectionIdx)}
@@ -9579,7 +9587,7 @@ export function App({
                       setFindFocusGoTo((n) => n + 1)
                     }}
                   >
-                    {t('appPageOf', { current: pageInfo.current, total: pageInfo.total })}
+                    <span ref={pageStatusLabel} />
                   </button>
                   <button
                     className="status-item status-btn status-wordcount"
