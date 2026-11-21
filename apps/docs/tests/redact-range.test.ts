@@ -1,11 +1,15 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Editor } from '@tiptap/core'
 import { TextSelection } from '@tiptap/pm/state'
 import { parseDocx } from '@genoffice/docx-engine'
 import { buildDocx } from '../../../packages/docx-engine/tests/helpers/build-docx'
 import { blocksToPmDoc } from '../src/renderer/editor/convert'
 import { editorExtensions } from '../src/renderer/editor/extensions'
-import { redactTextBetween, type RedactableNode } from '../src/renderer/ai/redact-view'
+import {
+  redactEditorRange,
+  redactTextBetween,
+  type RedactableNode,
+} from '../src/renderer/ai/redact-view'
 import { buildDocContext, serializeRangeToHtml } from '../src/renderer/ai/protocol'
 import { listRevisionEntries } from '../src/renderer/ai/revision-ops'
 import { resolveQueueItem } from '../src/renderer/ai/edit-queue'
@@ -159,6 +163,29 @@ describe('a range with nothing withheld reads as ProseMirror reads it', () => {
 })
 
 describe('a range with a withheld span in it', () => {
+  it('preserves redaction and separators while reading only the live selection blocks', async () => {
+    const editor = await open(true)
+    const { schema, tr } = editor.state
+    editor.view.dispatch(tr.insert(0, schema.nodes.docParagraph.create()))
+    const doc = editor.state.doc
+    const source = json(editor)
+    const untouched = vi.spyOn(doc.child(0), 'toJSON')
+    const whole = vi.spyOn(doc, 'toJSON')
+    const from = doc.child(0).nodeSize + 1
+    expect(redactEditorRange(doc, from, doc.content.size)).toContain('{{client phone}}')
+    expect(redactEditorRange(doc, from, doc.content.size)).not.toContain(SECRET)
+    expect(untouched).not.toHaveBeenCalled()
+    expect(whole).not.toHaveBeenCalled()
+
+    for (let from = 0; from < doc.content.size; from++) {
+      for (let to = from + 1; to <= doc.content.size; to++) {
+        expect(redactEditorRange(doc, from, to), `range ${from}..${to}`).toBe(
+          redactTextBetween(source, from, to),
+        )
+      }
+    }
+  })
+
   it('never returns the words the reader hid', async () => {
     const editor = await open(true)
     const doc = json(editor)

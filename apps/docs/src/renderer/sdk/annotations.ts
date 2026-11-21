@@ -193,9 +193,11 @@ export function createDocsAnnotations(
           }),
         )
       }
-    editor.view.dispatch(
-      editor.state.tr.setMeta(annotationKey, decorations).setMeta('addToHistory', false),
-    )
+    if (decorations.length || annotationKey.getState(editor.state) !== DecorationSet.empty) {
+      editor.view.dispatch(
+        editor.state.tr.setMeta(annotationKey, decorations).setMeta('addToHistory', false),
+      )
+    }
     for (const listener of [...listeners]) {
       try {
         listener()
@@ -416,6 +418,7 @@ export function createDocsAnnotations(
     async refresh() {
       live()
       cancel()
+      if (ranges.size === 0 && rules.size === 0 && checkers.size === 0) return
       const token = generation
       const controller = (running = new AbortController())
       const snapshot = inspection.snapshot()

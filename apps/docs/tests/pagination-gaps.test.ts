@@ -8,7 +8,7 @@ import {
   alignGapHfStrips,
   canvasZoomOf,
   setPageGaps,
-  alignTableGapFills,
+  syncPageGapGeometry,
   makeGapEl,
   pageFramesFromGaps,
   syncCutOverlays,
@@ -23,7 +23,7 @@ import {
   syncPageBorders,
   syncFloatShifts,
 } from '../src/renderer/editor/pagination-gaps'
-import { leadDropsSpaceBefore } from '../src/renderer/pagination-cuts'
+import { leadDropsSpaceBefore, type PageCut } from '../src/renderer/pagination-cuts'
 import { measureBlocks } from '../src/renderer/pagination-measure'
 import {
   createLineRectsCache,
@@ -402,6 +402,22 @@ describe('overlay cut markers (read-only nested-table anchors)', () => {
     syncCutOverlays(wrap, [], 1)
     expect(wrap.querySelector('.page-cut-overlays')).toBeNull()
   })
+
+  it('reads all cut anchors against the last published overlay geometry', () => {
+    const wrap = wrapAt(0)
+    syncCutOverlays(wrap, [anchorAt(20)], 1)
+    const layer = wrap.querySelector('.page-cut-overlays')!
+    const oldMark = layer.firstElementChild
+    const anchors = [anchorAt(40), anchorAt(60)]
+    for (const [i, a] of anchors.entries()) {
+      a.node.parentElement!.getBoundingClientRect = () => {
+        expect([...layer.children]).toEqual([oldMark])
+        return rectOf(40 + i * 20)
+      }
+    }
+    syncCutOverlays(wrap, anchors, 1)
+    expect([...layer.children].map((el) => (el as HTMLElement).style.top)).toEqual(['40px', '60px'])
+  })
 })
 
 describe('createLineRectsCache', () => {
@@ -462,6 +478,13 @@ describe('createTableGapReads', () => {
 })
 
 describe('clampCellBoxTops', () => {
+  it('does not flush canvas geometry when there are no cell boxes to clamp', () => {
+    const pm = document.createElement('div')
+    const read = vi.spyOn(pm, 'getBoundingClientRect')
+    clampCellBoxTops(pm, 1)
+    expect(read).not.toHaveBeenCalled()
+  })
+
   const boxAt = (pm: HTMLElement, top: number, height = 45): HTMLElement => {
     const cell = document.createElement('div')
     cell.className = 'doc-cell-boxes'
@@ -477,7 +500,7 @@ describe('clampCellBoxTops', () => {
     const pm = document.createElement('div')
     const above = boxAt(pm, -62)
     const inside = boxAt(pm, 30)
-    clampCellBoxTops(pm, 0, 1)
+    clampCellBoxTops(pm, 1)
     expect(above.style.getPropertyValue('--page-float-dy')).toBe('62.0px')
     expect(inside.style.getPropertyValue('--page-float-dy')).toBe('')
   })
@@ -485,10 +508,10 @@ describe('clampCellBoxTops', () => {
   it('is idempotent: a re-run against the already-shifted rect keeps the same dy', () => {
     const pm = document.createElement('div')
     const box = boxAt(pm, -62)
-    clampCellBoxTops(pm, 0, 1)
+    clampCellBoxTops(pm, 1)
     // after the translate the live rect reads at the paper top
     box.getBoundingClientRect = () => ({ top: 0, bottom: 45, height: 45, width: 100 }) as DOMRect
-    clampCellBoxTops(pm, 0, 1)
+    clampCellBoxTops(pm, 1)
     expect(box.style.getPropertyValue('--page-float-dy')).toBe('62.0px')
   })
 })
@@ -607,7 +630,7 @@ describe('pinCellBoxesToPage', () => {
   it('clampCellBoxTops leaves page-positioned boxes alone', () => {
     const pm = paper()
     const box = pageBox(pm, -20, 0, { cellPageX: '0', cellPageY: '0', pageRelFrom: 'page' })
-    clampCellBoxTops(pm, 0, 1)
+    clampCellBoxTops(pm, 1)
     expect(box.style.getPropertyValue('--page-float-dy')).toBe('')
   })
 })
@@ -659,7 +682,7 @@ describe('clampCellImageTops', () => {
   })
 })
 
-describe('alignTableGapFills', () => {
+describe('syncPageGapGeometry', () => {
   /** paper at x=0, 816 wide; the gap cell follows its table's box */
   const pmWithFill = (cellLeft: number, cellWidth: number) => {
     const pm = document.createElement('div')
@@ -675,7 +698,7 @@ describe('alignTableGapFills', () => {
   it('re-anchors the fill to the paper box (issue #174: indented full-width table)', () => {
     // table starts 32px right of the paper edge and spills past the right margin
     const { pm, fill } = pmWithFill(32, 794)
-    alignTableGapFills(pm, 1)
+    syncPageGapGeometry(pm, 1)
     expect(fill.style.left).toBe('-32px')
     expect(fill.style.width).toBe('816px')
     expect(fill.style.right).toBe('auto')
@@ -683,7 +706,7 @@ describe('alignTableGapFills', () => {
 
   it('widens a narrower-than-paper table band to the full paper width', () => {
     const { pm, fill } = pmWithFill(196, 424) // centered half-width table
-    alignTableGapFills(pm, 1)
+    syncPageGapGeometry(pm, 1)
     expect(fill.style.left).toBe('-196px')
     expect(fill.style.width).toBe('816px')
   })
@@ -691,17 +714,35 @@ describe('alignTableGapFills', () => {
   it('divides zoomed rect deltas by the zoom factor', () => {
     const { pm, fill } = pmWithFill(64, 1588)
     pm.getBoundingClientRect = () => ({ left: 0, width: 1632 }) as DOMRect
-    alignTableGapFills(pm, 2)
+    syncPageGapGeometry(pm, 2)
     expect(fill.style.left).toBe('-32px')
     expect(fill.style.width).toBe('816px')
   })
 
   it('is idempotent: the cell rect does not move with the fill styles', () => {
     const { pm, fill } = pmWithFill(32, 794)
-    alignTableGapFills(pm, 1)
-    alignTableGapFills(pm, 1)
+    syncPageGapGeometry(pm, 1)
+    syncPageGapGeometry(pm, 1)
     expect(fill.style.left).toBe('-32px')
     expect(fill.style.width).toBe('816px')
+  })
+
+  it('reads page-turn positions and table coordinates before changing the fill', () => {
+    const { pm, fill } = pmWithFill(32, 794)
+    const rootRect = vi.fn(() => ({ left: 0, top: 100, width: 816 }) as DOMRect)
+    pm.getBoundingClientRect = rootRect
+    const gap = pm.querySelector('tr')!
+    gap.getBoundingClientRect = () => {
+      expect(fill.style.left).toBe('')
+      return { top: 612 } as DOMRect
+    }
+    const cuts = [{ gapOffsetPx: 8 }, { gap: { kind: 'table' } }] as PageCut[]
+
+    syncPageGapGeometry(pm, 1, { cuts, marginTop: 96 })
+
+    expect(cuts[1].gap?.flowTopPx).toBe(408)
+    expect(rootRect).toHaveBeenCalledTimes(1)
+    expect(fill.style.left).toBe('-32px')
   })
 
   it('differing-width documents: the fill covers the table’s own centered page, not the paper', () => {
@@ -713,7 +754,7 @@ describe('alignTableGapFills', () => {
     cell.getBoundingClientRect = () => ({ left: 120 + 96, width: 624 }) as DOMRect
     pm.appendChild(gap)
     const fill = cell.firstElementChild as HTMLElement
-    alignTableGapFills(pm, 1)
+    syncPageGapGeometry(pm, 1)
     expect(fill.style.left).toBe('-96px')
     expect(fill.style.width).toBe('816px')
   })
@@ -781,12 +822,26 @@ describe('page frames and sheets (differing-width documents, genoffice#246)', ()
     ])
     expect(sheets[0].style.top).toBe('0px')
     expect(sheets[0].style.height).toBe('1096px')
+    const layer = sheets[0].parentElement!
+    const observer = new MutationObserver(() => {})
+    observer.observe(layer, { attributes: true, childList: true, subtree: true })
+    syncPageSheets(wrap, 1, { left: 120, width: 816 })
+    expect(observer.takeRecords()).toEqual([])
+    expect(Array.from(layer.children)).toEqual(sheets)
+    observer.disconnect()
     syncPageSheets(wrap, 1, null)
     expect(wrap.querySelector('.page-sheets')).toBeNull()
   })
 })
 
 describe('alignGapHfStrips', () => {
+  it('does not read the paper rectangle when no strips or gap anchors need placement', () => {
+    const pm = document.createElement('div')
+    const read = vi.spyOn(pm, 'getBoundingClientRect')
+    alignGapHfStrips(pm, 96, 1)
+    expect(read).not.toHaveBeenCalled()
+  })
+
   const STRIP_W = 600
   /** emulates layout: stylesheet centering (left:50% of a 786px gap + translateX(-50%))
    *  until inline left/transform pin the strip */

@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { createDocsInspection } from '../src/renderer/sdk/inspection'
@@ -28,6 +28,23 @@ function fixture() {
     },
   }
 }
+
+it('observes document changes without rescanning text or dispatching empty decorations', async () => {
+  const { editor, annotations, inspection } = fixture()
+  const snapshot = vi.spyOn(inspection, 'snapshot')
+  const changed = vi.fn()
+  const unsubscribe = annotations.onChange(changed)
+  const dispatched = vi.fn()
+  editor.on('transaction', dispatched)
+
+  editor.view.dispatch(editor.state.tr.insertText('x', 1))
+  await annotations.refresh()
+
+  expect(dispatched).toHaveBeenCalledTimes(1)
+  expect(changed).toHaveBeenCalledTimes(1)
+  expect(snapshot).not.toHaveBeenCalled()
+  unsubscribe()
+})
 
 it('updates advisory rules and independent decorations without authoring content or undo entries', async () => {
   const { editor, annotations } = fixture()

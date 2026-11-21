@@ -4,6 +4,19 @@ import type { EditorView } from '@tiptap/pm/view'
 interface ChildDesc {
   dom: Node
   size: number
+  node?: PmNode
+}
+
+/** Document positions after ProseMirror has published the current view. */
+export function* topLevelDomRanges(view: EditorView) {
+  const { children } = (view as unknown as { docView: { children: ChildDesc[] } }).docView
+  let from = 0
+  for (const child of children) {
+    if (child.size <= 0) continue
+    const to = from + child.size
+    yield { dom: child.dom, node: child.node, from, to }
+    from = to
+  }
 }
 
 /**
@@ -39,12 +52,7 @@ export class TopLevelPositions {
     const cur = this.view.state.doc
     if (!this.map || this.doc !== cur) {
       this.map = new Map()
-      const { children } = (this.view as unknown as { docView: { children: ChildDesc[] } }).docView
-      let pos = 0
-      for (const child of children) {
-        if (child.size > 0) this.map.set(child.dom, { from: pos, to: pos + child.size })
-        pos += child.size
-      }
+      for (const { dom, from, to } of topLevelDomRanges(this.view)) this.map.set(dom, { from, to })
       this.doc = cur
     }
     const hit = this.map.get(top)

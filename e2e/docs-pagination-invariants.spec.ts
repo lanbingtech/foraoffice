@@ -232,7 +232,6 @@ test.describe('pagination invariants (rendered)', () => {
           `I11: PageCut agrees with the gap builder: ${dbg.pageCutDiag.join(' | ')}`,
         ).toBe(0)
         expect(dbg.gaps, 'one gap widget per page boundary').toBe(dbg.slices.length - 1)
-        expect(dbg.planDiff, 'I9: BlockPlan agrees with the measureBlocks scrape').toEqual([])
         expect(
           dbg.layoutHealth.flipsAfterFirst,
           `float channels rewritten after the first pass: ${JSON.stringify(dbg.layoutHealth.passes)}`,
@@ -248,6 +247,7 @@ test.describe('pagination invariants (rendered)', () => {
         await page.waitForTimeout(400)
         const again = await settle(page)
         expect(again.pageReaderShadowed, 'page-reader shadow ran').toBe(true)
+        expect(again.planDiff, 'I9: BlockPlan agrees with the measureBlocks scrape').toEqual([])
         expect(
           again.pageReaderMismatch,
           `page readers vs cuts: ${again.pageReaderDiag.join(' | ')}`,

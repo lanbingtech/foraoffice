@@ -65,6 +65,69 @@ function makeScheduler() {
 }
 
 describe('setContentPhased', () => {
+  it('streams a short document with a heavy nested table and mounts that table on its own', () => {
+    const { host, state } = makeHost()
+    const s = makeScheduler()
+    const content = docOf(3).content!
+    content[1] = {
+      type: 'docTable',
+      attrs: { docxIndex: 1 },
+      content: [
+        {
+          type: 'docTableRow',
+          content: [
+            {
+              type: 'docTableCell',
+              content: [
+                {
+                  type: 'docNestedTable',
+                  attrs: {
+                    model: {
+                      rows: Array.from({ length: 110 }, () => [
+                        { paras: ['left'] },
+                        { paras: ['right'] },
+                      ]),
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    }
+
+    setContentPhased(host, { type: 'doc', content }, s.schedule, () => 0)
+    expect(state.mounted).toHaveLength(1)
+    expect(state.mounted[0]).toBe(content[0])
+    expect(state.loading).toBe(true)
+    s.drain()
+    expect(state.mounted).toHaveLength(2)
+    expect(state.mounted[1]).toBe(content[1])
+    expect(state.loading).toBe(true)
+    s.drain()
+    expect(state.mounted).toEqual(content)
+    expect(state.loading).toBe(false)
+  })
+
+  it('accounts for the editors mounted inside protected textboxes', () => {
+    const { host, state } = makeHost()
+    const scheduler = makeScheduler()
+    const content = docOf(100).content!.map((block) => ({
+      type: 'docProtected',
+      attrs: {
+        ...block.attrs,
+        textboxes: [{ paras: [{ runs: [{ text: 'text' }] }] }],
+      },
+    }))
+
+    setContentPhased(host, { type: 'doc', content }, scheduler.schedule, () => 0)
+
+    expect(state.mounted.length).toBeLessThan(content.length)
+    while (scheduler.pending()) scheduler.drain()
+    expect(state.mounted).toEqual(content)
+  })
+
   it('tracks unmounted source blocks for the owning editor across appends and cancellation', () => {
     const { host } = makeHost()
     const owner = {}
@@ -124,14 +187,14 @@ describe('setContentPhased', () => {
     const append = host.appendNodes
     host.appendNodes = (nodes) => {
       append(nodes)
-      now += nodes.length / 2
+      now += nodes.length * 8
     }
     setContentPhased(host, docOf(total), scheduler.schedule, () => now)
     scheduler.drain()
     scheduler.drain()
     const appends = state.events.filter((event) => event.startsWith('append:'))
     expect(appends[0]).toBe(`append:${PHASE_CHUNK_BLOCKS}`)
-    expect(Number(appends[1].split(':')[1])).toBeLessThan(PHASE_CHUNK_BLOCKS)
+    expect(Number(appends[1].split(':')[1])).toBeLessThan(16)
     expect(state.loading).toBe(true)
     while (scheduler.pending() > 0) scheduler.drain()
     expect(state.mounted.map((node) => node.attrs?.docxIndex)).toEqual(

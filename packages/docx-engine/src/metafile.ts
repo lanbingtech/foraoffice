@@ -96,8 +96,10 @@ export async function metafileToDataUrl(
   try {
     let u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
     if (isGzip(u8)) u8 = await gunzip(u8)
-    const buffer = u8.slice().buffer
     if (!isMetafileMime(mime)) return null
+    // Node Buffer slices are views over their backing allocation. Convert the
+    // supplied byte range to a standalone ArrayBuffer for the renderer.
+    const buffer = new Uint8Array(u8).buffer
     // signature beats the declared mime: HWP-exported docx ship EMF bytes
     // under .wmf part names; mime only decides indeterminate bytes
     let isEmf: boolean

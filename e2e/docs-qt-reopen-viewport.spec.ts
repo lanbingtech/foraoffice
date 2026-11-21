@@ -5,13 +5,13 @@ import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
 import { launchPerformanceHost } from './docs-performance-host'
 import type { Activity } from './docs-performance-layout-probe'
 
-test('a replacement document opens with its first page in view after scrolling the previous document', async ({}, info) => {
+test('a replacement document opens with its first page in view after scrolling the previous document', async () => {
   test.skip(
     process.platform !== 'win32' || !process.env.FORAOFFICE_QT_HOST,
     'Requires the Windows Qt host',
   )
   test.setTimeout(90_000)
-  const workspace = info.outputPath('workspace')
+  const workspace = test.info().outputPath('workspace')
   await mkdir(workspace, { recursive: true })
   const previous = join(workspace, 'Previous.docx')
   const next = join(workspace, 'Next.docx')

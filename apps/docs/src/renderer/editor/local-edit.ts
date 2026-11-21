@@ -1,7 +1,8 @@
-import type { Node as PmNode } from '@tiptap/pm/model'
+import type { Fragment, Node as PmNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, type Transaction } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { touchedTopLevelBlocks } from './touched-blocks'
+import { appendedStreamedTail } from './streaming-tail-guard'
 
 /**
  * Block-attribute decoration plugins used to rebuild their whole set on every
@@ -61,16 +62,35 @@ interface BlockDecorationState {
   sig: string
 }
 
+type StreamedTail = NonNullable<ReturnType<typeof appendedStreamedTail>>
+
 export interface BlockDecorationSpec {
   key: PluginKey<BlockDecorationState>
   /** decorations of the whole document */
   build: (doc: PmNode) => Decoration[]
+  /** a verified whole-block append; null requests a full rebuild */
+  append?: (tr: Transaction, tail: StreamedTail, old: DecorationSet) => DecorationSet | null
   /** a touched block whose current content forces a rebuild */
   needsRecompute: (node: PmNode) => boolean
   /** with both sides of a touched block at hand, decides the rebuild instead of needsRecompute */
   changed?: (before: PmNode, after: PmNode) => boolean
   /** inputs outside the document (display modes): a change rebuilds on the next transaction */
   signature?: () => string
+}
+
+/** A top-level block's decorations depend only on that block. */
+export function blockLocalDecorations(
+  decorate: (node: PmNode, pos: number, out: Decoration[]) => void,
+): Required<Pick<BlockDecorationSpec, 'build' | 'append'>> {
+  const build = (content: Fragment, base: number) => {
+    const decos: Decoration[] = []
+    content.forEach((node, offset) => decorate(node, base + offset, decos))
+    return decos
+  }
+  return {
+    build: (doc) => build(doc.content, 0),
+    append: (tr, tail, old) => old.add(tr.doc, build(tail.content, tail.from)),
+  }
 }
 
 export function blockDecorationPlugin(spec: BlockDecorationSpec): Plugin<BlockDecorationState> {
@@ -89,6 +109,13 @@ export function blockDecorationPlugin(spec: BlockDecorationSpec): Plugin<BlockDe
         const sig = spec.signature?.() ?? ''
         if (sig !== old.sig) return compute(tr.doc)
         if (!tr.docChanged) return old
+        if (spec.append) {
+          const tail = appendedStreamedTail(tr)
+          if (tail) {
+            const set = spec.append(tr, tail, old.set)
+            return set ? (set === old.set ? old : { set, sig }) : compute(tr.doc)
+          }
+        }
         const touched = localEditBlocks(tr)
         if (!touched) return compute(tr.doc)
         const mapped = old.set.map(tr.mapping, tr.doc)

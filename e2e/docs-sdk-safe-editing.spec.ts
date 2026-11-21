@@ -113,6 +113,38 @@ async function withHostedDocument(
   }
 }
 
+test('page status opens Go To, navigates to the requested page and keeps it editable', async () => {
+  const bodyXml = Array.from({ length: 8 }, (_, index) => {
+    const pageBreak = index === 0 ? '' : '<w:pPr><w:pageBreakBefore/></w:pPr>'
+    return `<w:p>${pageBreak}<w:r><w:t>Navigation paragraph ${index + 1}</w:t></w:r></w:p>`
+  }).join('')
+  const source = await buildDocx({ bodyXml })
+
+  await withHostedDocument(Buffer.from(source), async (page) => {
+    const status = page.locator('.status-page')
+    const input = page.locator('.find-goto-input')
+    const panel = page.locator('.find-panel')
+    const target = page.locator('.editor-scroll .doc-page > p', {
+      hasText: /^Navigation paragraph 7$/,
+    })
+    await expect(status).toHaveText(/^Page [1-6] of 8$/)
+    await status.click()
+    await expect(input).toBeFocused()
+    await input.fill('7')
+    await input.press('Enter')
+    await expect(status).toHaveText('Page 7 of 8')
+    await expect(target).toBeInViewport()
+    await panel.locator('.find-close').click()
+    await expect(panel).toHaveCount(0)
+    await target.click()
+    await page.keyboard.press('End')
+    await page.keyboard.type(' edited')
+    await expect(page.locator('.editor-scroll .doc-page')).toContainText(
+      'Navigation paragraph 7 edited',
+    )
+  })
+})
+
 test('scrolling keeps the visible page and navigation in sync without a React root commit', async () => {
   const pages = Array.from({ length: 8 }, (_, index) => {
     const pageBreak = index === 0 ? '' : '<w:pPr><w:pageBreakBefore/></w:pPr>'
