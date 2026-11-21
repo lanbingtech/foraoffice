@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import JSZip from 'jszip'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { parseDocx, saveDocx } from '../src/index'
 import { buildDocx } from './helpers/build-docx'
-import { installFakeCanvas } from './helpers/fake-canvas'
+import { FakeOffscreenCanvas, installFakeCanvas } from './helpers/fake-canvas'
 
 /**
  * MathType equations: Word stores them as an OLE embed
@@ -52,9 +53,11 @@ afterAll(() => {
   restore()
 })
 
-async function parseEquation(preview: string, ext: string) {
+async function parseEquation(preview: string, ext: string, inline = false) {
   const bytes = await buildDocx({
-    bodyXml: oleEquationXml('rId30', 'rId31'),
+    bodyXml: inline
+      ? `<w:p><w:r><w:t>Formula:</w:t></w:r>${oleEquationRun('rId30', 'rId31')}</w:p>`
+      : oleEquationXml('rId30', 'rId31'),
     extraRels: RELS.replace('%EXT%', ext),
     binaryParts: [
       {
@@ -91,6 +94,44 @@ describe('MathType equation previews', () => {
     expect(block?.oleProgId).toBe('Equation.DSMT4')
     expect(block?.imageDataUrl).toMatch(/^data:image\/png;base64,/)
   })
+
+  it.each([false, true])(
+    'limits a high-coordinate WMF to its display size (inline: %s)',
+    async (inline) => {
+      const preview = Buffer.from(fixture('ole-icon.wmf'), 'base64')
+      preview.writeInt16LE(-10, 6)
+      preview.writeInt16LE(-20, 8)
+      preview.writeInt16LE(7190, 10)
+      preview.writeInt16LE(3980, 12)
+      preview.writeUInt16LE(7600, 14)
+      let checksum = 0
+      for (let offset = 0; offset < 20; offset += 2) checksum ^= preview.readUInt16LE(offset)
+      preview.writeUInt16LE(checksum, 20)
+
+      const encode = vi.spyOn(FakeOffscreenCanvas.prototype, 'convertToBlob')
+      try {
+        const parsed = await parseEquation(preview.toString('base64'), 'wmf', inline)
+        const block = parsed.blocks[0]!
+        const inlineImage = block.runs?.find((run) => run.image)?.image
+        expect(
+          inline
+            ? [inlineImage?.widthPx, inlineImage?.heightPx]
+            : [block.imageWidthPx, block.imageHeightPx],
+        ).toEqual([96, 48])
+        expect(encode.mock.contexts).toHaveLength(1)
+        const canvas = encode.mock.contexts[0] as FakeOffscreenCanvas
+        expect([canvas.width, canvas.height]).toEqual([384, 213])
+        const saved = await saveDocx(parsed, [{ kind: 'original', docxIndex: block.docxIndex! }])
+        const archive = await JSZip.loadAsync(saved)
+        expect(await archive.file('word/media/image1.wmf')!.async('nodebuffer')).toEqual(preview)
+        expect(await archive.file('word/embeddings/oleObject1.bin')!.async('base64')).toBe(
+          'AAECAwQ=',
+        )
+      } finally {
+        encode.mockRestore()
+      }
+    },
+  )
 
   it('shows the equation when it shares the paragraph with text', async () => {
     const bytes = await buildDocx({
