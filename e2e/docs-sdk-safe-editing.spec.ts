@@ -110,6 +110,52 @@ async function withHostedDocument(
   }
 }
 
+test('saving after an edit preserves a PAGEREF cache for a bookmark in a split paragraph', async () => {
+  const tocEntry = (title: string, bookmark: string, cachedPage: string) =>
+    '<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>' +
+    `<w:r><w:t>${title}</w:t></w:r><w:r><w:tab/></w:r>` +
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+    `<w:r><w:instrText xml:space="preserve"> PAGEREF ${bookmark} </w:instrText></w:r>` +
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+    `<w:r><w:t>${cachedPage}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`
+  const source = await buildDocx({
+    bodyXml:
+      tocEntry('Cross-page target', '_Split', '2') +
+      tocEntry('Whole-page target', '_Whole', '3') +
+      '<w:p><w:bookmarkStart w:id="1" w:name="_Whole"/><w:r><w:t>Whole-page bookmark</w:t></w:r>' +
+      '<w:bookmarkEnd w:id="1"/></w:p>' +
+      '<w:p><w:r><w:t>Edit this independent paragraph</w:t></w:r></w:p>' +
+      '<w:p><w:r><w:t>Before page break</w:t></w:r><w:r><w:br w:type="page"/></w:r>' +
+      '<w:bookmarkStart w:id="2" w:name="_Split"/><w:r><w:t>Cross-page bookmark</w:t></w:r>' +
+      '<w:bookmarkEnd w:id="2"/></w:p>',
+  })
+  await withHostedDocument(Buffer.from(source), async (page) => {
+    const displayedPages = page.locator('.doc-page .doc-toc-page')
+    await expect(displayedPages).toHaveText(['2', '3'])
+    await expect(page.locator('.doc-page .page-gap')).toHaveCount(1)
+    await page.getByText('Edit this independent paragraph', { exact: true }).click()
+    await page.keyboard.press('End')
+    await page.keyboard.type(' edited')
+    await expect(displayedPages).toHaveText(['2', '1'])
+
+    const saved = await page.evaluate(async () => {
+      const { editor, fixture } = window as unknown as FixtureWindow
+      return { ok: await editor.documents.save(), bytes: fixture.saved }
+    })
+    expect(saved.ok).toBe(true)
+    const zip = await JSZip.loadAsync(Uint8Array.from(saved.bytes))
+    const xml = await zip.file('word/document.xml')!.async('string')
+    expect(xml).toContain('Edit this independent paragraph edited')
+    const entries = [...xml.matchAll(/<w:p(?=[\s>])[\s\S]*?<\/w:p>/g)].map((match) => match[0])
+    expect(entries.find((entry) => entry.includes('PAGEREF _Split'))).toContain('<w:t>2</w:t>')
+    expect(entries.find((entry) => entry.includes('PAGEREF _Whole'))).toContain('<w:t>1</w:t>')
+    expect(
+      await page.evaluate(() => (window as unknown as FixtureWindow).editor.documents.open()),
+    ).toBe(true)
+    await expect(displayedPages).toHaveText(['2', '1'])
+  })
+})
+
 test('inline tables align within their section on a mixed-width canvas and in preview', async () => {
   const table = (percent: number, align: string) =>
     `<w:tbl><w:tblPr><w:tblW w:w="${percent * 50}" w:type="pct"/><w:jc w:val="${align}"/></w:tblPr>` +

@@ -507,11 +507,17 @@ export function patchFieldParagraphXml(xml: string, patch: FieldTextPatch): stri
   // space-free first segment before ≥2 tabs is the outline-number cell (not
   // part of the editable title).
   const tabStarts: number[] = []
+  const deletions = xml.includes('<w:del') ? xmlSegments(xml, 'w:del', 0, xml.length) : []
   // attribute-less run tab only: spaced (<w:tab />) and paired
   // (<w:tab></w:tab>) variants from non-Word producers count as well.
   const tabRe = /<w:tab\s*\/>|<w:tab>\s*<\/w:tab>/g
   let tabMatch: RegExpExecArray | null
-  while ((tabMatch = tabRe.exec(xml)) !== null) tabStarts.push(tabMatch.index)
+  while ((tabMatch = tabRe.exec(xml)) !== null) {
+    const at = tabMatch.index
+    // The displayed TOC ignores tracked deletions, so their tabs cannot split
+    // the visible title and page result when updating the saved XML either.
+    if (!deletions.some(({ start, end }) => start <= at && at < end)) tabStarts.push(at)
+  }
   const lastTab = tabStarts.length > 0 ? tabStarts[tabStarts.length - 1] : -1
   if (patch.right !== undefined && lastTab === -1) return xml
   let leftFrom = -1
@@ -581,7 +587,7 @@ export function xmlSegments(
     if (!hasOpen && !hasClose) break
     if (hasOpen && (!hasClose || o < c)) {
       const after = xml.charAt(o + openPrefix.length)
-      if (after !== '>' && after !== ' ' && after !== '/') {
+      if (!/[\t\r\n />]/.test(after)) {
         i = o + openPrefix.length // prefix of a longer tag (w:tr vs w:trPr)
         continue
       }

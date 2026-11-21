@@ -2,7 +2,39 @@ import type { FieldDisplay } from '@genoffice/docx-engine'
 import type { Node as PmNode } from '@tiptap/pm/model'
 import type { Transaction } from '@tiptap/pm/state'
 
+import type { PageCut } from '../pagination-cuts'
+import type { BlockBox } from '../pagination-types'
 import type { HeadingRef } from './headings'
+
+/** The imported bookmark model stores its paragraph but not its run position. */
+export function tocPageDisplayForBookmarkBlock(
+  block: BlockBox,
+  cuts: ReadonlyArray<Pick<PageCut, 'blank' | 'start' | 'end' | 'display'>>,
+): string | undefined {
+  if (
+    block.floated ||
+    block.floatTable ||
+    block.tableRows ||
+    block.breakBeforeBr ||
+    block.breakAfter ||
+    block.innerBreaks?.length ||
+    block.colBreakBefore ||
+    block.colBreakAfter
+  )
+    return undefined
+
+  const end = block.top + block.height
+  if (!Number.isFinite(end) || end <= block.top) return undefined
+  let page: string | undefined
+  for (const cut of cuts) {
+    if (cut.blank || cut.end <= block.top || cut.start >= end) continue
+    // A split, overlapping, or only partially measured range does not locate
+    // the bookmark. Keep the DOCX's cached result until its page is known.
+    if (page !== undefined || cut.start > block.top || cut.end < end) return undefined
+    page = cut.display
+  }
+  return page
+}
 
 /**
  * Backfill TOC page caches from measured bookmarks and generated heading entries.

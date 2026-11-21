@@ -439,7 +439,11 @@ import {
 import { installSelectionBar } from './editor/selection-bar'
 import type { CompareEntry } from './editor/compare'
 import { collectHeadings } from './editor/headings'
-import { applyTocPageDisplays, backfillTocPageDom } from './editor/toc-refresh'
+import {
+  applyTocPageDisplays,
+  backfillTocPageDom,
+  tocPageDisplayForBookmarkBlock,
+} from './editor/toc-refresh'
 import { setSelectionAlign } from './editor/direction'
 
 import {
@@ -4189,14 +4193,19 @@ export function App({
     const scroller = document.querySelector('.editor-scroll')
     if (!scroller) return
 
-    const sourceBookmarkIndices = new Map<string, number>()
+    const sourceBookmarkIndices = new Map<string, number | null>()
     const tocBookmarksByIndex = new Map<number, string | null>()
     for (const block of doc.parsed.blocks) {
       if (block.docxIndex == null) continue
-      for (const bookmark of block.bookmarks ?? [])
-        sourceBookmarkIndices.set(bookmark, block.docxIndex)
-      for (const bookmark of block.hiddenBookmarks ?? [])
-        sourceBookmarkIndices.set(bookmark, block.docxIndex)
+      if (block.bookmarks || block.hiddenBookmarks) {
+        for (const bookmark of [...(block.bookmarks ?? []), ...(block.hiddenBookmarks ?? [])]) {
+          const previous = sourceBookmarkIndices.get(bookmark)
+          sourceBookmarkIndices.set(
+            bookmark,
+            previous === undefined || previous === block.docxIndex ? block.docxIndex : null,
+          )
+        }
+      }
       const ref = block.fieldDisplay?.pageRefBookmark
       if (ref !== undefined) tocBookmarksByIndex.set(block.docxIndex, ref)
     }
@@ -4928,16 +4937,21 @@ export function App({
         top === undefined
           ? undefined
           : cuts[Math.max(0, Math.min(pageOfY(slices, top), cuts.length - 1))]?.display
-      let bookmarkTops: Map<number, number> | undefined
+      let bookmarkBlocks: Map<number, BlockBox | null> | undefined
       const tocPageTextOf = (bookmark: string) => {
         const index = sourceBookmarkIndices.get(bookmark)
-        if (index === undefined) return undefined
-        if (!bookmarkTops) {
-          bookmarkTops = new Map()
+        if (index == null || isPhasedContentPending()) return undefined
+        if (!bookmarkBlocks) {
+          bookmarkBlocks = new Map()
           for (const block of blocks)
-            if (block.docxIndex != null) bookmarkTops.set(block.docxIndex, block.top)
+            if (block.docxIndex != null)
+              bookmarkBlocks.set(
+                block.docxIndex,
+                bookmarkBlocks.has(block.docxIndex) ? null : block,
+              )
         }
-        return tocPageTextAt(bookmarkTops.get(index))
+        const block = bookmarkBlocks.get(index)
+        return block ? tocPageDisplayForBookmarkBlock(block, cuts) : undefined
       }
       // A pristine open keeps the file's caches. A refresh on edit updates
       // the model for save and remains outside the user's undo history.

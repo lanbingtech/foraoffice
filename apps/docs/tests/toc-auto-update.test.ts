@@ -9,11 +9,25 @@ import { generateTocFieldXml, parseDocx } from '@genoffice/docx-engine'
 import { buildDocx } from '../../../packages/docx-engine/tests/helpers/build-docx'
 import { blocksToPmDoc, pmDocToSavePlan, type PmNode } from '../src/renderer/editor/convert'
 import { editorExtensions } from '../src/renderer/editor/extensions'
-import { applyTocPageDisplays } from '../src/renderer/editor/toc-refresh'
+import {
+  applyTocPageDisplays,
+  tocPageDisplayForBookmarkBlock,
+} from '../src/renderer/editor/toc-refresh'
 
 /** Editors created during the current test; destroyed in afterEach so ProseMirror's
  * DOMObserver timers can't fire after the JSDOM environment is torn down. */
 const liveEditors: Editor[] = []
+
+it('looks up a bookmark only when the entire owning paragraph fits a single page', () => {
+  const cuts = [
+    { start: 0, end: 100, display: 'iii', blank: false },
+    { start: 100, end: 200, display: 'iv', blank: false },
+  ]
+  expect(tocPageDisplayForBookmarkBlock({ top: 80, height: 20 }, cuts)).toBe('iii')
+  expect(tocPageDisplayForBookmarkBlock({ top: 100, height: 20 }, cuts)).toBe('iv')
+  expect(tocPageDisplayForBookmarkBlock({ top: 80, height: 21 }, cuts)).toBeUndefined()
+  expect(tocPageDisplayForBookmarkBlock({ top: 180, height: 40 }, cuts)).toBeUndefined()
+})
 
 afterEach(() => {
   for (const editor of liveEditors.splice(0)) editor.destroy()

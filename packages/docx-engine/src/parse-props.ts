@@ -439,34 +439,76 @@ function fieldsNested(xml: string): boolean {
   return false
 }
 
-/** Complex-field instructions, one string per field: Word splits a long
- * instruction (Mendeley/Zotero JSON) over several w:instrText runs, so the
- * fragments must be joined before any instruction regex sees them. Nested
- * fields contribute their own entry. */
-export function fieldInstructions(xml: string): string[] {
-  const out: string[] = []
-  const stack: { text: string; inResult: boolean }[] = []
-  const re = /<w:fldChar\b[^>]*>|<w:instrText\b[^>]*>([\s\S]*?)<\/w:instrText>/g
+interface FieldInstructionRange {
+  text: string
+  simple?: true
+  resultStart?: number
+  resultEnd?: number
+  inInstruction?: true
+  nestedInstruction?: true
+}
+
+/** Join code runs by field and record the result bounds of complete fields. */
+export function fieldInstructionRanges(xml: string): FieldInstructionRange[] {
+  const out: FieldInstructionRange[] = []
+  const stack: FieldInstructionRange[] = []
+  const simpleStack: FieldInstructionRange[] = []
+  const enclosingCode = (): { inInstruction?: true } => {
+    const parent = stack[stack.length - 1]
+    if (!parent) return {}
+    if (parent.resultStart === undefined) {
+      parent.nestedInstruction = true
+      return { inInstruction: true }
+    }
+    return parent.inInstruction ? { inInstruction: true } : {}
+  }
+  const re =
+    /<w:fldChar\b[^>]*>|<w:instrText\b[^>]*>([\s\S]*?)<\/w:instrText>|<\/?w:fldSimple(?=[\s/>])[^>]*>/g
   let m: RegExpExecArray | null
   while ((m = re.exec(xml)) !== null) {
-    if (m[0].startsWith('<w:instrText')) {
+    const token = m[0]
+    if (m[1] !== undefined) {
       const top = stack[stack.length - 1]
-      if (top && !top.inResult) top.text += decodeEntities(m[1])
-      else if (!top) out.push(decodeEntities(m[1]))
+      if (top && top.resultStart === undefined) top.text += decodeEntities(m[1])
+      else if (!top) out.push({ text: decodeEntities(m[1]) })
       continue
     }
-    const type = /\bw:fldCharType\s*=\s*["'](begin|separate|end)["']/.exec(m[0])?.[1]
-    if (type === 'begin') stack.push({ text: '', inResult: false })
+    if (token.startsWith('<w:fldSimple')) {
+      const instruction = /\bw:instr\s*=\s*(["'])([\s\S]*?)\1/.exec(token)?.[2]
+      const field = {
+        text: decodeEntities(instruction ?? ''),
+        simple: true as const,
+        ...enclosingCode(),
+      }
+      if (token.endsWith('/>')) out.push(field)
+      else simpleStack.push({ ...field, resultStart: re.lastIndex })
+      continue
+    }
+    if (token.startsWith('</w:fldSimple')) {
+      const top = simpleStack.pop()
+      if (top) out.push({ ...top, resultEnd: m.index })
+      continue
+    }
+    const type = /\bw:fldCharType\s*=\s*["'](begin|separate|end)["']/.exec(token)?.[1]
+    if (type === 'begin') stack.push({ text: '', ...enclosingCode() })
     else if (type === 'separate') {
       const top = stack[stack.length - 1]
-      if (top) top.inResult = true
+      if (top) top.resultStart ??= re.lastIndex
     } else if (type === 'end') {
       const top = stack.pop()
-      if (top) out.push(top.text)
+      if (top) out.push({ ...top, resultEnd: m.index })
     }
   }
-  for (const open of stack) out.push(open.text)
+  for (const field of stack) out.push(field)
+  for (const field of simpleStack) out.push(field)
   return out
+}
+
+/** Complex-field instructions, including loose or incomplete imported code. */
+export function fieldInstructions(xml: string): string[] {
+  return fieldInstructionRanges(xml)
+    .filter((field) => !field.simple)
+    .map((field) => field.text)
 }
 
 export function onlyXeFields(xml: string): boolean {
