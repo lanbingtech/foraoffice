@@ -344,7 +344,7 @@ import {
 } from './line-metrics'
 import { saveUntilPersisted } from './save-until-persisted'
 import { SPELLCHECK_KEY, spellcheckEnabled } from './spellcheck-pref'
-import { cachedByDoc } from './doc-cache'
+import { createDocumentSummary } from './document-summary'
 import { useShallowStable, useStableCallbacks } from './use-stable'
 import { FindPanel } from './components/FindPanel'
 import { ZoomDialog } from './components/ZoomDialog'
@@ -661,8 +661,6 @@ const EMPTY_BLOCKS: Block[] = []
 
 // O(doc) derivations cached by PM doc reference: caret moves and unrelated
 // state updates reuse the last result instead of re-walking the whole document
-const wordCountOfDoc = cachedByDoc((d) => countWords(documentTextForWordCount(d)))
-const revisionsOfDoc = cachedByDoc((d) => collectRevisions(d))
 
 /**
  * Document position of a measured line-start DOM anchor. posAtDOM works from the DOM
@@ -1904,12 +1902,20 @@ export function App({
       }
       if (tr.docChanged) editor.view.dispatch(tr)
       // the list a follow-up in the same turn reads must already show the outcome
-      storyRevisionsRef.current = [
-        ...collectHfRevisions(state),
-        ...collectTextboxRevisions(editor.state.doc),
+      const textboxes = collectTextboxRevisions(editor.state.doc)
+      const notes = [
         ...collectNoteRevisions(editor.state.doc, 'footnote', nextNotes.footnote),
         ...collectNoteRevisions(editor.state.doc, 'endnote', nextNotes.endnote),
       ]
+      storyRevisionsRef.current = [...collectHfRevisions(state), ...textboxes, ...notes]
+      setBodyStoryRevisions({
+        editor,
+        source: doc,
+        footnotes: nextNotes.footnote,
+        endnotes: nextNotes.endnote,
+        textboxes,
+        notes,
+      })
     }
     dirtyRef.current = true
     return picked.length
@@ -5954,7 +5960,7 @@ export function App({
         stage('floatShifts')
         // Word keeps anchored objects on the page: cell boxes lifted past the
         // paper top by a negative anchor offset are pushed back down
-        clampCellBoxTops(pm, pm.getBoundingClientRect().top, factor)
+        clampCellBoxTops(pm, factor)
         clampCellImageTops(pm, factor)
         pinCellBoxesToPage(pm, factor, cuts, inMeasuredRange)
         pinPageRelXPictures(pm, factor, cuts, inMeasuredRange)
@@ -6522,30 +6528,58 @@ export function App({
     }
   }, [editor, sections, mirrorMargins, delSectBreaks, docVersion])
 
-  // status-bar word count: the whole text is re-walked per doc, so pace it
-  // (Word refreshes its count on idle too). A trailing throttle, not a
-  // debounce: the streamed tail of a phased open would keep resetting one
-  const [wordCount, setWordCount] = useState(0)
-  // Word's "selected/total" pair; 0 means no selection, so the bar falls back
-  // to the plain total. Cheap enough (a text range, not a document walk) to
-  // follow the selection directly rather than ride the throttle above.
-  const [selectionWordCount, setSelectionWordCount] = useState(0)
+  // Like the viewport page, live word counts update the label without asking
+  // React to save the focused editor's selection across a shell commit.
+  const [docEmpty, setDocEmpty] = useState(true)
+  const documentSummary = useMemo(() => createDocumentSummary(Boolean(doc)), [doc])
+  const wordStatus = useRef({ words: 0, selected: 0 })
+  const wordStatusLabel = useRef<HTMLSpanElement>(null)
+  const paintWordStatus = useRef(() => {})
+  useLayoutEffect(() => {
+    paintWordStatus.current = () => {
+      const label = wordStatusLabel.current
+      if (!label) return
+      const { words, selected } = wordStatus.current
+      const text = selected
+        ? t('appWordCountSelection', { selected, total: words })
+        : t('appWordCountN', { n: words })
+      if (label.textContent !== text) label.textContent = text
+    }
+    paintWordStatus.current()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc, lang])
   const [selectionHead, setSelectionHead] = useState(0)
-  // changes outside the body: notes and header / footer parts follow their models,
-  // textboxes and note anchors the document (revisionRanges refreshes with it)
+  const [bodyStoryRevisions, setBodyStoryRevisions] = useState<{
+    editor: typeof editor
+    source: typeof doc
+    footnotes: typeof footnotes
+    endnotes: typeof endnotes
+    textboxes: StoryRevision[]
+    notes: StoryRevision[]
+  } | null>(null)
   const storyRevisions = useMemo<StoryRevision[]>(() => {
-    if (!editor || !doc) return []
-    const pmDoc = editor.state.doc
+    if (!doc || !editor) return []
+    const model = editor.state.doc
+    const published =
+      bodyStoryRevisions?.source === doc &&
+      bodyStoryRevisions.editor === editor &&
+      bodyStoryRevisions.footnotes === footnotes &&
+      bodyStoryRevisions.endnotes === endnotes
+        ? bodyStoryRevisions
+        : null
+    const notes = published?.notes ?? [
+      ...(footnotes.length ? collectNoteRevisions(model, 'footnote', footnotes) : []),
+      ...(endnotes.length ? collectNoteRevisions(model, 'endnote', endnotes) : []),
+    ]
     return [
       ...collectHfRevisions(hfState),
-      ...collectTextboxRevisions(pmDoc),
-      ...collectNoteRevisions(pmDoc, 'footnote', footnotes),
-      ...collectNoteRevisions(pmDoc, 'endnote', endnotes),
+      ...(published?.textboxes ?? collectTextboxRevisions(model)),
+      ...notes,
     ]
-    // revisionRanges: the throttled document-change trigger
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor, doc, hfState, footnotes, endnotes, revisionRanges])
-  storyRevisionsRef.current = storyRevisions
+  }, [doc, editor, hfState, footnotes, endnotes, bodyStoryRevisions])
+  useLayoutEffect(() => {
+    storyRevisionsRef.current = storyRevisions
+  }, [storyRevisions])
   const allRevisions = useMemo(
     () => (storyRevisions.length ? [...revisionRanges, ...storyRevisions] : revisionRanges),
     [revisionRanges, storyRevisions],
@@ -6586,7 +6620,8 @@ export function App({
   useEffect(() => {
     if (!editor) return
     const refreshSelection = () => {
-      setSelectionWordCount(selectedWordCount(editor.state.doc, editor.state.selection))
+      wordStatus.current.selected = selectedWordCount(editor.state.doc, editor.state.selection)
+      paintWordStatus.current()
       setSelectionHead(editor.state.selection.head)
       // a caret move in the body ends the stop on a change outside it
       if (lastStoryRef.current !== null) setActiveStoryId(null)
@@ -6602,11 +6637,30 @@ export function App({
     let timer = 0
     const refresh = () => {
       timer = 0
-      setWordCount(wordCountOfDoc(editor.state.doc))
-      setRevisionRanges(doc ? revisionsOfDoc(editor.state.doc) : [])
-      setSelectionWordCount(selectedWordCount(editor.state.doc, editor.state.selection))
+      const { doc: model, words, revisions, textboxes } = documentSummary.read(editor.state.doc)
+      wordStatus.current = { words, selected: selectedWordCount(model, editor.state.selection) }
+      paintWordStatus.current()
+      setDocEmpty(words === 0)
+      setRevisionRanges(revisions)
+      const notes: StoryRevision[] = []
+      if (doc && footnotes.length) notes.push(...collectNoteRevisions(model, 'footnote', footnotes))
+      if (doc && endnotes.length) notes.push(...collectNoteRevisions(model, 'endnote', endnotes))
+      setBodyStoryRevisions((previous) => {
+        if (
+          previous?.source === doc &&
+          previous.editor === editor &&
+          previous.footnotes === footnotes &&
+          previous.endnotes === endnotes &&
+          previous.textboxes === textboxes &&
+          !previous.notes.length &&
+          !notes.length
+        )
+          return previous
+        return { editor, source: doc, footnotes, endnotes, textboxes, notes }
+      })
     }
-    const onUpdate = () => {
+    const onUpdate = ({ transaction }: { transaction: Transaction }) => {
+      documentSummary.observe(transaction, editor.state.doc)
       if (!timer) timer = window.setTimeout(refresh, WORD_COUNT_THROTTLE_MS)
     }
     refresh()
@@ -6615,7 +6669,7 @@ export function App({
       window.clearTimeout(timer)
       editor.off('update', onUpdate)
     }
-  }, [editor, doc, docLoading])
+  }, [editor, doc, documentSummary, docLoading, footnotes, endnotes])
 
   /** Word word-count dialog: pages/lines estimated from the current layout */
   const openStats = useCallback(() => {
@@ -9352,7 +9406,7 @@ export function App({
               runtime={docsRuntime}
               editor={editor}
               blocks={doc.parsed.blocks}
-              docEmpty={wordCount === 0}
+              docEmpty={docEmpty}
               numIdFallback={
                 doc.isBlank ? { bullet: BLANK_BULLET_NUM_ID, ordered: BLANK_ORDERED_NUM_ID } : null
               }
@@ -9783,12 +9837,7 @@ export function App({
                     data-tip={t('appWordCountTitle')}
                     onClick={openStats}
                   >
-                    {selectionWordCount > 0
-                      ? t('appWordCountSelection', {
-                          selected: selectionWordCount,
-                          total: wordCount,
-                        })
-                      : t('appWordCountN', { n: wordCount })}
+                    <span ref={wordStatusLabel} />
                   </button>
                   <button
                     className={`status-item status-btn status-track${trackChanges ? ' on' : ''}`}

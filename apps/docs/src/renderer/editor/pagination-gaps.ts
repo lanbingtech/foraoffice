@@ -1992,12 +1992,14 @@ export function syncAnchorBands(pm: HTMLElement, factor: number, modernLayout = 
  * so the shift has no layout feedback. Idempotent via the same
  * --page-float-dy channel as syncFloatShifts.
  */
-export function clampCellBoxTops(pm: HTMLElement, paperTop: number, factor: number): void {
+export function clampCellBoxTops(pm: HTMLElement, factor: number): void {
   const boxes = Array.from(
     pm.querySelectorAll<HTMLElement>(
       '.doc-cell-boxes > .doc-textbox:not([data-cell-page]), .doc-cell-boxes > div:not([data-cell-page])',
     ),
   )
+  if (boxes.length === 0) return
+  const paperTop = pm.getBoundingClientRect().top
   const rects = boxes.map((box) => box.getBoundingClientRect())
   boxes.forEach((box, i) => {
     const r = rects[i]
@@ -2319,9 +2321,11 @@ export function syncPageGapGeometry(
  * setPageGaps while the widgets' rects are final).
  */
 export function alignGapHfStrips(pm: HTMLElement, bodyLeftPx: number, factor: number): void {
+  const strips = Array.from(pm.querySelectorAll<HTMLElement>('.page-gap-hf'))
+  const anchored = Array.from(pm.querySelectorAll<HTMLElement>('.page-gap [data-paper-x]'))
+  if (strips.length === 0 && anchored.length === 0) return
   const pmLeft = pm.getBoundingClientRect().left
   const canvasTarget = pmLeft + bodyLeftPx * factor
-  const strips = Array.from(pm.querySelectorAll<HTMLElement>('.page-gap-hf'))
   // widget DOM reused from an equal-width era still carries the stylesheet
   // centering (left:50% + translateX(-50%)): pin every strip before measuring,
   // or the increment is applied against the wrong base. Pins, then one round
@@ -2349,7 +2353,6 @@ export function alignGapHfStrips(pm: HTMLElement, bodyLeftPx: number, factor: nu
   })
   // floating header images and footnote areas carry their paper x; an image's own
   // rect includes the anchor translate, so re-anchor from the positioned host's origin
-  const anchored = Array.from(pm.querySelectorAll<HTMLElement>('.page-gap [data-paper-x]'))
   const hostLefts = anchored.map((el) => el.offsetParent?.getBoundingClientRect().left)
   anchored.forEach((el, i) => {
     const hostLeft = hostLefts[i]

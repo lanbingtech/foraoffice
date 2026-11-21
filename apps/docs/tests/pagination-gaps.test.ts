@@ -478,6 +478,13 @@ describe('createTableGapReads', () => {
 })
 
 describe('clampCellBoxTops', () => {
+  it('does not flush canvas geometry when there are no cell boxes to clamp', () => {
+    const pm = document.createElement('div')
+    const read = vi.spyOn(pm, 'getBoundingClientRect')
+    clampCellBoxTops(pm, 1)
+    expect(read).not.toHaveBeenCalled()
+  })
+
   const boxAt = (pm: HTMLElement, top: number, height = 45): HTMLElement => {
     const cell = document.createElement('div')
     cell.className = 'doc-cell-boxes'
@@ -493,7 +500,7 @@ describe('clampCellBoxTops', () => {
     const pm = document.createElement('div')
     const above = boxAt(pm, -62)
     const inside = boxAt(pm, 30)
-    clampCellBoxTops(pm, 0, 1)
+    clampCellBoxTops(pm, 1)
     expect(above.style.getPropertyValue('--page-float-dy')).toBe('62.0px')
     expect(inside.style.getPropertyValue('--page-float-dy')).toBe('')
   })
@@ -501,10 +508,10 @@ describe('clampCellBoxTops', () => {
   it('is idempotent: a re-run against the already-shifted rect keeps the same dy', () => {
     const pm = document.createElement('div')
     const box = boxAt(pm, -62)
-    clampCellBoxTops(pm, 0, 1)
+    clampCellBoxTops(pm, 1)
     // after the translate the live rect reads at the paper top
     box.getBoundingClientRect = () => ({ top: 0, bottom: 45, height: 45, width: 100 }) as DOMRect
-    clampCellBoxTops(pm, 0, 1)
+    clampCellBoxTops(pm, 1)
     expect(box.style.getPropertyValue('--page-float-dy')).toBe('62.0px')
   })
 })
@@ -623,7 +630,7 @@ describe('pinCellBoxesToPage', () => {
   it('clampCellBoxTops leaves page-positioned boxes alone', () => {
     const pm = paper()
     const box = pageBox(pm, -20, 0, { cellPageX: '0', cellPageY: '0', pageRelFrom: 'page' })
-    clampCellBoxTops(pm, 0, 1)
+    clampCellBoxTops(pm, 1)
     expect(box.style.getPropertyValue('--page-float-dy')).toBe('')
   })
 })
@@ -828,6 +835,13 @@ describe('page frames and sheets (differing-width documents, genoffice#246)', ()
 })
 
 describe('alignGapHfStrips', () => {
+  it('does not read the paper rectangle when no strips or gap anchors need placement', () => {
+    const pm = document.createElement('div')
+    const read = vi.spyOn(pm, 'getBoundingClientRect')
+    alignGapHfStrips(pm, 96, 1)
+    expect(read).not.toHaveBeenCalled()
+  })
+
   const STRIP_W = 600
   /** emulates layout: stylesheet centering (left:50% of a 786px gap + translateX(-50%))
    *  until inline left/transform pin the strip */

@@ -158,6 +158,11 @@ describe('enumeration', () => {
       content: blocksToPmDoc(parsed.blocks),
     })
     const revs = collectTextboxRevisions(editor.state.doc)
+    const prefix = editor.schema.nodes.docParagraph.create(null, editor.schema.text('Earlier text'))
+    const combined = editor.state.tr.insert(0, prefix).doc
+    expect(collectTextboxRevisions(editor.state.doc, prefix.nodeSize)).toEqual(
+      collectTextboxRevisions(combined),
+    )
     expect(revs.map((r) => [r.kind, r.story.text])).toEqual([
       ['ins', 'new'],
       ['del', 'old'],
