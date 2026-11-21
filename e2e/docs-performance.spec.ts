@@ -21,6 +21,12 @@ import {
 } from './docs-performance-stories'
 import type { createDocumentStoryDiagnostic } from '../apps/docs/src/renderer/document-story-diagnostic'
 import { createPerformanceFocusGuard } from './docs-performance-focus'
+import {
+  calibrateNativeViewport,
+  observeViewport,
+  type RecordedViewportObservation,
+} from './docs-performance-viewport-observe'
+import { summarizeViewportEvidence, viewportActions } from './docs-performance-viewport'
 import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
 import { readEditFingerprint } from './docs-performance-edit-fingerprint'
 import { observeFirstVisibleSource } from './docs-performance-first-visible'
@@ -48,7 +54,7 @@ import {
 } from './docs-performance-host'
 import {
   assertExternalArtifacts,
-  comparePerformanceReports,
+  compareDiagnosticPerformanceReports,
   summarizeScenario,
   withDeadline,
   retainRunCondition,
@@ -436,6 +442,8 @@ test('production document performance and correctness evidence', async () => {
     Object.keys(requirements).map((name) => [name, []]),
   )
   const details: Array<Record<string, unknown>> = []
+  const viewportObservations: RecordedViewportObservation[] = []
+  let existingCorrectnessVerified = false
   const errors: string[] = []
   const blockingTasks: number[] = []
   const pendingScreenshots: Array<{ path: string; image: Buffer }> = []
@@ -1253,6 +1261,134 @@ test('production document performance and correctness evidence', async () => {
       ...correctness,
     })
     if (errors.length) throw new Error(`Renderer errors: ${errors.join('; ')}`)
+    existingCorrectnessVerified = true
+    currentScenario = 'viewport-interaction-diagnostics'
+    const hasNativeViewportInput = process.platform === 'win32' && host !== 'browser'
+    const savedLayoutOracle = {
+      tail: savedMainStory.tail,
+      minimumBodyImages: oracle.minimumBodyImages,
+    }
+    const preview = live.page.locator('.pagination-preview')
+    let diagnosticSetupError: unknown
+    try {
+      if (await preview.count())
+        await preview.getByRole('button', { name: 'Close', exact: true }).click({ timeout: 3000 })
+      await waitForLayout(live.page, savedLayoutOracle, 180_000, -1, now(), savedMainStory.textRuns)
+    } catch (error) {
+      diagnosticSetupError = error
+    }
+    for (const phase of ['settled', 'progressive'] as const) {
+      for (const action of viewportActions) {
+        const screenshot = join(root, `viewport-${phase}-${action}.jpg`)
+        let record: RecordedViewportObservation = {
+          phase,
+          action,
+          input: hasNativeViewportInput ? 'windows-native' : 'playwright-diagnostic',
+          observation: 'unavailable',
+        }
+        let focusBegun = false
+        try {
+          if (diagnosticSetupError) throw diagnosticSetupError
+          if (!hasNativeViewportInput && action !== 'go-to')
+            throw new Error('A native scrollbar input channel is unavailable')
+          const focusStart = await focus!.begin()
+          focusBegun = true
+          const owner =
+            typeof focusStart.native === 'string' ? undefined : focusStart.native.before.owner
+          if (hasNativeViewportInput && !owner) throw new Error('Missing native viewport owner')
+          if (phase === 'settled') {
+            await live.page.keyboard.press(
+              process.platform === 'darwin' ? 'Meta+Home' : 'Control+Home',
+            )
+            const scroller = live.page.locator('.editor-scroll')
+            await scroller.hover({ timeout: 3000 })
+            await live.page.mouse.wheel(0, -100_000_000)
+            await expect
+              .poll(() => scroller.evaluate((element) => element.scrollTop), { timeout: 3000 })
+              .toBe(0)
+          }
+          const origin =
+            owner && action !== 'go-to'
+              ? await calibrateNativeViewport(live.page, owner)
+              : undefined
+          const capture = (previousGeneration?: number) =>
+            observeViewport({
+              page: live.page,
+              phase,
+              action,
+              owner,
+              origin,
+              previousGeneration,
+              screenshot,
+            })
+          if (phase === 'settled') {
+            record = await capture()
+          } else {
+            const previousGeneration = await live.page.evaluate(
+              () => (window as ProbeWindow).__docsLayoutActivity!.snapshot().generation,
+            )
+            // Both the open and its observer must finish before another input or focus check.
+            const [opened, observed] = await Promise.allSettled([
+              live.open(),
+              (async () => {
+                const progressive = await live.page.waitForFunction(
+                  (previous) => {
+                    const activity = (window as ProbeWindow).__docsLayoutActivity?.snapshot()
+                    return (
+                      !!activity &&
+                      activity.generation > previous &&
+                      (activity.contentPending || activity.pending > 0 || activity.active > 0) &&
+                      !!window.document.querySelector(
+                        '.editor-scroll .ProseMirror[contenteditable="true"]',
+                      )
+                    )
+                  },
+                  previousGeneration,
+                  { polling: 30, timeout: 30_000 },
+                )
+                await progressive.dispose()
+                return capture(previousGeneration)
+              })(),
+            ])
+            if (observed.status === 'fulfilled') record = observed.value
+            else record.reason = String(observed.reason)
+            try {
+              if (opened.status === 'rejected') throw opened.reason
+              if (opened.value === false)
+                throw new Error('Viewport diagnostic reopen returned false')
+              await waitForLayout(
+                live.page,
+                savedLayoutOracle,
+                180_000,
+                previousGeneration,
+                now(),
+                savedMainStory.textRuns,
+              )
+            } catch (error) {
+              diagnosticSetupError = error
+              throw error
+            }
+          }
+        } catch (error) {
+          record.reason = [record.reason, String(error)].filter(Boolean).join('\n')
+          if (record.observation === 'captured') record.observation = 'failed'
+        } finally {
+          viewportObservations.push(record)
+          if (record.reason?.includes('Windows rejected benchmark input release'))
+            diagnosticSetupError = new Error(
+              'Native input release failed; no later gestures were sent',
+            )
+          if (focusBegun) {
+            try {
+              await focus!.end()
+            } catch (error) {
+              record.reason = [record.reason, String(error)].filter(Boolean).join('\n')
+              if (record.observation === 'captured') record.observation = 'failed'
+            }
+          }
+        }
+      }
+    }
   } catch (error) {
     errors.push(String(error))
     if (runs[currentScenario]) runs[currentScenario].push({ ok: false, error: String(error) })
@@ -1302,6 +1438,12 @@ test('production document performance and correctness evidence', async () => {
         summarizeScenario(observations, requirements[name]),
       ]),
     )
+    const viewport = summarizeViewportEvidence(viewportObservations)
+    const existingScenariosStatus =
+      existingCorrectnessVerified &&
+      Object.values(summaries).every((summary) => summary.status === 'complete')
+        ? 'complete'
+        : 'incomplete'
     const report = {
       metadata,
       condition: condition
@@ -1312,6 +1454,7 @@ test('production document performance and correctness evidence', async () => {
         scope:
           'automated scenario sampling only; ticket acceptance requires the reviewed three-host A/A evidence',
         nativeOsIme: nativeImeAcceptance,
+        viewport,
         nativeOfficeComparison: 'not measured',
       },
       mainThreadBlocking: {
@@ -1322,18 +1465,22 @@ test('production document performance and correctness evidence', async () => {
         nativeReference: 'not measured',
       },
       status:
-        !correctness ||
+        existingScenariosStatus !== 'complete' ||
         errors.length ||
-        Object.values(summaries).some((summary) => summary.status !== 'complete')
+        Object.values(viewport.scenarios).some(
+          (scenario) => scenario.formalSamples < scenario.required,
+        )
           ? 'incomplete'
           : 'complete',
+      existingScenariosStatus,
       summaries,
       observations: runs,
+      viewportObservations,
       details,
       errors,
     }
     await writeFile(join(root, 'results.json'), JSON.stringify(report, null, 2))
-    if (process.env.FORAOFFICE_PERF_BEFORE && report.status === 'complete') {
+    if (process.env.FORAOFFICE_PERF_BEFORE && existingScenariosStatus === 'complete') {
       const before = JSON.parse(await readFile(process.env.FORAOFFICE_PERF_BEFORE, 'utf8'))
       await writeFile(
         join(root, 'comparison.json'),
@@ -1341,7 +1488,7 @@ test('production document performance and correctness evidence', async () => {
           {
             before: before.metadata,
             after: metadata,
-            ...comparePerformanceReports(before, report),
+            ...compareDiagnosticPerformanceReports(before, report),
             interpretation:
               'Signed changes only; compare A/A noise and correctness before judging improvement or regression.',
           },

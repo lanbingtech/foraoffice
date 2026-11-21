@@ -6,6 +6,7 @@ import {
   assertExternalArtifacts,
   summarizeScenario,
   comparePerformanceReports,
+  compareDiagnosticPerformanceReports,
   withDeadline,
   retainRunCondition,
 } from '../../../e2e/docs-performance-result'
@@ -118,6 +119,22 @@ describe('Docs performance evidence', () => {
     expect(() => comparePerformanceReports(before, { ...after, status: 'incomplete' })).toThrow(
       'complete',
     )
+    const withoutViewport = { ...after, status: 'incomplete', existingScenariosStatus: 'complete' }
+    expect(compareDiagnosticPerformanceReports(before, withoutViewport)).toMatchObject({
+      scope: 'existing-scenarios-diagnostic',
+      acceptance: { before: 'complete', after: 'incomplete' },
+      scenarios: { input: { p95DeltaMs: 20 } },
+    })
+    expect(() => comparePerformanceReports(before, withoutViewport)).toThrow('complete')
+    expect(() =>
+      compareDiagnosticPerformanceReports(before, { ...after, status: 'incomplete' }),
+    ).toThrow('existing scenarios must be complete')
+    expect(() =>
+      compareDiagnosticPerformanceReports(before, {
+        ...withoutViewport,
+        summaries: { input: summarizeScenario([], 1) },
+      }),
+    ).toThrow('Scenario input must be complete')
     expect(() =>
       comparePerformanceReports(before, { ...after, condition: { ...condition, host: 'browser' } }),
     ).toThrow('conditions')

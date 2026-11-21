@@ -71,6 +71,7 @@ export type PerformancePdfGeometry = {
 
 type Report = {
   status: string
+  existingScenariosStatus?: string
   condition: unknown
   correctness?: PerformancePdfGeometry
   mainThreadBlocking: { scope: string; maxMs: number; over50ms: number }
@@ -117,6 +118,25 @@ function hasBlockingEvidence(value: Report['mainThreadBlocking'] | undefined) {
 export function comparePerformanceReports(before: Report, after: Report) {
   if (before.status !== 'complete' || after.status !== 'complete')
     throw new Error('Both reports must be complete')
+  return compareExistingScenarios(before, after)
+}
+
+/** Preserves legacy scenario comparisons without treating incomplete acceptance as a pass. */
+export function compareDiagnosticPerformanceReports(before: Report, after: Report) {
+  if (
+    [before, after].some(
+      (report) => (report.existingScenariosStatus ?? report.status) !== 'complete',
+    )
+  )
+    throw new Error('Both sets of existing scenarios must be complete')
+  return {
+    scope: 'existing-scenarios-diagnostic' as const,
+    acceptance: { before: before.status, after: after.status },
+    ...compareExistingScenarios(before, after),
+  }
+}
+
+function compareExistingScenarios(before: Report, after: Report) {
   if (JSON.stringify(before.condition) !== JSON.stringify(after.condition))
     throw new Error('Performance conditions differ')
   const aGeometry = before.correctness
