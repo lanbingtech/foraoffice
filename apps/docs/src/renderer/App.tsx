@@ -10,7 +10,8 @@ import type { DocsEditorAction, DocsAiOperation } from '../shared/editor-action'
 import { submitDocsEditorAction } from './runtime/editor-actions'
 import { scriptFontHtml } from './editor/script-fonts'
 import { carryDocSeen } from './ai/tools'
-import { DOC_CSS_COMMITTED_EVENT } from './editor/cjk-punct-shrink'
+import { DOC_CSS_COMMITTED_EVENT, cjkPunctShrinkPluginKey } from './editor/cjk-punct-shrink'
+import { TopLevelPositions } from './editor/top-level-pos'
 import { paginationActivity, trackPaginationActivity } from './pagination-activity'
 import { createDocumentStoryDiagnostic, disposeOwnedDiagnostic } from './document-story-diagnostic'
 import { observePaginationFonts } from './pagination-fonts'
@@ -194,6 +195,7 @@ import {
   createLineRectsCache,
   createTableGapReads,
   createBlockMeasurer,
+  hasNonLocalFlow,
   enterNaturalFlow,
   anchorElement,
   lineStartAnchor,
@@ -266,7 +268,7 @@ import {
 import {
   GAP_BAND,
   alignGapHfStrips,
-  alignTableGapFills,
+  syncPageGapGeometry,
   clearFloatShifts,
   floatFlowChangedMeta,
   insideFloatTable,
@@ -275,9 +277,7 @@ import {
   floatShiftsOf,
   setOversizeClips,
   setPageGaps,
-  stampGapFlowTops,
   canvasZoomOf,
-  rowFillsSig,
   setRowFills,
   syncAnchorBands,
   syncCutOverlays,
@@ -298,12 +298,19 @@ import {
   PAGE_TURN_SEL,
   type PageFrame,
 } from './editor/pagination-gaps'
+import { installScreenImageReadiness } from './editor/screen-image-readiness'
 import { syncWrapObstacles } from './editor/wrap-obstacles'
 import { newObstacleShadow, obstaclePlanDiffs } from './editor/obstacle-plan'
 import { MultipageGrid, snapshotCanvas, type CanvasSnapshot } from './components/MultipageGrid'
 import { layoutMultipage, multipageColumns, multipageZoomForColumns } from './multipage'
 import { setColumnLayout, WRAP_WIDTHS_COMMITTED_EVENT } from './editor/column-layout'
-import { hasCoupledWrapGeometry } from './editor/settled-measure'
+import {
+  PARAGRAPH_MEASUREMENTS_SETTLED_EVENT,
+  firstChangedParagraphDecoration,
+  flushPendingParagraphMeasurements,
+  hasCoupledWrapGeometry,
+  hasPendingParagraphMeasurements,
+} from './editor/settled-measure'
 import { pageMargins } from './page-margins'
 import { syncLineNumbers } from './editor/line-numbers'
 import { formattingMarksPluginKey, sectionBreakMap } from './editor/formatting-marks'
@@ -337,9 +344,9 @@ import {
 } from './line-metrics'
 import { saveUntilPersisted } from './save-until-persisted'
 import { SPELLCHECK_KEY, spellcheckEnabled } from './spellcheck-pref'
-import { cachedByDoc } from './doc-cache'
+import { createDocumentSummary } from './document-summary'
 import { useShallowStable, useStableCallbacks } from './use-stable'
-import { FindPanel } from './components/FindPanel'
+import { FindPanelHost, type FindPanelHandle } from './components/FindPanel'
 import { ZoomDialog } from './components/ZoomDialog'
 import { TrackChangesOptionsDialog } from './components/TrackChangesOptionsDialog'
 import {
@@ -438,7 +445,7 @@ import {
 } from './editor/active-editor'
 import { installSelectionBar } from './editor/selection-bar'
 import type { CompareEntry } from './editor/compare'
-import { collectHeadings } from './editor/headings'
+import { collectHeadings, headingLevelOf } from './editor/headings'
 import {
   applyTocPageDisplays,
   backfillTocPageDom,
@@ -557,7 +564,7 @@ import {
   unmountedSourceBlocksOf,
   waitForFullContent,
 } from './phased-content'
-import { PHASED_APPEND } from './editor/streaming-tail-guard'
+import { appendedStreamedTail } from './editor/streaming-tail-guard'
 import { sameSectionInfos } from './pagination-sections'
 import {
   blocksKeepSlicing,
@@ -654,8 +661,6 @@ const EMPTY_BLOCKS: Block[] = []
 
 // O(doc) derivations cached by PM doc reference: caret moves and unrelated
 // state updates reuse the last result instead of re-walking the whole document
-const wordCountOfDoc = cachedByDoc((d) => countWords(documentTextForWordCount(d)))
-const revisionsOfDoc = cachedByDoc((d) => collectRevisions(d))
 
 /**
  * Document position of a measured line-start DOM anchor. posAtDOM works from the DOM
@@ -898,9 +903,30 @@ export function App({
     null,
   )
   const [status, setStatus] = useState('')
-  const [zoom, setZoom] = useState(100)
+  const [zoom, setZoomState] = useState(100)
   const scrollContainerRef = useRef<HTMLElement>(null)
-  /** bumps after every pagination pass: the canvas' page gaps are in place */
+  const scrollPosRef = useRef({ left: 0, top: 0 })
+  const screenImages = useRef<ReturnType<typeof installScreenImageReadiness>>(undefined)
+  const publishScrolledPage = useRef<() => void>(undefined)
+  const readScrollPosition = useCallback((pane: Element) => {
+    const position = { left: pane.scrollLeft, top: pane.scrollTop }
+    scrollPosRef.current = position
+    return position
+  }, [])
+  const captureScrollPosition = useCallback(() => {
+    const pane = scrollContainerRef.current
+    if (pane) readScrollPosition(pane)
+  }, [readScrollPosition])
+  const setZoom = useCallback(
+    (next: SetStateAction<number>) => {
+      // Capture the pre-zoom position even when a native scroll just arrived.
+      // Zooming out can clamp these offsets before the layout effect runs.
+      captureScrollPosition()
+      setZoomState(next)
+    },
+    [captureScrollPosition],
+  )
+  /** Refreshes the multi-page grid after pagination publishes its canvas. */
   const [layoutRev, setLayoutRev] = useState(0)
   /** Multiple Pages grid: page index under the live editor, null while single-column */
   const multipageActiveRef = useRef<number | null>(null)
@@ -1047,29 +1073,38 @@ export function App({
   // Review → Reviewing Pane: the outermost right-edge panel (Word's vertical pane)
   const [showReviewPane, setShowReviewPane] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>('print')
-  const [readMode, setReadMode] = useState(false)
+  const [readMode, setReadModeState] = useState(false)
+  const setReadMode = useCallback(
+    (next: SetStateAction<boolean>) => {
+      captureScrollPosition()
+      setReadModeState(next)
+    },
+    [captureScrollPosition],
+  )
   const [showGrid, setShowGrid] = useState(false)
   const [splitView, setSplitView] = useState(false)
   const [showPagePreview, setShowPagePreview] = useState(false)
   const [splitHtml, setSplitHtml] = useState('')
-  const [showFind, setShowFind] = useState(false)
+  const findPanelRef = useRef<FindPanelHandle>(null)
   const [imageDragOver, setImageDragOver] = useState(false)
-  const [findFocusInput, setFindFocusInput] = useState(0)
-  const [findFocusReplace, setFindFocusReplace] = useState(0)
-  const [findFocusGoTo, setFindFocusGoTo] = useState(0)
   // last pagination pass, read by the Go To tab (page / section / line targets)
   const pageLayoutRef = useRef<PageLayout | null>(null)
   const annotationFirstPageRef = useRef<{ left: number; width: number } | undefined>(undefined)
   /** live section list of the last pass (header obstacles of the next pass) */
   const lastSecListRef = useRef<SectionInfo[] | null>(null)
   const cutsNow = useCallback(() => pageLayoutRef.current?.cuts, [])
+  const publishedPageLayout = useCallback(() => pageLayoutRef.current, [])
   const prepareDocStylesRef = useRef<() => boolean>(() => false)
   /** runs the debounced pagination pass now (set by the scheduler effect) */
   const flushPaginationRef = useRef<(force?: boolean) => void>(() => {})
   /** the current pass's layout, after any pending pass: readers that need
    *  the document as it stands (TOC numbers, the preview snapshot) */
   const layoutNow = useCallback((): PageLayout | null => {
-    flushPaginationRef.current(prepareDocStylesRef.current())
+    const view = editorRef.current?.view
+    const needsTypography = view !== undefined && hasPendingParagraphMeasurements(view)
+    if (needsTypography) flushPendingParagraphMeasurements(view)
+    const stylesChanged = prepareDocStylesRef.current()
+    flushPaginationRef.current(stylesChanged || needsTypography)
     return pageLayoutRef.current
   }, [])
   const [showShortcuts, setShowShortcuts] = useState(false)
@@ -1658,7 +1693,16 @@ export function App({
     onSelectionUpdate: () => forceRender(),
     // typing in the main document takes ribbon routing back from any textbox
     onFocus: () => setActiveSubEditor(null),
-    onUpdate: () => {
+    onUpdate: ({ transaction, appendedTransactions = [] }) => {
+      // Appending original content is a loading operation. The editor owns
+      // its DOM immediately; shell state follows actual edits and settlement.
+      if (
+        appendedStreamedTail(transaction) &&
+        !appendedTransactions.some(
+          (appended) => appended.docChanged && !appendedStreamedTail(appended),
+        )
+      )
+        return
       dirtyRef.current = true
       forceRender()
     },
@@ -1884,12 +1928,20 @@ export function App({
       }
       if (tr.docChanged) editor.view.dispatch(tr)
       // the list a follow-up in the same turn reads must already show the outcome
-      storyRevisionsRef.current = [
-        ...collectHfRevisions(state),
-        ...collectTextboxRevisions(editor.state.doc),
+      const textboxes = collectTextboxRevisions(editor.state.doc)
+      const notes = [
         ...collectNoteRevisions(editor.state.doc, 'footnote', nextNotes.footnote),
         ...collectNoteRevisions(editor.state.doc, 'endnote', nextNotes.endnote),
       ]
+      storyRevisionsRef.current = [...collectHfRevisions(state), ...textboxes, ...notes]
+      setBodyStoryRevisions({
+        editor,
+        source: doc,
+        footnotes: nextNotes.footnote,
+        endnotes: nextNotes.endnote,
+        textboxes,
+        notes,
+      })
     }
     dirtyRef.current = true
     return picked.length
@@ -2189,16 +2241,13 @@ export function App({
     }
     window.addEventListener('wheel', onWheel, { passive: false })
     return () => window.removeEventListener('wheel', onWheel)
-  }, [])
+  }, [setZoom])
 
   // Keep the document point under the anchor (cursor for wheel zoom, viewport
   // center otherwise) fixed across a zoom change. Runs after the zoomed layout
   // is committed, so the page box is read post-zoom and the pre-zoom box is
   // derived from it: CSS zoom scales the box linearly, the top edge is a fixed
   // scroller padding, and `.doc-zoom` is margin-auto centered until it overflows.
-  // The pre-zoom scroll offsets come from the last scroll event: a zoom-out can
-  // shrink the overflow and clamp them before this effect gets to read them.
-  const scrollPosRef = useRef({ left: 0, top: 0 })
   const prevZoomRef = useRef(zoom)
 
   // ---- protection enforcement (Review > Protect Document) ----
@@ -2234,7 +2283,7 @@ export function App({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [editor, readMode, isProtected, doc?.hosted?.readOnly])
+  }, [editor, readMode, isProtected, doc?.hosted?.readOnly, setReadMode])
 
   // Track Changes: the recorder plugin reads its toggle from extension storage
   useEffect(() => {
@@ -3205,10 +3254,36 @@ export function App({
    *  reuse the numId of an existing same-kind instance, otherwise fall back to creating a definition */
   useEffect(() => {
     if (!editor) return
-    const fill = () => {
+    let resolvedDoc: typeof editor.state.doc | null = null
+    const fill: Parameters<typeof editor.on<'update'>>[1] = ({
+      transaction,
+      appendedTransactions,
+    }) => {
+      const doc = editor.state.doc
+      // A verified append cannot invalidate the list IDs in its known prefix.
+      if (transaction.before === resolvedDoc) {
+        const updates = [transaction, ...appendedTransactions].filter((tr) => tr.docChanged)
+        if (
+          updates.at(-1)?.doc === doc &&
+          updates.every((tr) => {
+            const tail = appendedStreamedTail(tr)
+            if (!tail) return false
+            let missing = false
+            tail.content.descendants((node) => {
+              if (node.type.name !== 'docListItem') return !missing
+              if (node.attrs.numId === null) missing = true
+              return false
+            })
+            return !missing
+          })
+        ) {
+          resolvedDoc = doc
+          return
+        }
+      }
       const missing: Array<{ pos: number; attrs: Record<string, unknown> }> = []
       const reuse: Partial<Record<'bullet' | 'ordered', string>> = {}
-      editor.state.doc.descendants((node, pos) => {
+      doc.descendants((node, pos) => {
         if (node.type.name !== 'docListItem') return
         const kind = (node.attrs.kind as 'bullet' | 'ordered') ?? 'bullet'
         if (node.attrs.numId !== null) {
@@ -3217,7 +3292,10 @@ export function App({
         }
         missing.push({ pos, attrs: node.attrs })
       })
-      if (missing.length === 0) return
+      if (missing.length === 0) {
+        resolvedDoc = doc
+        return
+      }
       const idOf: Partial<Record<'bullet' | 'ordered', string | null>> = {}
       let tr = editor.state.tr
       for (const item of missing) {
@@ -3668,7 +3746,7 @@ export function App({
       lastFitRef.current = { mode, value: applied }
       setZoom(applied)
     },
-    [fitZoomFor],
+    [fitZoomFor, setZoom],
   )
   const zoomFit = useCallback(
     (mode: ZoomFitMode) => {
@@ -3734,13 +3812,13 @@ export function App({
       preReadZoomRef.current = { zoom: zoomLiveRef.current, fit: lastFitRef.current }
       lastFitRef.current = null
       zoomLiveRef.current = 100
-      setZoom(100)
+      setZoomState(100)
     } else if (preReadZoomRef.current) {
       const prev = preReadZoomRef.current
       preReadZoomRef.current = null
       lastFitRef.current = prev.fit
       zoomLiveRef.current = prev.zoom
-      setZoom(prev.zoom)
+      setZoomState(prev.zoom)
     }
   }, [readMode])
 
@@ -4245,10 +4323,18 @@ export function App({
     const contentH = twipsToPx(section.pageHeight) - effTopSingle - effBottomSingle
     let slices: PageSlice[] = []
     let pageLookup: ReturnType<typeof buildPageLookup> | undefined
-    let scrollFrame = 0
     let restoreNaturalFlow: (() => void) | undefined
     let flowRead: { pm: HTMLElement; reader: ReturnType<typeof createBlockMeasurer> } | undefined
     let timer: number | null = null
+    let viewportAppendOnly = false
+    let waitingForParagraphs = false
+    let editedWhileMeasuring = false
+    let laidOutBeforeParagraphsSettled = false
+    const typographyOf = (state: Editor['state']) => ({
+      cjk: cjkPunctShrinkPluginKey.getState(state),
+      justify: justifyShrinkPluginKey.getState(state),
+    })
+    let measuredTypography: ReturnType<typeof typographyOf> | undefined
     const activity = trackPaginationActivity()
     const storyDiagnostic = createDocumentStoryDiagnostic(() => {
       const current = fileCtxRef.current.doc
@@ -4258,7 +4344,6 @@ export function App({
         document: current ? { hash: current.hash, blocks: current.parsed.blocks } : null,
       }
     })
-    let rowFillSig = ''
     let previousHeaderFooterContent = new Map<string, number>()
     // passes a pass schedules for itself (widths / suppression applied late);
     // a document whose column widths never settle must not paginate forever
@@ -4269,6 +4354,7 @@ export function App({
     // The continuous paper and sheet grid use different scroll coordinates.
     // Endnotes may also create provisional pages beyond the mounted body.
     const trackStreamingCoverage = !multipageMode && endnoteItems.length === 0
+    const linearFlow = colMode === 'none' && !hasVertical && !hasVAlign && !mirrorMargins
     let selfScheduled = false
     // set by the cleanup: document.fonts.ready and other promise callbacks of
     // this run can still fire after the effect was re-created (zoom change)
@@ -4294,7 +4380,11 @@ export function App({
       const scrollRect = scroller.getBoundingClientRect()
       const origin = pmRect.top + mTopPx * factor
       viewportHeight = scrollRect.height
-      if (publishCoverage && trackStreamingCoverage && isPhasedContentPending()) {
+      if (
+        publishCoverage &&
+        trackStreamingCoverage &&
+        (isPhasedContentPending() || (editor && hasPendingParagraphMeasurements(editor.view)))
+      ) {
         streamingCoverage.publish(
           lastPassChildCount,
           scroller.scrollTop + pmRect.top + completePaperEnd * factor - scrollRect.top,
@@ -4355,14 +4445,6 @@ export function App({
       const current = cutPage ?? pageLookup.fromSlices(domY ?? flowY())
       const total = pageLookup.total
       publishPage(current, total)
-    }
-    const onScroll = () => {
-      if (scrollFrame) return
-      scrollFrame = requestAnimationFrame(() => {
-        scrollFrame = 0
-        locate()
-        requestVisibleStreamLayout()
-      })
     }
     let lastPassAt = 0
     let lastPassMs = 0
@@ -4521,9 +4603,100 @@ export function App({
       }
       return blocksKeepSlicing(items, slices, factor) || reject('geometry')
     }
+    let hasTocFields = false
+    let tocRefreshComplete = false
+    const makeTocBookmarkPageLookup = (blocks: BlockBox[], cuts: PageCut[]) => {
+      let bookmarkBlocks: Map<number, BlockBox | null> | undefined
+      return (bookmark: string) => {
+        const index = sourceBookmarkIndices.get(bookmark)
+        if (index == null || isPhasedContentPending()) return undefined
+        if (!bookmarkBlocks) {
+          bookmarkBlocks = new Map()
+          for (const block of blocks)
+            if (block.docxIndex != null)
+              bookmarkBlocks.set(
+                block.docxIndex,
+                bookmarkBlocks.has(block.docxIndex) ? null : block,
+              )
+        }
+        const block = bookmarkBlocks.get(index)
+        return block ? tocPageDisplayForBookmarkBlock(block, cuts) : undefined
+      }
+    }
+    // A pristine open keeps the file's caches. An edit can refresh them even
+    // if the page cuts stay the same, and the refresh stays outside undo history.
+    const prepareTocRefresh = (
+      blocks: BlockBox[],
+      slices: PageSlice[],
+      cuts: PageCut[],
+      pageTextOfBookmark: ReturnType<typeof makeTocBookmarkPageLookup>,
+    ) => {
+      if (!editor || !hasTocFields || !dirtyRef.current || slices.length === 0) return
+      const before = editor.state.doc
+      const byEl = new Map(blocks.filter((b) => b.el).map((b) => [b.el as HTMLElement, b.top]))
+      const headings = collectHeadings(before, editor.storage.listNumbering?.styles)
+      const displays = headings.map((h) => {
+        const dom = editor.view.nodeDOM(h.pos) as HTMLElement | null
+        const top = dom ? byEl.get(dom) : undefined
+        return top === undefined
+          ? undefined
+          : cuts[Math.max(0, Math.min(pageOfY(slices, top), cuts.length - 1))]?.display
+      })
+      const tr = editor.state.tr
+      const changed = applyTocPageDisplays(before, tr, headings, displays, pageTextOfBookmark)
+      if (changed) tr.setMeta('addToHistory', false)
+      // Updating a field can rebuild its view. Apply after layout has finished
+      // with the measured DOM and only while it still describes this document.
+      return () => {
+        if (editor.state.doc !== before) return
+        tocRefreshComplete = true
+        if (changed) {
+          editor.view.dispatch(tr)
+          carryDocSeen(editor, before)
+        }
+      }
+    }
     const remeasure = (forceFull = false, synchronous = false) => {
       if (disposed) return
       timer = null
+      const viewportOnly = viewportAppendOnly
+      viewportAppendOnly = false
+      const paragraphsPending = editor ? hasPendingParagraphMeasurements(editor.view) : false
+      // A complete layout computed against unpublished paragraph widths would
+      // immediately be invalidated when those widths are committed. Let the
+      // current pages serve the viewport while their next inputs are prepared.
+      if (
+        !synchronous &&
+        !forceFull &&
+        !editedWhileMeasuring &&
+        paragraphsPending &&
+        trackStreamingCoverage &&
+        !streamingCoverage.reachesUncovered(scroller.scrollTop + viewportHeight)
+      ) {
+        waitingForParagraphs = true
+        activity.update({ pending: true })
+        return
+      }
+      waitingForParagraphs = false
+      editedWhileMeasuring = false
+      // An append offered for an earlier viewport can become irrelevant before
+      // the scheduled pass starts. Edits, fonts, settlement and explicit layout
+      // consumers still require the pending measurement.
+      if (
+        viewportOnly &&
+        !synchronous &&
+        !forceFull &&
+        isPhasedContentPending() &&
+        !streamNeedsLayout(scroller.scrollTop)
+      ) {
+        measureMountedTail = false
+        dirtyFrom = Infinity
+        fastEdits = new Set()
+        activity.update({ pending: false })
+        return
+      }
+      laidOutBeforeParagraphsSettled = paragraphsPending
+      measuredTypography = editor ? typographyOf(editor.state) : undefined
       activity.update({ pending: false, active: true })
       lastPassAt = performance.now()
       const stylesChanged = prepareDocStylesRef.current()
@@ -4582,12 +4755,31 @@ export function App({
             annotationFirstPageRef.current,
           )
         }
-        if (fast) {
+        if (fast && editor && edited) {
           fastPasses++
           const dbg = (window as unknown as Record<string, Record<string, unknown>>).__pageDebug
           if (dbg) dbg.fastPasses = fastPasses
+          const layout = pageLayoutRef.current
+          // Stable page cuts keep imported bookmark pages. Only the first
+          // dirty pass or a changed heading can affect the cached values here.
+          if (
+            layout &&
+            hasTocFields &&
+            (!tocRefreshComplete ||
+              [...edited].some((index) =>
+                headingLevelOf(editor.state.doc.child(index), editor.storage.listNumbering?.styles),
+              ))
+          ) {
+            const { blocks, slices, cuts } = layout
+            prepareTocRefresh(blocks, slices, cuts, makeTocBookmarkPageLookup(blocks, cuts))?.()
+          }
         }
         locate(true)
+        // A width commit can start another typography pass during this layout.
+        if (editor && hasPendingParagraphMeasurements(editor.view)) {
+          laidOutBeforeParagraphsSettled = true
+          activity.update({ pending: true })
+        }
       } catch (error) {
         activity.update({ error: String(error) })
         throw error
@@ -4603,6 +4795,9 @@ export function App({
     const remeasurePass = (dirty: number | null, keepPublishedRange: boolean) => {
       const pm = pmEl()
       if (!pm) return
+      const tocLines = pm.querySelectorAll<HTMLElement>('.doc-toc-line')
+      hasTocFields = tocLines.length > 0
+      tocRefreshComplete = false
       const model = editor?.state.doc
       let measuredCount = model?.childCount ?? 0
       let measuredEndPos = model?.content.size ?? 0
@@ -4655,10 +4850,10 @@ export function App({
       // later blocks were read before this pass's writes landed: one more
       // pass settles the chain (FollowUpChain refuses a repeating cause)
       const planOf = blockPlans()
-      const obstacleShadow = newObstacleShadow()
       pageReaderShadow.enabled =
         import.meta.env.DEV ||
         (window as unknown as { __pageReaderShadow?: boolean }).__pageReaderShadow === true
+      const obstacleShadow = pageReaderShadow.enabled ? newObstacleShadow() : undefined
       // the previous pass's block leads: where its gap widgets stand in the DOM
       const prevLayout = pageLayoutRef.current
       const pageLeads = prevLayout
@@ -4725,13 +4920,12 @@ export function App({
         const rect = pm.getBoundingClientRect()
         const origin = rect.top + mTopPx * factor
         const carryOf = floatCarriesOf(editor.state)
-        const linearFlow = colMode === 'none' && !hasVertical && !hasVAlign && !mirrorMargins
         if (linearFlow && flowRead?.pm !== pm) {
           flowRead?.reader.dispose()
           flowRead = { pm, reader: createBlockMeasurer(pm) }
         }
         const { blocks, totalHeight, floats } =
-          linearFlow && flowRead && end === undefined
+          linearFlow && flowRead
             ? flowRead.reader.measure({
                 origin,
                 width: rect.width,
@@ -4750,18 +4944,20 @@ export function App({
                     : 0
                 },
                 planOf,
-                shadow: true,
+                shadow: pageReaderShadow.enabled,
                 carryOf,
+                end,
               })
-            : measureBlocks(pm, origin, factor, planOf, true, carryOf, end)
+            : measureBlocks(pm, origin, factor, planOf, pageReaderShadow.enabled, carryOf, end)
         if (hasVertical)
           for (const b of blocks) if (b.el && !b.floated) b.inlineExtraPx = blockInlineExtraPx(b.el)
-        planDiff = planOf
-          ? [
-              ...shadowPlanDiff(planOf, blocks, blockMetaOf),
-              ...obstaclePlanDiffs(obstacleShadow.diffs, blocks, planOf),
-            ]
-          : []
+        planDiff =
+          planOf && obstacleShadow
+            ? [
+                ...shadowPlanDiff(planOf, blocks, blockMetaOf),
+                ...obstaclePlanDiffs(obstacleShadow.diffs, blocks, planOf),
+              ]
+            : []
         carriedSamples += carryStreamedSamples(blocks, lastBlocks, {
           pending: isPhasedContentPending(),
           dirty,
@@ -4807,11 +5003,10 @@ export function App({
           spillOverhangPx,
         )
         const flowH = flowWithFloats ?? withEndnotes?.totalHeight ?? totalHeight
-        const secSig = secList
-          ? secList
-              .map((s) => `${s.firstBlockIndex}:${s.lastBlockIndex}:${s.startType ?? ''}`)
-              .join('|')
-          : ''
+        const secSig = JSON.stringify([
+          geoms,
+          secList?.map((s) => [s.firstBlockIndex, s.lastBlockIndex, s.startType]),
+        ])
         const resume = resumeFor(blocks, secSig, dirty)
         if (resume) resumePasses++
         const t1 = performance.now()
@@ -4934,15 +5129,15 @@ export function App({
       if (slices.length > 0) {
         const lastIdx = slices.length - 1
         const num = secList ? pageNumbers(slices, secList)[lastIdx] : slices.length
-        setLastPageNo({
-          num,
-          text: secList
-            ? formatPageNumber(
-                num,
-                secList[Math.min(slices[lastIdx].section, secList.length - 1)]?.pageNumberFmt,
-              )
-            : String(num),
-        })
+        const text = secList
+          ? formatPageNumber(
+              num,
+              secList[Math.min(slices[lastIdx].section, secList.length - 1)]?.pageNumberFmt,
+            )
+          : String(num)
+        setLastPageNo((previous) =>
+          previous?.num === num && previous.text === text ? previous : { num, text },
+        )
         const counts = sectionPageCounts(slices)
         const first = counts[0]
         const last = counts[lastIdx]
@@ -4950,50 +5145,8 @@ export function App({
           prev?.first === first && prev.last === last ? prev : { first, last },
         )
       }
-      const tocPageTextAt = (top: number | undefined) =>
-        top === undefined
-          ? undefined
-          : cuts[Math.max(0, Math.min(pageOfY(slices, top), cuts.length - 1))]?.display
-      let bookmarkBlocks: Map<number, BlockBox | null> | undefined
-      const tocPageTextOf = (bookmark: string) => {
-        const index = sourceBookmarkIndices.get(bookmark)
-        if (index == null || isPhasedContentPending()) return undefined
-        if (!bookmarkBlocks) {
-          bookmarkBlocks = new Map()
-          for (const block of blocks)
-            if (block.docxIndex != null)
-              bookmarkBlocks.set(
-                block.docxIndex,
-                bookmarkBlocks.has(block.docxIndex) ? null : block,
-              )
-        }
-        const block = bookmarkBlocks.get(index)
-        return block ? tocPageDisplayForBookmarkBlock(block, cuts) : undefined
-      }
-      // A pristine open keeps the file's caches. A refresh on edit updates
-      // the model for save and remains outside the user's undo history.
-      let refreshToc: (() => void) | undefined
-      if (editor && dirtyRef.current && slices.length > 0) {
-        const byEl = new Map(blocks.filter((b) => b.el).map((b) => [b.el as HTMLElement, b.top]))
-        const headings = collectHeadings(editor.state.doc, editor.storage.listNumbering?.styles)
-        const displays = headings.map((h) => {
-          const dom = editor.view.nodeDOM(h.pos) as HTMLElement | null
-          return tocPageTextAt(dom ? byEl.get(dom) : undefined)
-        })
-        const tr = editor.state.tr
-        if (applyTocPageDisplays(editor.state.doc, tr, headings, displays, tocPageTextOf)) {
-          tr.setMeta('addToHistory', false)
-          const before = editor.state.doc
-          // The model transaction can rebuild node views. Keep the measured DOM
-          // stable through cut anchors and finish the layout before applying it.
-          refreshToc = () => {
-            if (editor.state.doc !== before) return
-            editor.view.dispatch(tr)
-            // A field refresh is not a user edit: keep the AI freshness baseline.
-            carryDocSeen(editor, before)
-          }
-        }
-      }
+      const tocPageTextOf = makeTocBookmarkPageLookup(blocks, cuts)
+      const refreshToc = prepareTocRefresh(blocks, slices, cuts, tocPageTextOf)
       // M4 always-on pagination in the canvas: render page gaps before page-leading blocks
       // (print view only; gaps don't count as content — measureBlocks subtracts them, so
       // slice results are gap-independent and refresh is idempotent)
@@ -5643,14 +5796,7 @@ export function App({
             )
           }
           // Empty caches can follow the measured page on pristine open.
-          backfillTocPageDom(
-            pm.querySelectorAll<HTMLElement>(
-              tocBookmarksByIndex.size ? '.doc-toc-line' : '.doc-toc-line[data-toc-anchor]',
-            ),
-            tocPageTextOf,
-            dirtyRef.current,
-            tocBookmarksByIndex,
-          )
+          backfillTocPageDom(tocLines, tocPageTextOf, dirtyRef.current, tocBookmarksByIndex)
           previousHeaderFooterContent = headerFooterContent
         }
         tGapsBuild = performance.now() - tGaps0
@@ -5682,7 +5828,7 @@ export function App({
               ...(f.extraPx ? { extraPx: f.extraPx } : {}),
             })
         }
-        setRowFills(editor.view, rowFillEls, layoutBatch)
+        const rowFillsChangedAt = setRowFills(editor.view, rowFillEls, layoutBatch)
         stage('rowFills')
         // oversized single-line blocks: resolve the engine's page-bottom clips to their elements
         const oversizeEls: Array<{ el: HTMLElement; clipPx: number }> = []
@@ -5846,37 +5992,40 @@ export function App({
           layoutSpecs = [...mergedSpecs.values()]
         }
         const changedWrapBlocks = setColumnLayout(editor.view, layoutSpecs, layoutBatch)
-        const hadCoupledWrap = changedWrapBlocks.size > 0 && hasCoupledWrapGeometry(editor.view)
+        const multipleColumns = viewMode === 'print' && (colFlow?.cols ?? 1) > 1
+        const hadCoupledWrap =
+          changedWrapBlocks.size > 0 && hasCoupledWrapGeometry(editor.view, multipleColumns)
+        const hasLayoutFeedback = rowFillsChangedAt !== null || changedWrapBlocks.size > 0
+        const previousNonLocalFlow = hasLayoutFeedback && hasNonLocalFlow(pm)
         stage('columnLayout')
         const tCommit0 = performance.now()
         layoutBatch.commit()
-        prepareDocStylesRef.current()
+        const committedStylesChanged = prepareDocStylesRef.current()
         tCommit = performance.now() - tCommit0
         stage('commit')
         // in-table gap bands live in the spanning cell's coordinate space:
         // re-anchor them to the paper before the strips are measured/aligned
-        alignTableGapFills(pm, factor)
+        syncPageGapGeometry(pm, factor, ledgered ? { cuts, marginTop: mTopPx } : undefined)
         stage('tableGapFills')
         if ((secWSpecs.length > 0 || mirrorMargins) && section) {
           const cSet = secList?.[0]?.settings ?? section
           alignGapHfStrips(pm, pageLeftOf(cSet) + twipsToPx(cSet.marginLeft), factor)
         }
         stage('hfStrips')
-        // after setPageGaps: widget insertion is synchronous, so anchor rects are final
-        if (ledgered)
-          stampGapFlowTops(pm, cuts, pm.getBoundingClientRect().top + mTopPx * factor, factor)
-        syncFloatShifts(
-          pm,
-          floats,
-          pm.getBoundingClientRect().top + mTopPx * factor,
-          factor,
-          mTopPx - twipsToPx((sections[0]?.settings ?? section)?.marginTop ?? 0),
-          ledgered ? { cuts, carries } : undefined,
-        )
+        if (floats.length > 0) {
+          syncFloatShifts(
+            pm,
+            floats,
+            pm.getBoundingClientRect().top + mTopPx * factor,
+            factor,
+            mTopPx - twipsToPx((sections[0]?.settings ?? section)?.marginTop ?? 0),
+            ledgered ? { cuts, carries } : undefined,
+          )
+        }
         stage('floatShifts')
         // Word keeps anchored objects on the page: cell boxes lifted past the
         // paper top by a negative anchor offset are pushed back down
-        clampCellBoxTops(pm, pm.getBoundingClientRect().top, factor)
+        clampCellBoxTops(pm, factor)
         clampCellImageTops(pm, factor)
         pinCellBoxesToPage(pm, factor, cuts, inMeasuredRange)
         pinPageRelXPictures(pm, factor, cuts, inMeasuredRange)
@@ -5913,16 +6062,42 @@ export function App({
         stage('sheets')
         tSetGaps = performance.now() - tSet0
         if (obstaclesChanged) followUp('obstacles')
+        const independentFeedback =
+          hasLayoutFeedback &&
+          linearFlow &&
+          !obstaclesChanged &&
+          !committedStylesChanged &&
+          !previousNonLocalFlow &&
+          floats.length === 0 &&
+          !hasNonLocalFlow(pm) &&
+          !blocks.some(
+            (block) => block.floated || block.floatTable || block.floatBottom !== undefined,
+          )
+        const docIndexAt = (position: number | null) =>
+          independentFeedback && position !== null
+            ? editor.state.doc.resolve(position).index(0)
+            : null
         // a fill just applied to a split row changed the table height under the slices
-        const fSig = rowFillsSig(rowFills)
-        if (fSig !== rowFillSig) {
-          rowFillSig = fSig
-          followUp('rowFills')
-        }
+        if (rowFillsChangedAt !== null) followUpAt('rowFills', docIndexAt(rowFillsChangedAt))
         if (colGranted) followUp('columns')
         if (changedWrapBlocks.size > 0) {
-          if (!colGranted) followUp('width')
-          const lostCoupling = hadCoupledWrap && !hasCoupledWrapGeometry(editor.view)
+          if (!colGranted) {
+            let first: number | null = null
+            if (independentFeedback) {
+              const positions = new TopLevelPositions(editor.view)
+              for (const block of changedWrapBlocks) {
+                const range = positions.of(block)
+                if (!range) {
+                  first = null
+                  break
+                }
+                first = first === null ? range.from : Math.min(first, range.from)
+              }
+            }
+            followUpAt('width', docIndexAt(first))
+          }
+          const lostCoupling =
+            hadCoupledWrap && !hasCoupledWrapGeometry(editor.view, multipleColumns)
           const detail = obstaclesChanged || lostCoupling ? null : changedWrapBlocks
           editor.view.dom.dispatchEvent(new CustomEvent(WRAP_WIDTHS_COMMITTED_EVENT, { detail }))
         }
@@ -5991,7 +6166,9 @@ export function App({
           pageCutSig: pageCutSignature(pageCuts),
           planDiff,
           planDiffHistogram: planDiffHistogram(planDiff),
-          obstacleShadow: { wrappers: obstacleShadow.wrappers, boxes: obstacleShadow.boxes },
+          obstacleShadow: obstacleShadow
+            ? { wrappers: obstacleShadow.wrappers, boxes: obstacleShadow.boxes }
+            : undefined,
           layoutHealth: layoutHealth.snapshot(),
           carriedSamples,
           resumePasses,
@@ -6076,22 +6253,22 @@ export function App({
           return lookup.fromCuts(y, top, factor) ?? lookup.fromSlices((y - top) / factor - mTopPx)
         }
       }
-      setLayoutRev((v) => v + 1)
+      if (multipageMode) setLayoutRev((v) => v + 1)
       refreshToc?.()
     }
-    const streamNeedsLayout = () =>
-      streamingCoverage.needsLayout(
-        editor?.state.doc.childCount ?? 0,
-        scrollPosRef.current.top + viewportHeight,
-      )
+    const streamNeedsLayout = (viewportTop = scrollPosRef.current.top) =>
+      streamingCoverage.needsLayout(editor?.state.doc.childCount ?? 0, viewportTop + viewportHeight)
     const requestVisibleStreamLayout = () => {
-      if (trackStreamingCoverage && isPhasedContentPending() && streamNeedsLayout())
-        onUpdate(null, lastPassChildCount, 'append')
+      if (!trackStreamingCoverage) return
+      const needsViewport = waitingForParagraphs
+        ? streamingCoverage.reachesUncovered(scrollPosRef.current.top + viewportHeight)
+        : isPhasedContentPending() && streamNeedsLayout()
+      if (needsViewport) onUpdate(null, lastPassChildCount, 'append')
     }
     const onUpdate = (
       fastIndex: number | null = null,
       dirtyIndex: number | null = fastIndex,
-      trigger: 'change' | 'follow-up' | 'append' = 'change',
+      trigger: 'change' | 'follow-up' | 'append' | 'settled' = 'change',
     ) => {
       if (disposed) return
       const streaming = isPhasedContentPending()
@@ -6105,7 +6282,11 @@ export function App({
       // would either never fire (dense chunks) or pay a whole-document pass
       // per chunk (sparse ones); keep the pass already due and pace new ones
       if (streaming) {
-        if (timer) return
+        if (timer !== null) {
+          viewportAppendOnly &&= trigger === 'append'
+          return
+        }
+        viewportAppendOnly = trackStreamingCoverage && trigger === 'append'
         // a whole-document pass grows with the streamed content; keep it to a
         // fraction of the streaming time so the tail lands sooner
         const gap = Math.min(
@@ -6118,6 +6299,14 @@ export function App({
         return
       }
       if (timer) window.clearTimeout(timer)
+      viewportAppendOnly = false
+      if (trigger === 'settled') {
+        // The final append is a completed load, with no further edits to
+        // debounce. remeasure still waits for unpublished paragraph geometry.
+        timer = window.setTimeout(remeasure)
+        activity.update({ pending: true })
+        return
+      }
       // a whole-document pass after every pause blocks typing on long
       // documents: wait longer when the last pass was slow (Word paginates in
       // the background too); short documents keep the 300 ms feel. A typed
@@ -6169,30 +6358,88 @@ export function App({
     }
     // the epoch bump re-runs this effect; an already-settled ready promise must not re-probe
     const stopFonts = observePaginationFonts(document.fonts, onFontsChanged)
-    scroller.addEventListener('scroll', onScroll, { passive: true })
+    publishScrolledPage.current = () => {
+      locate()
+      requestVisibleStreamLayout()
+    }
     const streamResize = new ResizeObserver(() => {
-      if (!isPhasedContentPending()) return
+      if (!isPhasedContentPending() && !waitingForParagraphs) return
       viewportHeight = scroller.getBoundingClientRect().height
       requestVisibleStreamLayout()
     })
     if (trackStreamingCoverage) streamResize.observe(scroller)
     const onContentSettled = () => {
       selfScheduled = false
-      onUpdate()
+      const appendOnly =
+        !editedWhileMeasuring && linearFlow && editor && !hasNonLocalFlow(editor.view.dom)
+      onUpdate(
+        null,
+        appendOnly ? lastPassChildCount : null,
+        editedWhileMeasuring ? 'change' : 'settled',
+      )
     }
     document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, onContentSettled)
-    const onDocUpdate = ({ transaction }: { transaction: Transaction }) => {
+    const paragraphHost = editor?.view.dom
+    const onParagraphsSettled = () => {
+      if (!waitingForParagraphs && !laidOutBeforeParagraphsSettled) return
+      const finalTypography = editor ? typographyOf(editor.state) : undefined
+      laidOutBeforeParagraphsSettled = false
+      let first: number | null = null
+      if (!waitingForParagraphs || dirtyFrom !== null) {
+        const cjk = firstChangedParagraphDecoration(measuredTypography?.cjk, finalTypography?.cjk)
+        const justify = firstChangedParagraphDecoration(
+          measuredTypography?.justify,
+          finalTypography?.justify,
+        )
+        first = cjk === null ? justify : justify === null ? cjk : Math.min(cjk, justify)
+      }
+      if (!waitingForParagraphs && first === null) {
+        if (timer === null) activity.update({ pending: false })
+        return
+      }
+      // Typography can change wrapping without changing the document. Include
+      // it in an already queued pass, or resume the pass that waited for it.
+      measureMountedTail = true
+      fastEdits = null
+      if (first !== null && dirtyFrom !== null) {
+        if (editor && linearFlow && !hasNonLocalFlow(editor.view.dom)) {
+          const { doc: model } = editor.state
+          const index = model.resolve(Math.min(first, model.content.size)).index(0)
+          dirtyFrom = Math.min(dirtyFrom, index)
+        } else dirtyFrom = null
+      }
+      viewportAppendOnly = false
+      if (timer === null) timer = window.setTimeout(remeasure)
+      activity.update({ pending: true })
+    }
+    paragraphHost?.addEventListener(PARAGRAPH_MEASUREMENTS_SETTLED_EVENT, onParagraphsSettled)
+    const onDocUpdate = ({
+      transaction,
+      appendedTransactions = [],
+    }: {
+      transaction: Transaction
+      appendedTransactions?: readonly Transaction[]
+    }) => {
       resetWidthPassHistory(colWidthPass)
-      const firstChanged = firstChangedTopLevelIndex(transaction)
-      const appendedTail =
-        transaction.getMeta(PHASED_APPEND) &&
-        firstChanged !== null &&
-        firstChanged >= transaction.before.childCount &&
-        transaction.doc.childCount > transaction.before.childCount
+      const appendedTail = appendedStreamedTail(transaction) !== null
+      const additionalEdit = appendedTransactions.some(
+        (tr) => tr.docChanged && !appendedStreamedTail(tr),
+      )
       // Still-unmounted originals already participate in section resolution.
       // Mounting their break nodes is an append, so the existing page coverage
       // decides when the newly mounted range needs layout.
-      onUpdate(singleInlineEditIndex(transaction), firstChanged, appendedTail ? 'append' : 'change')
+      if (appendedTail && !additionalEdit) {
+        onUpdate(null, transaction.before.childCount, 'append')
+        return
+      }
+      editedWhileMeasuring = true
+      if (additionalEdit) onUpdate()
+      else
+        onUpdate(
+          singleInlineEditIndex(transaction),
+          firstChangedTopLevelIndex(transaction),
+          'change',
+        )
     }
     editor?.on('update', onDocUpdate)
     // justify-shrink re-decides via decoration-only transactions that move the
@@ -6247,10 +6494,10 @@ export function App({
       if (timer) window.clearTimeout(timer)
       if (hfTimer) window.clearTimeout(hfTimer)
       stopFonts()
-      if (scrollFrame) cancelAnimationFrame(scrollFrame)
-      scroller.removeEventListener('scroll', onScroll)
+      publishScrolledPage.current = undefined
       streamResize.disconnect()
       document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, onContentSettled)
+      paragraphHost?.removeEventListener(PARAGRAPH_MEASUREMENTS_SETTLED_EVENT, onParagraphsSettled)
       editor?.off('update', onDocUpdate)
       editor?.off('transaction', onShrinkTr)
     }
@@ -6348,30 +6595,58 @@ export function App({
     }
   }, [editor, sections, mirrorMargins, delSectBreaks, docVersion])
 
-  // status-bar word count: the whole text is re-walked per doc, so pace it
-  // (Word refreshes its count on idle too). A trailing throttle, not a
-  // debounce: the streamed tail of a phased open would keep resetting one
-  const [wordCount, setWordCount] = useState(0)
-  // Word's "selected/total" pair; 0 means no selection, so the bar falls back
-  // to the plain total. Cheap enough (a text range, not a document walk) to
-  // follow the selection directly rather than ride the throttle above.
-  const [selectionWordCount, setSelectionWordCount] = useState(0)
+  // Like the viewport page, live word counts update the label without asking
+  // React to save the focused editor's selection across a shell commit.
+  const [docEmpty, setDocEmpty] = useState(true)
+  const documentSummary = useMemo(() => createDocumentSummary(Boolean(doc)), [doc])
+  const wordStatus = useRef({ words: 0, selected: 0 })
+  const wordStatusLabel = useRef<HTMLSpanElement>(null)
+  const paintWordStatus = useRef(() => {})
+  useLayoutEffect(() => {
+    paintWordStatus.current = () => {
+      const label = wordStatusLabel.current
+      if (!label) return
+      const { words, selected } = wordStatus.current
+      const text = selected
+        ? t('appWordCountSelection', { selected, total: words })
+        : t('appWordCountN', { n: words })
+      if (label.textContent !== text) label.textContent = text
+    }
+    paintWordStatus.current()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc, lang])
   const [selectionHead, setSelectionHead] = useState(0)
-  // changes outside the body: notes and header / footer parts follow their models,
-  // textboxes and note anchors the document (revisionRanges refreshes with it)
+  const [bodyStoryRevisions, setBodyStoryRevisions] = useState<{
+    editor: typeof editor
+    source: typeof doc
+    footnotes: typeof footnotes
+    endnotes: typeof endnotes
+    textboxes: StoryRevision[]
+    notes: StoryRevision[]
+  } | null>(null)
   const storyRevisions = useMemo<StoryRevision[]>(() => {
-    if (!editor || !doc) return []
-    const pmDoc = editor.state.doc
+    if (!doc || !editor) return []
+    const model = editor.state.doc
+    const published =
+      bodyStoryRevisions?.source === doc &&
+      bodyStoryRevisions.editor === editor &&
+      bodyStoryRevisions.footnotes === footnotes &&
+      bodyStoryRevisions.endnotes === endnotes
+        ? bodyStoryRevisions
+        : null
+    const notes = published?.notes ?? [
+      ...(footnotes.length ? collectNoteRevisions(model, 'footnote', footnotes) : []),
+      ...(endnotes.length ? collectNoteRevisions(model, 'endnote', endnotes) : []),
+    ]
     return [
       ...collectHfRevisions(hfState),
-      ...collectTextboxRevisions(pmDoc),
-      ...collectNoteRevisions(pmDoc, 'footnote', footnotes),
-      ...collectNoteRevisions(pmDoc, 'endnote', endnotes),
+      ...(published?.textboxes ?? collectTextboxRevisions(model)),
+      ...notes,
     ]
-    // revisionRanges: the throttled document-change trigger
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor, doc, hfState, footnotes, endnotes, revisionRanges])
-  storyRevisionsRef.current = storyRevisions
+  }, [doc, editor, hfState, footnotes, endnotes, bodyStoryRevisions])
+  useLayoutEffect(() => {
+    storyRevisionsRef.current = storyRevisions
+  }, [storyRevisions])
   const allRevisions = useMemo(
     () => (storyRevisions.length ? [...revisionRanges, ...storyRevisions] : revisionRanges),
     [revisionRanges, storyRevisions],
@@ -6412,7 +6687,8 @@ export function App({
   useEffect(() => {
     if (!editor) return
     const refreshSelection = () => {
-      setSelectionWordCount(selectedWordCount(editor.state.doc, editor.state.selection))
+      wordStatus.current.selected = selectedWordCount(editor.state.doc, editor.state.selection)
+      paintWordStatus.current()
       setSelectionHead(editor.state.selection.head)
       // a caret move in the body ends the stop on a change outside it
       if (lastStoryRef.current !== null) setActiveStoryId(null)
@@ -6428,11 +6704,30 @@ export function App({
     let timer = 0
     const refresh = () => {
       timer = 0
-      setWordCount(wordCountOfDoc(editor.state.doc))
-      setRevisionRanges(doc ? revisionsOfDoc(editor.state.doc) : [])
-      setSelectionWordCount(selectedWordCount(editor.state.doc, editor.state.selection))
+      const { doc: model, words, revisions, textboxes } = documentSummary.read(editor.state.doc)
+      wordStatus.current = { words, selected: selectedWordCount(model, editor.state.selection) }
+      paintWordStatus.current()
+      setDocEmpty(words === 0)
+      setRevisionRanges(revisions)
+      const notes: StoryRevision[] = []
+      if (doc && footnotes.length) notes.push(...collectNoteRevisions(model, 'footnote', footnotes))
+      if (doc && endnotes.length) notes.push(...collectNoteRevisions(model, 'endnote', endnotes))
+      setBodyStoryRevisions((previous) => {
+        if (
+          previous?.source === doc &&
+          previous.editor === editor &&
+          previous.footnotes === footnotes &&
+          previous.endnotes === endnotes &&
+          previous.textboxes === textboxes &&
+          !previous.notes.length &&
+          !notes.length
+        )
+          return previous
+        return { editor, source: doc, footnotes, endnotes, textboxes, notes }
+      })
     }
-    const onUpdate = () => {
+    const onUpdate = ({ transaction }: { transaction: Transaction }) => {
+      documentSummary.observe(transaction, editor.state.doc)
       if (!timer) timer = window.setTimeout(refresh, WORD_COUNT_THROTTLE_MS)
     }
     refresh()
@@ -6441,7 +6736,7 @@ export function App({
       window.clearTimeout(timer)
       editor.off('update', onUpdate)
     }
-  }, [editor, doc, docLoading])
+  }, [editor, doc, documentSummary, docLoading, footnotes, endnotes])
 
   /** Word word-count dialog: pages/lines estimated from the current layout */
   const openStats = useCallback(() => {
@@ -6585,20 +6880,13 @@ export function App({
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
         e.preventDefault()
-        if (doc) {
-          // bump even when the panel is already open: focus returns to the find box
-          setShowFind(true)
-          setFindFocusInput((n) => n + 1)
-        }
+        if (doc) findPanelRef.current?.show('find')
       }
       // Word's replace: Ctrl+H everywhere (macOS Cmd+H is the system hide role,
       // which never reaches the renderer, so this branch is Ctrl+H there too)
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === 'h') {
         e.preventDefault()
-        if (doc) {
-          setShowFind(true)
-          setFindFocusReplace((n) => n + 1)
-        }
+        if (doc) findPanelRef.current?.show('replace')
       }
       // Go To: ⌥⌘G on the Mac (Word for Mac), Ctrl+G elsewhere (⇧⌘G stays Word Count)
       if (
@@ -6609,8 +6897,7 @@ export function App({
         doc
       ) {
         e.preventDefault()
-        setShowFind(true)
-        setFindFocusGoTo((n) => n + 1)
+        findPanelRef.current?.show('goto')
       }
       // Word dialog shortcuts: Font ⌘D / Paragraph ⌥⌘M / Hyperlink ⌘K
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === 'd' && doc && canEdit) {
@@ -7000,22 +7287,13 @@ export function App({
           setRibbonTabRequest({ tab: 'layout', nonce: Date.now() })
           break
         case 'find':
-          if (doc) {
-            setShowFind(true)
-            setFindFocusInput((n) => n + 1)
-          }
+          if (doc) findPanelRef.current?.show('find')
           break
         case 'replace':
-          if (doc) {
-            setShowFind(true)
-            setFindFocusReplace((n) => n + 1)
-          }
+          if (doc) findPanelRef.current?.show('replace')
           break
         case 'goto':
-          if (doc) {
-            setShowFind(true)
-            setFindFocusGoTo((n) => n + 1)
-          }
+          if (doc) findPanelRef.current?.show('goto')
           break
         case 'export-pdf':
           void exportPdf()
@@ -7048,6 +7326,7 @@ export function App({
     exportImages,
     printDoc,
     zoomFit,
+    setZoom,
     openStats,
     startNewComment,
     runAiProofread,
@@ -7471,6 +7750,7 @@ export function App({
   useEffect(() => {
     ;(window as unknown as Record<string, unknown>).__aidocs = {
       editor,
+      documentGeneration: currentDocGeneration,
       openPath: (path: string) => openRecent(path),
       save: () => save(false),
       getStatus: () => status,
@@ -8194,6 +8474,41 @@ export function App({
     scrollPosRef.current = { left: 0, top: 0 }
   }
   useEffect(() => {
+    const pane = scrollContainerRef.current
+    if (!editor || !pane) return
+    let frame: number | undefined
+    const onScroll = () => {
+      if (frame !== undefined) return
+      // One viewport read per frame. The owner survives pagination resets and
+      // scroll event delivery itself performs no layout reads or writes.
+      frame = requestAnimationFrame(() => {
+        frame = undefined
+        const { top } = readScrollPosition(pane)
+        publishScrolledPage.current?.()
+        screenImages.current?.updateViewport(top)
+      })
+    }
+    pane.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      pane.removeEventListener('scroll', onScroll)
+      if (frame !== undefined) cancelAnimationFrame(frame)
+    }
+  }, [editor, readScrollPosition])
+  useEffect(() => {
+    const pane = scrollContainerRef.current
+    if (!editor || !pane || !hasRuntimeDocument) return
+    const readiness = installScreenImageReadiness(
+      editor.view.dom,
+      pane,
+      readScrollPosition(pane).top,
+    )
+    screenImages.current = readiness
+    return () => {
+      screenImages.current = undefined
+      readiness?.dispose()
+    }
+  }, [editor, hasRuntimeDocument, runtimeIdentity, readScrollPosition])
+  useEffect(() => {
     if (runtimeDocumentRef.current) {
       docsAnnotations.activate()
       for (const [source, checker] of Object.entries(getDocsCheckers()))
@@ -8569,14 +8884,42 @@ export function App({
   const [histState, setHistState] = useState({ canUndo: false, canRedo: false })
   useEffect(() => {
     if (!editor) return
-    const refresh = ({ transaction }: { transaction?: { docChanged: boolean } } = {}) => {
-      setHistState({ canUndo: editor.can().undo(), canRedo: editor.can().redo() })
-      if (transaction?.docChanged) setDocVersion((v) => v + 1)
+    const refresh = ({
+      transaction,
+      appendedTransactions = [],
+    }: {
+      transaction?: Transaction
+      appendedTransactions?: readonly Transaction[]
+    } = {}) => {
+      const canUndo = editor.can().undo()
+      const canRedo = editor.can().redo()
+      const appendedEdit = appendedTransactions.some(
+        (appended) => appended.docChanged && !appendedStreamedTail(appended),
+      )
+      const streamed = transaction && appendedStreamedTail(transaction)
+      if (
+        streamed &&
+        !appendedEdit &&
+        !appendedTransactions.some((appended) => appended.storedMarksSet)
+      ) {
+        setHistState((previous) =>
+          previous.canUndo === canUndo && previous.canRedo === canRedo
+            ? previous
+            : { canUndo, canRedo },
+        )
+        return
+      }
+      // Metadata-only transactions also update ribbon state, e.g. a collapsed caret's marks.
+      setHistState({ canUndo, canRedo })
+      if (transaction?.docChanged || appendedEdit) setDocVersion((v) => v + 1)
     }
+    const settled = () => setDocVersion((v) => v + 1)
     refresh()
     editor.on('transaction', refresh)
+    document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, settled)
     return () => {
       editor.off('transaction', refresh)
+      document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, settled)
     }
   }, [editor])
   const quickActions = useMemo(
@@ -9051,14 +9394,8 @@ export function App({
         editor={editor}
         formatState={formatState}
         hasDoc={!!doc}
-        onFind={() => {
-          setShowFind(true)
-          setFindFocusInput((n) => n + 1)
-        }}
-        onReplace={() => {
-          setShowFind(true)
-          setFindFocusReplace((n) => n + 1)
-        }}
+        onFind={() => findPanelRef.current?.show('find')}
+        onReplace={() => findPanelRef.current?.show('replace')}
         blocks={doc?.parsed.blocks ?? EMPTY_BLOCKS}
         styles={ribbonStyles}
         docDefaults={doc?.parsed.docDefaults}
@@ -9144,7 +9481,7 @@ export function App({
               runtime={docsRuntime}
               editor={editor}
               blocks={doc.parsed.blocks}
-              docEmpty={wordCount === 0}
+              docEmpty={docEmpty}
               numIdFallback={
                 doc.isBlank ? { bullet: BLANK_BULLET_NUM_ID, ordered: BLANK_ORDERED_NUM_ID } : null
               }
@@ -9183,22 +9520,12 @@ export function App({
         )}
         <div className="app-content">
           <div className={workspaceClass}>
-            {doc && showFind && (
-              <FindPanel
-                editor={editor}
-                onClose={() => {
-                  setShowFind(false)
-                  // else the next plain ⌘F remount would still see a truthy nonce
-                  // and land focus on the replace / go-to field
-                  setFindFocusReplace(0)
-                  setFindFocusGoTo(0)
-                }}
-                focusFindNonce={findFocusInput}
-                focusReplaceNonce={findFocusReplace}
-                focusGoToNonce={findFocusGoTo}
-                layout={() => pageLayoutRef.current}
-              />
-            )}
+            <FindPanelHost
+              editor={editor}
+              hasDocument={!!doc}
+              panelRef={findPanelRef}
+              layout={publishedPageLayout}
+            />
             {doc && showNav && (
               <NavPane
                 editor={editor}
@@ -9228,12 +9555,6 @@ export function App({
               <main
                 className={`editor-scroll${imageDragOver ? ' image-drop-target' : ''}${doc ? '' : ' start-screen-host'}`}
                 ref={scrollContainerRef}
-                onScroll={(e) => {
-                  scrollPosRef.current = {
-                    left: e.currentTarget.scrollLeft,
-                    top: e.currentTarget.scrollTop,
-                  }
-                }}
                 onDragOver={(e) => {
                   if (!editor?.isEditable || !isImageFileDrag(e.dataTransfer)) return
                   e.preventDefault()
@@ -9563,10 +9884,7 @@ export function App({
                   <button
                     className="status-item status-btn status-page"
                     data-tip={t('appGoToTitle')}
-                    onClick={() => {
-                      setShowFind(true)
-                      setFindFocusGoTo((n) => n + 1)
-                    }}
+                    onClick={() => findPanelRef.current?.show('goto')}
                   >
                     <span ref={pageStatusLabel} />
                   </button>
@@ -9575,12 +9893,7 @@ export function App({
                     data-tip={t('appWordCountTitle')}
                     onClick={openStats}
                   >
-                    {selectionWordCount > 0
-                      ? t('appWordCountSelection', {
-                          selected: selectionWordCount,
-                          total: wordCount,
-                        })
-                      : t('appWordCountN', { n: wordCount })}
+                    <span ref={wordStatusLabel} />
                   </button>
                   <button
                     className={`status-item status-btn status-track${trackChanges ? ' on' : ''}`}

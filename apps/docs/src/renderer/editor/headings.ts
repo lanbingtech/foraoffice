@@ -26,6 +26,15 @@ const HEADING_CAPABLE: Record<string, true> = { docParagraph: true, docListItem:
  * items — Word still lists them in its navigation pane and the TOC, and so does
  * this predicate when the caller supplies the document's styles.
  */
+export function headingLevelOf(node: PmNode, styles?: HeadingStyles): number | undefined {
+  if (node.type.name === 'docHeading') return Number(node.attrs.level) || 1
+  if (!styles || HEADING_CAPABLE[node.type.name] !== true) return undefined
+  const styleId = typeof node.attrs?.styleId === 'string' ? node.attrs.styleId : ''
+  const style = styleId ? styles.get(styleId) : undefined
+  // w:outlineLvl 9 on the style means body text even when a basedOn ancestor is a heading
+  return style?.headingOutlineOff ? undefined : style?.headingLevel || undefined
+}
+
 export function collectHeadings(
   doc: PmNode,
   styles?: HeadingStyles,
@@ -34,18 +43,9 @@ export function collectHeadings(
 ): HeadingRef[] {
   const out: HeadingRef[] = []
   doc.forEach((node, offset) => {
-    if (node.type.name === 'docHeading') {
-      if (includeEmpty || node.textContent.trim())
-        out.push({ text: node.textContent, level: Number(node.attrs.level) || 1, pos: offset })
-      return
-    }
-    if (!styles || HEADING_CAPABLE[node.type.name] !== true) return
-    const styleId = typeof node.attrs?.styleId === 'string' ? node.attrs.styleId : ''
-    const style = styleId ? styles.get(styleId) : undefined
-    // w:outlineLvl 9 on the style means body text even when a basedOn ancestor is a heading
-    if (!style?.headingLevel || style.headingOutlineOff) return
-    if (!includeEmpty && !node.textContent.trim()) return
-    out.push({ text: node.textContent, level: style.headingLevel, pos: offset })
+    const level = headingLevelOf(node, styles)
+    if (level !== undefined && (includeEmpty || node.textContent.trim()))
+      out.push({ text: node.textContent, level, pos: offset })
   })
   return out
 }

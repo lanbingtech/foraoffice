@@ -14,6 +14,8 @@ describe('streamed page coverage', () => {
     expect(coverage.needsLayout(128, 899)).toBe(false)
     expect(coverage.needsLayout(128, 900)).toBe(true)
     expect(coverage.needsLayout(64, 900)).toBe(false)
+    expect(coverage.reachesUncovered(899)).toBe(false)
+    expect(coverage.reachesUncovered(900)).toBe(true)
     coverage.publish(128, 2500)
     expect(coverage.needsLayout(256, 910)).toBe(false)
   })

@@ -113,6 +113,38 @@ async function withHostedDocument(
   }
 }
 
+test('page status opens Go To, navigates to the requested page and keeps it editable', async () => {
+  const bodyXml = Array.from({ length: 8 }, (_, index) => {
+    const pageBreak = index === 0 ? '' : '<w:pPr><w:pageBreakBefore/></w:pPr>'
+    return `<w:p>${pageBreak}<w:r><w:t>Navigation paragraph ${index + 1}</w:t></w:r></w:p>`
+  }).join('')
+  const source = await buildDocx({ bodyXml })
+
+  await withHostedDocument(Buffer.from(source), async (page) => {
+    const status = page.locator('.status-page')
+    const input = page.locator('.find-goto-input')
+    const panel = page.locator('.find-panel')
+    const target = page.locator('.editor-scroll .doc-page > p', {
+      hasText: /^Navigation paragraph 7$/,
+    })
+    await expect(status).toHaveText(/^Page [1-6] of 8$/)
+    await status.click()
+    await expect(input).toBeFocused()
+    await input.fill('7')
+    await input.press('Enter')
+    await expect(status).toHaveText('Page 7 of 8')
+    await expect(target).toBeInViewport()
+    await panel.locator('.find-close').click()
+    await expect(panel).toHaveCount(0)
+    await target.click()
+    await page.keyboard.press('End')
+    await page.keyboard.type(' edited')
+    await expect(page.locator('.editor-scroll .doc-page')).toContainText(
+      'Navigation paragraph 7 edited',
+    )
+  })
+})
+
 test('scrolling keeps the visible page and navigation in sync without a React root commit', async () => {
   const pages = Array.from({ length: 8 }, (_, index) => {
     const pageBreak = index === 0 ? '' : '<w:pPr><w:pageBreakBefore/></w:pPr>'
@@ -291,9 +323,37 @@ test('saving after an edit preserves a PAGEREF cache for a bookmark in a split p
     const displayedPages = page.locator('.doc-page .doc-toc-page')
     await expect(displayedPages).toHaveText(['2', '3'])
     await expect(page.locator('.doc-page .page-gap')).toHaveCount(1)
+    // Exercise a same-height edit once the initial layout and fonts have settled.
+    await page.evaluate(async () => {
+      await document.fonts.ready
+    })
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const win = window as unknown as {
+            __docsLayoutActivity: typeof import('../apps/docs/src/renderer/pagination-activity').paginationActivity
+          }
+          return win.__docsLayoutActivity.snapshot()
+        }),
+      )
+      .toMatchObject({ pending: 0, active: 0, fontProbes: 0 })
     await page.getByText('Edit this independent paragraph', { exact: true }).click()
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const { editor } = (
+            window as unknown as { __aidocs: { editor: import('@tiptap/core').Editor } }
+          ).__aidocs
+          const { empty, $from } = editor.state.selection
+          return empty ? $from.parent.textContent : null
+        }),
+      )
+      .toBe('Edit this independent paragraph')
     await page.keyboard.press('End')
     await page.keyboard.type(' edited')
+    await expect(
+      page.getByText('Edit this independent paragraph edited', { exact: true }),
+    ).toBeVisible()
     await expect(displayedPages).toHaveText(['2', '1'])
 
     const saved = await page.evaluate(async () => {

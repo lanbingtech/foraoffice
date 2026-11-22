@@ -30,8 +30,12 @@ export class StreamingPageCoverage {
   needsLayout(mountedBlocks: number, viewportBottom: number): boolean {
     return (
       !this.published ||
-      (mountedBlocks > this.published.mountedBlocks && viewportBottom >= this.published.paperEnd)
+      (mountedBlocks > this.published.mountedBlocks && this.reachesUncovered(viewportBottom))
     )
+  }
+
+  reachesUncovered(viewportBottom: number): boolean {
+    return !this.published || viewportBottom >= this.published.paperEnd
   }
 }
 

@@ -1,12 +1,14 @@
 import { Extension } from '@tiptap/core'
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import type { EditorView } from '@tiptap/pm/view'
 import { splitFloatStyle } from '../pagination-lines'
 import type { ColumnSplitShape, VerticalBlockSpec } from '../pagination-types'
-import { TopLevelPositions } from './top-level-pos'
+import { TopLevelPositions, topLevelDomRanges } from './top-level-pos'
 import type { LayoutBatch } from './pagination-gaps'
-import { columnDecoration, mapColumnDecorations } from './column-layout-recovery'
+import { columnDecoration, mapColumnDecorations, type ColumnFrame } from './column-layout-recovery'
+import { paragraphDecorationsChanged } from './settled-measure'
 
 const key = new PluginKey<DecorationSet>('columnLayout')
 export const WRAP_WIDTHS_COMMITTED_EVENT = 'genoffice:wrap-widths'
@@ -14,6 +16,8 @@ export const WRAP_WIDTHS_COMMITTED_EVENT = 'genoffice:wrap-widths'
 export type WrapWidthChanges = ReadonlySet<HTMLElement> | null
 
 const committedWrap = new WeakMap<EditorView, Map<HTMLElement, string>>()
+const columnFramesByView = new WeakMap<EditorView, InstalledColumnFrames>()
+const widgetFramesByView = new WeakMap<EditorView, ReadonlyMap<HTMLElement, ColumnFrame>>()
 
 /**
  * Mixed-column canvas layout (documents whose sections disagree on column
@@ -33,6 +37,8 @@ const committedWrap = new WeakMap<EditorView, Map<HTMLElement, string>>()
  */
 export const ColumnLayoutExtension = Extension.create({
   name: 'columnLayout',
+  // Widths must be installed before tab and paragraph view plugins read them.
+  priority: 1000,
 
   addProseMirrorPlugins() {
     return [
@@ -50,6 +56,42 @@ export const ColumnLayoutExtension = Extension.create({
           decorations(state) {
             return key.getState(state)
           },
+        },
+        view(view) {
+          publishColumnFrames(view)
+          return {
+            update(_, previous) {
+              const state = view.state
+              // DOM-observer repairs can redraw a block with the very same
+              // state. Other decoration updates can also replace a view node.
+              if (
+                state === previous ||
+                state.doc !== previous.doc ||
+                (columnFramesByView.get(view)?.size &&
+                  paragraphDecorationsChanged(state, previous)) ||
+                key.getState(state) !== key.getState(previous)
+              )
+                publishColumnFrames(view)
+            },
+            destroy() {
+              // ProseMirror stops its observer before disposing plugin views.
+              // A replacement publisher can reuse this state synchronously;
+              // only an editor that stays alive without the plugin needs cleanup.
+              const installed = columnFramesByView.get(view)
+              queueMicrotask(() => {
+                if (
+                  !installed ||
+                  view.isDestroyed ||
+                  key.get(view.state) ||
+                  columnFramesByView.get(view) !== installed
+                )
+                  return
+                updateColumnFrames(view, installed, new Map())
+                columnFramesByView.delete(view)
+                widgetFramesByView.delete(view)
+              })
+            },
+          }
         },
       }),
     ]
@@ -128,6 +170,110 @@ const PATCH_CLASSES = [
   'doc-sect-page-start',
 ]
 
+interface OwnedProperty {
+  authored: string
+  priority: string
+  applied: string
+}
+
+interface InstalledColumnFrame {
+  node?: ProseMirrorNode
+  frame: ColumnFrame
+  properties: Map<string, OwnedProperty>
+}
+
+type InstalledColumnFrames = Map<HTMLElement, InstalledColumnFrame>
+
+/** Keep authored declarations underneath the values temporarily owned by pagination. */
+function writeColumnFrame(
+  element: HTMLElement,
+  installed: Map<string, OwnedProperty>,
+  frame?: ColumnFrame,
+): void {
+  const classes = new Set(frame?.class.split(' '))
+  for (const name of PATCH_CLASSES) {
+    const enabled = classes.has(name)
+    if (element.classList.contains(name) !== enabled) element.classList.toggle(name, enabled)
+  }
+  const properties = new Map<string, string>()
+  for (const declaration of frame?.style.split(';') ?? []) {
+    const colon = declaration.indexOf(':')
+    properties.set(declaration.slice(0, colon), declaration.slice(colon + 1))
+  }
+  for (const name of PATCH_PROPS) {
+    const next = properties.get(name)
+    const previous = installed.get(name)
+    if (next === undefined && !previous) continue
+    const current = element.style.getPropertyValue(name)
+    const priority = element.style.getPropertyPriority(name)
+    const stillOwned = previous !== undefined && current === previous.applied && !priority
+    if (next === undefined) {
+      if (stillOwned && (current !== previous.authored || previous.priority))
+        element.style.setProperty(name, previous.authored, previous.priority)
+      installed.delete(name)
+      continue
+    }
+    if (current !== next || priority) element.style.setProperty(name, next)
+    if (stillOwned) previous.applied = next
+    else installed.set(name, { authored: current, priority, applied: next })
+  }
+}
+
+function publishColumnFrames(view: EditorView): void {
+  const frames = new Map<number, ColumnFrame>()
+  for (const decoration of key.getState(view.state)?.find(undefined, undefined, (s) => s.frame) ??
+    [])
+    frames.set(decoration.from, decoration.spec.frame as ColumnFrame)
+  const targets = new Map<HTMLElement, { node?: ProseMirrorNode; frame: ColumnFrame }>()
+  if (frames.size > 0) {
+    for (const { dom, node, from } of topLevelDomRanges(view)) {
+      const frame = frames.get(from)
+      if (frame && dom instanceof HTMLElement) targets.set(dom, { node, frame })
+    }
+  }
+  for (const [dom, frame] of widgetFramesByView.get(view) ?? [])
+    if (dom.parentElement === view.dom) targets.set(dom, { frame })
+  columnFramesByView.set(
+    view,
+    updateColumnFrames(view, columnFramesByView.get(view) ?? new Map(), targets),
+  )
+}
+
+function updateColumnFrames(
+  view: EditorView,
+  previous: InstalledColumnFrames,
+  frames: ReadonlyMap<HTMLElement, { node?: ProseMirrorNode; frame: ColumnFrame }>,
+): InstalledColumnFrames {
+  if (frames.size === 0 && previous.size === 0) return previous
+  const installed: InstalledColumnFrames = new Map()
+  const observer = (view as { domObserver?: { stop(): void; start(): void } }).domObserver
+  observer?.stop()
+  try {
+    for (const [dom, { node, frame }] of frames) {
+      const last = previous.get(dom)
+      if (
+        last &&
+        last.node === node &&
+        last.frame.class === frame.class &&
+        last.frame.style === frame.style
+      ) {
+        installed.set(dom, last)
+        continue
+      }
+      const properties = last?.properties ?? new Map()
+      writeColumnFrame(dom, properties, frame)
+      installed.set(dom, { node, frame, properties })
+    }
+    for (const [element, frame] of previous) {
+      if (!installed.has(element) && view.dom.contains(element))
+        writeColumnFrame(element, frame.properties)
+    }
+  } finally {
+    observer?.start()
+  }
+  return installed
+}
+
 /** pitch/charSpace-only specs get an inert marker class: .doc-col-block's
  *  width/transform rules must not touch blocks that only carry their section's
  *  grid pitch or character spacing. Pitch-0 opt-outs use their own class (same
@@ -164,7 +310,7 @@ export function setColumnLayout(
 ): ReadonlySet<HTMLElement> {
   const decos: Decoration[] = []
   const positions = new TopLevelPositions(view)
-  const styleOf = new Map<HTMLElement, { style: string; cls: string }>()
+  const widgetFrames = new Map<HTMLElement, ColumnFrame>()
   const splitOf = new Map<HTMLElement, string>()
   const nextWrap = new Map<HTMLElement, string>()
   for (const spec of specs) {
@@ -210,9 +356,13 @@ export function setColumnLayout(
       (spec.vertical ? `--vert-mb:${round2(spec.vertical.marginBottomPx)}px;` : '') +
       `--col-dx:${round2(spec.dx)}px;--col-dy:${round2(spec.dy)}px`
     const cls = specClass(spec)
-    styleOf.set(spec.el, { style, cls })
     const range = positions.of(spec.el)
-    if (!range) continue
+    if (!range) {
+      // Flow widgets such as a floating picture's retained anchor line have
+      // geometry, but no document node for a mapped frame.
+      widgetFrames.set(spec.el, { class: cls, style })
+      continue
+    }
     const { from, to } = range
     // Vertical placements and split-column floats depend on measured block
     // extents. Leave them on the existing mapping/pagination path instead of
@@ -243,7 +393,12 @@ export function setColumnLayout(
     for (const el of previousWrap.keys())
       if (!nextWrap.has(el) && view.dom.contains(el)) changed.add(el)
   const commit = () => {
-    patchNodeViews(view, styleOf, splitOf)
+    patchSplitNodeViews(view, splitOf)
+    if (widgetFrames.size > 0 || widgetFramesByView.has(view)) {
+      if (widgetFrames.size > 0) widgetFramesByView.set(view, widgetFrames)
+      else widgetFramesByView.delete(view)
+      publishColumnFrames(view)
+    }
     committedWrap.set(view, nextWrap)
   }
   if (batch) batch.then(commit)
@@ -252,26 +407,13 @@ export function setColumnLayout(
 }
 
 /**
- * custom NodeViews (protected blocks etc.) don't apply node decorations — patch
- * their DOM directly, observer paused so PM never re-parses the mutation (same
- * technique as the phantom-rowspan sync). Re-applied by every remeasure pass.
+ * Custom leaf NodeViews cannot host the split widget decoration. Maintain
+ * their leading float after the editor updates its DOM.
  */
-function patchNodeViews(
-  view: EditorView,
-  styleOf: Map<HTMLElement, { style: string; cls: string }>,
-  splitOf: Map<HTMLElement, string>,
-): void {
+function patchSplitNodeViews(view: EditorView, splitOf: Map<HTMLElement, string>): void {
   const obs = (view as unknown as { domObserver?: { stop(): void; start(): void } }).domObserver
   obs?.stop()
   try {
-    for (const el of Array.from(
-      view.dom.querySelectorAll<HTMLElement>('[data-col-patch]'),
-    ) as HTMLElement[]) {
-      if (styleOf.has(el)) continue
-      el.removeAttribute('data-col-patch')
-      el.classList.remove(...PATCH_CLASSES)
-      for (const p of PATCH_PROPS) el.style.removeProperty(p)
-    }
     // split floats the widget decoration could not place (atomic node views)
     for (const el of Array.from(
       view.dom.querySelectorAll<HTMLElement>(`[data-col-split-patch] > .${SPLIT_CLASS}`),
@@ -285,19 +427,6 @@ function patchNodeViews(
       if (el.querySelector(`:scope > .${SPLIT_CLASS}`)) continue
       el.setAttribute('data-col-split-patch', '1')
       el.insertBefore(splitFloatEl(style), el.firstChild)
-    }
-    for (const [el, { style, cls }] of styleOf) {
-      const classes = cls.split(' ')
-      if (classes.every((c) => el.classList.contains(c)) && !el.hasAttribute('data-col-patch'))
-        continue
-      el.setAttribute('data-col-patch', '1')
-      el.classList.add(...classes)
-      const parts = style.split(';')
-      for (const p of PATCH_PROPS) el.style.removeProperty(p)
-      for (const part of parts) {
-        const i = part.indexOf(':')
-        if (i > 0) el.style.setProperty(part.slice(0, i), part.slice(i + 1))
-      }
     }
   } finally {
     obs?.start()

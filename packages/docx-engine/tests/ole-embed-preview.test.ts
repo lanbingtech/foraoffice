@@ -107,9 +107,15 @@ describe('MathType equation previews', () => {
     for (let offset = 0; offset < 20; offset += 2) checksum ^= preview.readUInt16LE(offset)
     preview.writeUInt16LE(checksum, 20)
 
+    // Node may give this input a nonzero byteOffset by allocating it in a slab.
+    const backing = Buffer.alloc(preview.length + 32, 0xa5)
+    preview.copy(backing, 16)
+    const previewView = backing.subarray(16, 16 + preview.length)
     const encode = vi.spyOn(FakeOffscreenCanvas.prototype, 'convertToBlob')
     try {
-      await metafileToDataUrl(preview, 'image/x-wmf')
+      expect(await metafileToDataUrl(previewView, 'image/x-wmf')).toMatch(
+        /^data:image\/png;base64,/,
+      )
       const full = encode.mock.contexts[0] as FakeOffscreenCanvas
       expect(full.width).toBeGreaterThan(96 * 5)
       encode.mockClear()

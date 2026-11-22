@@ -365,7 +365,6 @@ export function probeColWrap(
   if (!wrap) return null
   try {
     const clone = el.cloneNode(true) as HTMLElement
-    clone.removeAttribute('data-col-patch')
     clone.removeAttribute('data-idx')
     for (const g of Array.from(
       clone.querySelectorAll('.page-gap, .page-gap-inline, .page-float-host, .doc-col-split-float'),

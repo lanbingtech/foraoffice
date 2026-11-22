@@ -1,28 +1,38 @@
 import type { Node as PmNode } from '@tiptap/pm/model'
 import type { Transaction } from '@tiptap/pm/state'
-import { Decoration, DecorationSet, type DecorationAttrs } from '@tiptap/pm/view'
+import { Decoration, DecorationSet } from '@tiptap/pm/view'
 
-interface LayoutAttrs extends DecorationAttrs {
+export interface ColumnFrame {
   class: string
   style: string
 }
 
 interface ParagraphLayout {
-  attrs: LayoutAttrs
-  continuation: LayoutAttrs
+  attrs: ColumnFrame
+  continuation: ColumnFrame
 }
 
 /** The producer explicitly opts in only layouts safe to carry across a split. */
 export function columnDecoration(
   from: number,
   to: number,
-  attrs: LayoutAttrs,
-  continuation?: LayoutAttrs,
+  attrs: ColumnFrame,
+  continuation?: ColumnFrame,
 ): Decoration {
-  return Decoration.node(from, to, attrs, {
-    key: `col-${attrs.class}-${attrs.style}`,
-    ...(continuation ? { paragraphLayout: { attrs, continuation } satisfies ParagraphLayout } : {}),
-  })
+  // ProseMirror maps the position. The column view owns the DOM styles so
+  // changing a display offset never strips an unchanged inherited width.
+  return Decoration.node(
+    from,
+    to,
+    {},
+    {
+      key: `col-${attrs.class}-${attrs.style}`,
+      frame: attrs,
+      ...(continuation
+        ? { paragraphLayout: { attrs, continuation } satisfies ParagraphLayout }
+        : {}),
+    },
+  )
 }
 
 /**

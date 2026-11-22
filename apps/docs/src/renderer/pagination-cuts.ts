@@ -191,11 +191,14 @@ export function flowOffsetAt(
  *  zoom 1 from the first page's content top) onto the ledger; a count mismatch
  *  leaves the slice boundaries in place. */
 export function learnGapFlowTops(cuts: readonly PageCut[], widgetTops: readonly number[]): boolean {
-  const turns = cuts.filter((c, i) => i > 0 && c.gap && c.gap.kind !== 'cut')
-  if (turns.length !== widgetTops.length) return false
-  turns.forEach((cut, i) => {
-    const prev = cuts[cuts.indexOf(cut) - 1]
-    cut.gap!.flowTopPx = widgetTops[i] - prev.gapOffsetPx
+  const positions: number[] = []
+  for (let page = 1; page < cuts.length; page++) {
+    const gap = cuts[page].gap
+    if (gap && gap.kind !== 'cut') positions.push(page)
+  }
+  if (positions.length !== widgetTops.length) return false
+  positions.forEach((page, index) => {
+    cuts[page].gap!.flowTopPx = widgetTops[index] - cuts[page - 1].gapOffsetPx
   })
   return true
 }
