@@ -237,6 +237,7 @@ describe('CommentsPanel anchor scan', () => {
       createElement(CommentsPanel, {
         comments: comments as never,
         docNode: editor.state.doc,
+        editorView: editor.view,
         composing: false,
         onSubmitNew: noop,
         onReply: noop,

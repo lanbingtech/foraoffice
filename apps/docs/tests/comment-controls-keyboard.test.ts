@@ -39,6 +39,7 @@ function mount(onDelete = noop): { root: Root; container: HTMLElement } {
       { id: 'r1', author: 'B', text: 'reply', parentId: 'c1' },
     ] as CommentInfo[],
     docNode: editor.state.doc,
+    editorView: editor.view,
     composing: false,
     onSubmitNew: noop,
     onReply: noop,

@@ -357,7 +357,8 @@ import {
   trackChangesOptionsState,
   type TrackChangesOptions,
 } from './editor/track-changes-options'
-import type { PageLayout } from './editor/goto'
+import { pagePositions, type PageLayout } from './editor/goto'
+import { PagedViewProbe, pagedViewProbe } from './editor/paged-view-probe'
 import { Ribbon, type ConvertFormat } from './components/Ribbon'
 import {
   AdjustListIndentsDialog,
@@ -1101,6 +1102,7 @@ export function App({
    *  the document as it stands (TOC numbers, the preview snapshot) */
   const layoutNow = useCallback((): PageLayout | null => {
     const view = editorRef.current?.view
+    if (view) pagedViewProbe(view)?.restore()
     const needsTypography = view !== undefined && hasPendingParagraphMeasurements(view)
     if (needsTypography) flushPendingParagraphMeasurements(view)
     const stylesChanged = prepareDocStylesRef.current()
@@ -4696,6 +4698,7 @@ export function App({
         return
       }
       laidOutBeforeParagraphsSettled = paragraphsPending
+      if (editor) pagedViewProbe(editor.view)?.restore()
       measuredTypography = editor ? typographyOf(editor.state) : undefined
       activity.update({ pending: false, active: true })
       lastPassAt = performance.now()
@@ -7340,6 +7343,7 @@ export function App({
   // matching the heading text of a TOC entry.
   const jumpToAnchor = useCallback(
     (anchor: string, tocTitle = '') => {
+      if (editor) pagedViewProbe(editor.view)?.restore()
       let target: Element | null = null
       if (anchor && doc) {
         const block = doc.parsed.blocks.find((b) => b.originalXml?.includes(`w:name="${anchor}"`))
@@ -7358,7 +7362,7 @@ export function App({
       }
       target?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     },
-    [doc],
+    [doc, editor],
   )
 
   /** ⌘-click / Open Hyperlink: browser for http(s) (main-process openExternal), in-document jump for #bookmark */
@@ -8476,6 +8480,23 @@ export function App({
   useEffect(() => {
     const pane = scrollContainerRef.current
     if (!editor || !pane) return
+    const view = editor.view
+    const toggleProbe = (event: Event) => {
+      if (!(event instanceof CustomEvent)) return
+      pagedViewProbe(view)?.restore()
+      const layout = pageLayoutRef.current
+      const activity = paginationActivity.snapshot()
+      const buffer = event.detail === true ? 4 : event.detail
+      if (
+        (buffer === 2 || buffer === 4 || buffer === 16) &&
+        layout &&
+        !activity.active &&
+        !activity.pending &&
+        !activity.contentPending
+      )
+        PagedViewProbe.start(view, pane, layout, pagePositions(view, layout), buffer)
+    }
+    window.addEventListener('docs:paged-view-probe', toggleProbe)
     let frame: number | undefined
     const onScroll = () => {
       if (frame !== undefined) return
@@ -8486,10 +8507,13 @@ export function App({
         const { top } = readScrollPosition(pane)
         publishScrolledPage.current?.()
         screenImages.current?.updateViewport(top)
+        pagedViewProbe(view)?.onScroll(top)
       })
     }
     pane.addEventListener('scroll', onScroll, { passive: true })
     return () => {
+      window.removeEventListener('docs:paged-view-probe', toggleProbe)
+      pagedViewProbe(view)?.restore()
       pane.removeEventListener('scroll', onScroll)
       if (frame !== undefined) cancelAnimationFrame(frame)
     }
@@ -9827,6 +9851,7 @@ export function App({
               <CommentsPanel
                 comments={comments}
                 docNode={editor.state.doc}
+                editorView={editor.view}
                 composing={commentComposing}
                 onSubmitNew={submitNewComment}
                 onReply={replyToComment}

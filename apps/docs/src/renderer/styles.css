@@ -4728,20 +4728,6 @@ th[data-rev-fmt] {
   cursor: text;
 }
 
-.doc-comment-flash {
-  animation: comment-flash 350ms cubic-bezier(0, 0, 0.2, 1);
-}
-
-@keyframes comment-flash {
-  0%,
-  40% {
-    background: var(--docs-paper-comment-flash);
-  }
-  100% {
-    background: var(--docs-paper-comment-bg);
-  }
-}
-
 .comments-pane {
   width: 264px;
   flex: none;

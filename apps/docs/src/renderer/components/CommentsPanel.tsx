@@ -7,10 +7,13 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from 'react'
+import type { EditorView } from '@tiptap/pm/view'
 import type { Node as PmNode } from '@tiptap/pm/model'
 import type { CommentImage, CommentInfo } from '@genoffice/docx-engine'
 import { useI18n } from '../i18n/locale'
-import { absoluteDate, authorInitials, authorInk } from '../editor/comment-card'
+import { absoluteDate, authorInitials, authorInk, showCommentAnchors } from '../editor/comment-card'
+import { commentAnchors } from '../editor/comments'
+import { prepareSmoothDocumentScroll } from '../editor/paged-view-probe'
 import { revWhen } from '../editor/margin-annotations'
 import { commentImageFromFile } from '../review-actions'
 import { IconCheck, IconComment, IconPicture } from './icons'
@@ -32,17 +35,10 @@ function collectAnchorTexts(): Map<string, string> {
   return out
 }
 
-function jumpTo(id: string) {
-  const spans = document.querySelectorAll<HTMLElement>('.ProseMirror:not(.mp-page) .doc-comment')
-  const targets = [...spans].filter((s) => (s.dataset.commentIds ?? '').split(' ').includes(id))
-  if (targets.length === 0) return
-  targets[0].scrollIntoView({ behavior: 'smooth', block: 'center' })
-  for (const t of targets) {
-    t.classList.remove('doc-comment-flash')
-    // restart the CSS animation when jumping to the same comment twice
-    void t.offsetWidth
-    t.classList.add('doc-comment-flash')
-  }
+function jumpTo(view: EditorView, id: string, position: number | undefined) {
+  if (position !== undefined) prepareSmoothDocumentScroll(view, position)
+  const spans = view.dom.querySelectorAll<HTMLElement>('.doc-comment')
+  showCommentAnchors([...spans].filter((s) => (s.dataset.commentIds ?? '').split(' ').includes(id)))
 }
 
 /** Word's modern comment header: avatar, author, relative time; thread actions on the right */
@@ -82,6 +78,7 @@ function CommentHead({
 export const CommentsPanel = memo(function CommentsPanel({
   comments,
   docNode,
+  editorView,
   composing,
   onSubmitNew,
   onReply,
@@ -93,8 +90,8 @@ export const CommentsPanel = memo(function CommentsPanel({
   focus,
 }: {
   comments: CommentInfo[]
-  /** current PM doc, used only as the anchor-scan cache key (doc unchanged ⇒ anchors unchanged) */
   docNode: PmNode
+  editorView: EditorView
   /** show the new-comment composer (selection captured by the caller) */
   composing: boolean
   onSubmitNew: (text: string, image?: CommentImage) => void
@@ -125,6 +122,10 @@ export const CommentsPanel = memo(function CommentsPanel({
   const [showResolved, setShowResolved] = useState(false)
 
   const anchorTexts = useMemo(collectAnchorTexts, [docNode, comments])
+  const anchors = useMemo(
+    () => new Map(commentAnchors(docNode).map(({ id, from }) => [id, from])),
+    [docNode],
+  )
 
   const topLevel = comments.filter((c) => !c.parentId)
   const openThreads = topLevel.filter((c) => !c.done)
@@ -315,7 +316,7 @@ export const CommentsPanel = memo(function CommentsPanel({
     if (e.key !== 'Enter' && e.key !== ' ') return
     e.preventDefault()
     setActiveId(id)
-    jumpTo(id)
+    jumpTo(editorView, id, anchors.get(id))
   }
 
   const renderThread = (c: CommentInfo) => {
@@ -338,7 +339,7 @@ export const CommentsPanel = memo(function CommentsPanel({
               ? undefined
               : () => {
                   setActiveId(c.id)
-                  jumpTo(c.id)
+                  jumpTo(editorView, c.id, anchors.get(c.id))
                 }
           }
           onKeyDown={editing ? undefined : onCardKey(c.id)}
