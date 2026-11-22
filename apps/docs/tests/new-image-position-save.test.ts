@@ -7,7 +7,7 @@
  * imageRelH/imageRelV / imagePosH+imagePosV, so the reopened picture edits
  * like an original one.
  */
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'
 import { NodeSelection } from '@tiptap/pm/state'
 import type { Node as ProsemirrorNode } from '@tiptap/pm/model'
@@ -48,14 +48,23 @@ const picture = {
   label: 'Picture',
 }
 
-async function openBlank() {
-  const source = await buildBlankDocx()
-  const parsed = await parseDocx(source)
+const editors: Editor[] = []
+afterEach(() => editors.splice(0).forEach((editor) => editor.destroy()))
+
+function createEditor(parsed: Awaited<ReturnType<typeof parseDocx>>): Editor {
   const editor = new Editor({
     element: document.createElement('div'),
     extensions: editorExtensions,
     content: blocksToPmDoc(parsed.blocks) as never,
   })
+  editors.push(editor)
+  return editor
+}
+
+async function openBlank() {
+  const source = await buildBlankDocx()
+  const parsed = await parseDocx(source)
+  const editor = createEditor(parsed)
   return { editor, parsed }
 }
 
@@ -82,11 +91,7 @@ async function save(editor: Editor, parsed: Awaited<ReturnType<typeof parseDocx>
 
 async function reopen(zip: JSZip) {
   const parsed = await parseDocx(await zip.generateAsync({ type: 'uint8array' }))
-  const editor = new Editor({
-    element: document.createElement('div'),
-    extensions: editorExtensions,
-    content: blocksToPmDoc(parsed.blocks) as never,
-  })
+  const editor = createEditor(parsed)
   return { parsed, editor }
 }
 
@@ -140,7 +145,6 @@ describe('new image floating position on save', () => {
     expect(block?.imageOffsetYEmu).toBe(457200)
     // the reopened picture is an ordinary anchored original: later edits patch it
     expect(pmImage(reopened)?.attrs.docxIndex).not.toBeNull()
-    reopened.destroy()
   })
 
   it('keeps a Layout position preset of a newly inserted picture (margin align)', async () => {
@@ -248,11 +252,7 @@ describe('new image floating position on save', () => {
   it('keeps the position of a pasted copy of an original floating picture', async () => {
     const source = await buildDocx({ bodyXml: FLOATING_PIC_PARA, withImage: true })
     const parsed = await parseDocx(source)
-    const editor = new Editor({
-      element: document.createElement('div'),
-      extensions: editorExtensions,
-      content: blocksToPmDoc(parsed.blocks) as never,
-    })
+    const editor = createEditor(parsed)
     // a duplicate shares the source's docxIndex: the anchor is consumed by the
     // first occurrence, the copy rebuilds from its attrs via imageFromProtectedAttrs
     let node: ProsemirrorNode | undefined
