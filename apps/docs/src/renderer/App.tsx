@@ -445,7 +445,7 @@ import {
 } from './editor/active-editor'
 import { installSelectionBar } from './editor/selection-bar'
 import type { CompareEntry } from './editor/compare'
-import { collectHeadings } from './editor/headings'
+import { collectHeadings, headingLevelOf } from './editor/headings'
 import {
   applyTocPageDisplays,
   backfillTocPageDom,
@@ -4603,6 +4603,59 @@ export function App({
       }
       return blocksKeepSlicing(items, slices, factor) || reject('geometry')
     }
+    let hasTocFields = false
+    let tocRefreshComplete = false
+    const makeTocBookmarkPageLookup = (blocks: BlockBox[], cuts: PageCut[]) => {
+      let bookmarkBlocks: Map<number, BlockBox | null> | undefined
+      return (bookmark: string) => {
+        const index = sourceBookmarkIndices.get(bookmark)
+        if (index == null || isPhasedContentPending()) return undefined
+        if (!bookmarkBlocks) {
+          bookmarkBlocks = new Map()
+          for (const block of blocks)
+            if (block.docxIndex != null)
+              bookmarkBlocks.set(
+                block.docxIndex,
+                bookmarkBlocks.has(block.docxIndex) ? null : block,
+              )
+        }
+        const block = bookmarkBlocks.get(index)
+        return block ? tocPageDisplayForBookmarkBlock(block, cuts) : undefined
+      }
+    }
+    // A pristine open keeps the file's caches. An edit can refresh them even
+    // if the page cuts stay the same, and the refresh stays outside undo history.
+    const prepareTocRefresh = (
+      blocks: BlockBox[],
+      slices: PageSlice[],
+      cuts: PageCut[],
+      pageTextOfBookmark: ReturnType<typeof makeTocBookmarkPageLookup>,
+    ) => {
+      if (!editor || !hasTocFields || !dirtyRef.current || slices.length === 0) return
+      const before = editor.state.doc
+      const byEl = new Map(blocks.filter((b) => b.el).map((b) => [b.el as HTMLElement, b.top]))
+      const headings = collectHeadings(before, editor.storage.listNumbering?.styles)
+      const displays = headings.map((h) => {
+        const dom = editor.view.nodeDOM(h.pos) as HTMLElement | null
+        const top = dom ? byEl.get(dom) : undefined
+        return top === undefined
+          ? undefined
+          : cuts[Math.max(0, Math.min(pageOfY(slices, top), cuts.length - 1))]?.display
+      })
+      const tr = editor.state.tr
+      const changed = applyTocPageDisplays(before, tr, headings, displays, pageTextOfBookmark)
+      if (changed) tr.setMeta('addToHistory', false)
+      // Updating a field can rebuild its view. Apply after layout has finished
+      // with the measured DOM and only while it still describes this document.
+      return () => {
+        if (editor.state.doc !== before) return
+        tocRefreshComplete = true
+        if (changed) {
+          editor.view.dispatch(tr)
+          carryDocSeen(editor, before)
+        }
+      }
+    }
     const remeasure = (forceFull = false, synchronous = false) => {
       if (disposed) return
       timer = null
@@ -4702,10 +4755,24 @@ export function App({
             annotationFirstPageRef.current,
           )
         }
-        if (fast) {
+        if (fast && editor && edited) {
           fastPasses++
           const dbg = (window as unknown as Record<string, Record<string, unknown>>).__pageDebug
           if (dbg) dbg.fastPasses = fastPasses
+          const layout = pageLayoutRef.current
+          // Stable page cuts keep imported bookmark pages. Only the first
+          // dirty pass or a changed heading can affect the cached values here.
+          if (
+            layout &&
+            hasTocFields &&
+            (!tocRefreshComplete ||
+              [...edited].some((index) =>
+                headingLevelOf(editor.state.doc.child(index), editor.storage.listNumbering?.styles),
+              ))
+          ) {
+            const { blocks, slices, cuts } = layout
+            prepareTocRefresh(blocks, slices, cuts, makeTocBookmarkPageLookup(blocks, cuts))?.()
+          }
         }
         locate(true)
         // A width commit can start another typography pass during this layout.
@@ -4728,6 +4795,9 @@ export function App({
     const remeasurePass = (dirty: number | null, keepPublishedRange: boolean) => {
       const pm = pmEl()
       if (!pm) return
+      const tocLines = pm.querySelectorAll<HTMLElement>('.doc-toc-line')
+      hasTocFields = tocLines.length > 0
+      tocRefreshComplete = false
       const model = editor?.state.doc
       let measuredCount = model?.childCount ?? 0
       let measuredEndPos = model?.content.size ?? 0
@@ -5075,50 +5145,8 @@ export function App({
           prev?.first === first && prev.last === last ? prev : { first, last },
         )
       }
-      const tocPageTextAt = (top: number | undefined) =>
-        top === undefined
-          ? undefined
-          : cuts[Math.max(0, Math.min(pageOfY(slices, top), cuts.length - 1))]?.display
-      let bookmarkBlocks: Map<number, BlockBox | null> | undefined
-      const tocPageTextOf = (bookmark: string) => {
-        const index = sourceBookmarkIndices.get(bookmark)
-        if (index == null || isPhasedContentPending()) return undefined
-        if (!bookmarkBlocks) {
-          bookmarkBlocks = new Map()
-          for (const block of blocks)
-            if (block.docxIndex != null)
-              bookmarkBlocks.set(
-                block.docxIndex,
-                bookmarkBlocks.has(block.docxIndex) ? null : block,
-              )
-        }
-        const block = bookmarkBlocks.get(index)
-        return block ? tocPageDisplayForBookmarkBlock(block, cuts) : undefined
-      }
-      // A pristine open keeps the file's caches. A refresh on edit updates
-      // the model for save and remains outside the user's undo history.
-      let refreshToc: (() => void) | undefined
-      if (editor && dirtyRef.current && slices.length > 0) {
-        const byEl = new Map(blocks.filter((b) => b.el).map((b) => [b.el as HTMLElement, b.top]))
-        const headings = collectHeadings(editor.state.doc, editor.storage.listNumbering?.styles)
-        const displays = headings.map((h) => {
-          const dom = editor.view.nodeDOM(h.pos) as HTMLElement | null
-          return tocPageTextAt(dom ? byEl.get(dom) : undefined)
-        })
-        const tr = editor.state.tr
-        if (applyTocPageDisplays(editor.state.doc, tr, headings, displays, tocPageTextOf)) {
-          tr.setMeta('addToHistory', false)
-          const before = editor.state.doc
-          // The model transaction can rebuild node views. Keep the measured DOM
-          // stable through cut anchors and finish the layout before applying it.
-          refreshToc = () => {
-            if (editor.state.doc !== before) return
-            editor.view.dispatch(tr)
-            // A field refresh is not a user edit: keep the AI freshness baseline.
-            carryDocSeen(editor, before)
-          }
-        }
-      }
+      const tocPageTextOf = makeTocBookmarkPageLookup(blocks, cuts)
+      const refreshToc = prepareTocRefresh(blocks, slices, cuts, tocPageTextOf)
       // M4 always-on pagination in the canvas: render page gaps before page-leading blocks
       // (print view only; gaps don't count as content — measureBlocks subtracts them, so
       // slice results are gap-independent and refresh is idempotent)
@@ -5768,14 +5796,7 @@ export function App({
             )
           }
           // Empty caches can follow the measured page on pristine open.
-          backfillTocPageDom(
-            pm.querySelectorAll<HTMLElement>(
-              tocBookmarksByIndex.size ? '.doc-toc-line' : '.doc-toc-line[data-toc-anchor]',
-            ),
-            tocPageTextOf,
-            dirtyRef.current,
-            tocBookmarksByIndex,
-          )
+          backfillTocPageDom(tocLines, tocPageTextOf, dirtyRef.current, tocBookmarksByIndex)
           previousHeaderFooterContent = headerFooterContent
         }
         tGapsBuild = performance.now() - tGaps0

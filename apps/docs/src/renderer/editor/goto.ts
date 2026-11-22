@@ -139,8 +139,11 @@ export function pagePositions(view: EditorView, layout: PageLayout): Array<numbe
     const anchored = gaps.get(i)
     if (slice.end === slice.start && i < slices.length - 1) positions.push(null)
     else if (anchored !== undefined) positions.push(anchored)
-    else if (lead?.kind === 'tail') positions.push(view.state.doc.content.size)
-    else if (lead?.kind === 'block') positions.push(blockPos(view, blocks[lead.block]))
+    else if (lead?.kind === 'tail') {
+      // The first cut can precede the first block when it has leading space.
+      // Only later tail cuts navigate to the document end.
+      positions.push(i === 0 ? 0 : view.state.doc.content.size)
+    } else if (lead?.kind === 'block') positions.push(blockPos(view, blocks[lead.block]))
     else if (lead && i > 0) positions.push(null)
     else
       positions.push(

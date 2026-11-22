@@ -43,7 +43,7 @@ test('CJK fragment reads preserve published shrink, glyph and caret geometry', a
           editor.storage.cjkPunctShrink.hangPunct = !scenario.compress;
           editor.storage.cjkPunctShrink.legacyLayout = true;
           editor.commands.setTextSelection({ from: 5, to: 11 });
-          editor.view.dom.focus({ preventScroll: true });
+          editor.view.focus();
           const css = getComputedStyle(root.querySelector('p'));
           const fontSettings = [css.fontKerning, css.fontFeatureSettings, css.fontVariantEastAsian,
             css.writingMode, css.direction, css.unicodeBidi, css.letterSpacing];

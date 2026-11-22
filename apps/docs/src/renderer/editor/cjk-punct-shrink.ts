@@ -434,7 +434,9 @@ function textFragments(range: Range, dom: Text): TextFragment[] | null {
 
   const result: TextFragment[] = []
   let start = 0
-  let hint = Math.floor(dom.length / rects.length)
+  // A short fragment next to punctuation does not predict the next line.
+  // Keep the whole-run average as the starting point for each local search.
+  const hint = Math.floor(dom.length / rects.length)
   let nextFirst: DOMRect | undefined
   for (let i = 0; i < rects.length; i++) {
     const rect = rects[i]
@@ -457,7 +459,6 @@ function textFragments(range: Range, dom: Text): TextFragment[] | null {
       return null
     result.push({ end, rect })
     nextFirst = edge?.[1]
-    hint = end - start
     start = end
   }
   return result
