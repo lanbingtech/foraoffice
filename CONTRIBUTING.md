@@ -177,6 +177,9 @@ CI supplies the PR or push base automatically and checks only files changed from
 that base. This keeps the formatter gate useful without creating a repository-wide
 formatting diff.
 
+For Docs interaction latency work, use the [Windows performance benchmark](docs/docs-performance-benchmark.md)
+to record input, correct desktop presentation and layout fidelity.
+
 ## Building installers
 
 Run these from the repository root — they regenerate the third-party
