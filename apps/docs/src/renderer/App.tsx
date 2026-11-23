@@ -8524,7 +8524,8 @@ export function App({
         layout &&
         !activity.active &&
         !activity.pending &&
-        !activity.contentPending
+        !activity.contentPending &&
+        !hasPendingParagraphMeasurements(view)
       )
         PagedViewProbe.start(view, pane, layout, pagePositions(view, layout), buffer)
     }

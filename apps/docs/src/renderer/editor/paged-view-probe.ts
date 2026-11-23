@@ -2,7 +2,9 @@ import { NodeSelection, TextSelection, type EditorState, type Selection } from '
 import type { DirectEditorProps, EditorView } from '@tiptap/pm/view'
 import type { PageLayout } from './goto'
 import { hasRevisionAnchors } from './margin-annotations'
+import { textOnly } from './pagination-fast-path'
 import { collectRevisions } from './revisions'
+import { hasCoupledWrapGeometry } from './settled-measure'
 
 interface Box {
   element: Element
@@ -66,6 +68,22 @@ export function pagedViewProbe(view: EditorView): PagedViewProbe | undefined {
   return activeViews.get(view)
 }
 
+export interface ParagraphEditMeasurement {
+  node: EditorState['doc']
+  element: HTMLElement
+  from: number
+  to: number
+}
+
+/** A document-wide reader needs the full view unless this update owns a single
+ * independent paragraph. Offscreen nodes have no usable DOM geometry. */
+export function paragraphEditMeasurement(view: EditorView): ParagraphEditMeasurement | undefined {
+  const probe = pagedViewProbe(view)
+  const paragraph = probe?.measurementScope()
+  if (!paragraph) probe?.restore()
+  return paragraph
+}
+
 export function revealDocumentRange(view: EditorView, from: number, to = from): void {
   activeViews.get(view)?.reveal(from, to)
 }
@@ -77,6 +95,7 @@ export function prepareSmoothDocumentScroll(view: EditorView, from: number): voi
 /** Local experiment for the settled, single-surface EditorView. */
 export class PagedViewProbe {
   readonly hadRevisions: boolean
+  private readonly coupledWrap: boolean
   private readonly root: HTMLElement
   private readonly internals: ViewInternals
   private readonly rootDesc: ViewInternals['docView']
@@ -137,6 +156,7 @@ export class PagedViewProbe {
   ) {
     this.root = view.dom
     this.hadRevisions = hasRevisionAnchors(this.root) || collectRevisions(view.state.doc).length > 0
+    this.coupledWrap = hasCoupledWrapGeometry(view)
     this.internals = view as unknown as ViewInternals
     this.rootDesc = this.internals.docView
     this.originalStateUpdate = this.internals.updateStateInner
@@ -247,6 +267,15 @@ export class PagedViewProbe {
     return this.geometryPending
   }
 
+  measurementScope(): ParagraphEditMeasurement | undefined {
+    if (!this.updatingParagraph || this.coupledWrap) return
+    const element = this.selectedParagraph()
+    if (!(element instanceof HTMLElement)) return
+    const { $from } = this.view.state.selection
+    const from = $from.before(1)
+    return { node: $from.parent, element, from, to: from + $from.parent.nodeSize }
+  }
+
   keepGeometry(): void {
     this.geometryPending = false
   }
@@ -343,6 +372,7 @@ export class PagedViewProbe {
   private updatesSelectedParagraph(state: EditorState): boolean {
     if (
       this.view.composing ||
+      this.coupledWrap ||
       !this.selectedParagraph() ||
       !(state.selection instanceof TextSelection) ||
       state.plugins !== this.view.state.plugins ||
@@ -365,20 +395,24 @@ export class PagedViewProbe {
       end.a <= before.end() &&
       end.b <= after.end() &&
       state.selection.from >= after.start() &&
-      state.selection.to <= after.end()
+      state.selection.to <= after.end() &&
+      textOnly(this.model.slice(start, Math.max(start, end.a)).content) &&
+      textOnly(state.doc.slice(start, Math.max(start, end.b)).content)
     )
   }
 
   private updateState = (state: EditorState, props: DirectEditorProps): void => {
-    if (state.doc !== this.model && this.updatesSelectedParagraph(state)) {
+    if (
+      !this.updatingParagraph &&
+      state.doc !== this.model &&
+      this.updatesSelectedParagraph(state)
+    ) {
+      this.model = state.doc
+      this.positions = undefined
+      this.geometryPending = true
       this.updatingParagraph = true
       try {
         this.originalStateUpdate.call(this.view, state, props)
-        if (this.range) {
-          this.positions = undefined
-          this.model = state.doc
-          this.geometryPending = true
-        }
       } finally {
         this.updatingParagraph = false
       }

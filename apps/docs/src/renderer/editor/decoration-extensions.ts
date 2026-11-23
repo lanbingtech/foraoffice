@@ -27,6 +27,7 @@ import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-
 import { DOC_CSS_COMMITTED_EVENT } from './cjk-punct-shrink'
 import { WRAP_WIDTHS_COMMITTED_EVENT, type WrapWidthChanges } from './column-layout'
 import { hasCoupledWrapGeometry } from './settled-measure'
+import { paragraphEditMeasurement } from './paged-view-probe'
 import { TopLevelPositions } from './top-level-pos'
 import { appendsAtEnd, touchedTopLevelBlocks } from './touched-blocks'
 import { blockDecorationPlugin, blockLocalDecorations } from './local-edit'
@@ -682,6 +683,8 @@ class TabLayoutView {
       return
     }
 
+    const edit = paragraphEditMeasurement(view)
+    blocks ??= edit && new Set([edit.element])
     const roots = blocks && [...blocks].filter((el) => el.parentElement === view.dom)
     this.layoutTocLines(roots)
 
@@ -756,7 +759,7 @@ class TabLayoutView {
     }
     if (this.frozen) return
 
-    const signature = JSON.stringify([paraRanges, tabs])
+    const signature = JSON.stringify([Boolean(roots), paraRanges, tabs])
     const recheck = () => {
       if (roots && retry) this.scheduleRetry(blocks)
       else this.retries = 0
@@ -789,7 +792,7 @@ class TabLayoutView {
       decos.push(Decoration.inline(t.pos, t.pos + 1, attrs, { ...attrs, wrap: t.wrap }))
     }
     const previous = roots
-      ? tabDecorationsInRanges(old, paraRanges)
+      ? tabDecorationsInRanges(old, edit && !retry ? [edit] : paraRanges)
       : old.find().sort((a, b) => a.from - b.from)
     decos.sort((a, b) => a.from - b.from)
     if (

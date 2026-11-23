@@ -12,21 +12,24 @@ type ProbeWindow = Window & {
   __docsLayoutActivity: { snapshot(): { active: number; pending: number; contentPending: boolean } }
 }
 
-test('a distant viewport retains its size, page, native caret and editable destination', async ({}, info) => {
-  const folder = info.outputPath('paged-view')
+test('a distant viewport retains its size, page, native caret and editable destination', async () => {
+  const folder = test.info().outputPath('paged-view')
   await mkdir(folder, { recursive: true })
   const fixture = join(folder, 'pages.docx')
   const commentFixture = join(folder, 'comments.docx')
   const primer = join(folder, 'primer.docx')
   const paragraph = (label: string, pageBreak = false) =>
     `<w:p>${pageBreak ? '<w:pPr><w:pageBreakBefore/></w:pPr>' : ''}<w:r><w:t>${label}</w:t></w:r></w:p>`
+  const tabParagraph = (label: string) =>
+    `<w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="6000"/></w:tabs></w:pPr><w:r><w:t>${label}</w:t><w:tab/><w:t>99</w:t></w:r></w:p>`
   await writeFile(primer, await buildDocx({ bodyXml: paragraph('Ready to edit') }))
-  const bodyXml = Array.from(
-    { length: 160 },
-    (_, index) =>
-      paragraph(`Page ${index + 1} first line`, index > 0) +
-      paragraph(`Page ${index + 1} second line`),
-  ).join('')
+  const bodyXml = Array.from({ length: 160 }, (_, index) => {
+    const page = index + 1
+    const tabs = page === 20 || page === 150 ? tabParagraph(`Tab on page ${page}`) : ''
+    return (
+      paragraph(`Page ${page} first line`, index > 0) + paragraph(`Page ${page} second line`) + tabs
+    )
+  }).join('')
   await writeFile(fixture, await buildDocx({ bodyXml }))
   const commentBody = bodyXml.replace(
     '<w:r><w:t>Page 20 first line</w:t></w:r>',
@@ -86,12 +89,12 @@ test('a distant viewport retains its size, page, native caret and editable desti
         pane.scrollTop + target.getBoundingClientRect().top - pane.getBoundingClientRect().top - 20,
       )
     })
-    const read = (top: number) =>
+    const read = (top?: number) =>
       page.evaluate(async (position) => {
         const win = window as unknown as ProbeWindow
         const { view } = win.__aidocs.editor
         const pane = view.dom.closest('.editor-scroll')!
-        pane.scrollTop = position
+        if (position !== undefined) pane.scrollTop = position
         await new Promise<void>((done) =>
           requestAnimationFrame(() => requestAnimationFrame(() => done())),
         )
@@ -198,6 +201,7 @@ test('a distant viewport retains its size, page, native caret and editable desti
 
     await page.keyboard.press('Control+z')
     await expect.poll(documentJSON).toEqual(edit.before)
+    expect((await read()).scroll).toEqual(beforeEdit.scroll)
 
     await test.step('a wrapping edit restores the full layout before a distant remount', async () => {
       await page.waitForFunction(() => {
@@ -274,6 +278,42 @@ test('a distant viewport retains its size, page, native caret and editable desti
       } finally {
         await cdp.detach()
       }
+      await page.keyboard.press('Control+z')
+      await expect.poll(documentJSON).toEqual(edit.before)
+    })
+
+    await test.step('a local tab adjustment preserves the measured offscreen tab', async () => {
+      await page.waitForFunction(() => {
+        const activity = (window as unknown as ProbeWindow).__docsLayoutActivity.snapshot()
+        return !activity.active && !activity.pending
+      })
+      const at = await page.evaluate(() => {
+        const { editor } = (window as unknown as ProbeWindow).__aidocs
+        let position = 0
+        editor.state.doc.forEach((node, offset) => {
+          if (node.textContent.startsWith('Tab on page 20')) position = offset + node.nodeSize - 2
+        })
+        editor.commands.setTextSelection(position)
+        editor.view.focus()
+        return position
+      })
+      const local = page.locator('.doc-page.ProseMirror p').filter({ hasText: 'Tab on page 20' })
+      const distant = page.locator('.doc-page.ProseMirror p').filter({ hasText: 'Tab on page 150' })
+      const localTab = await local.locator('.doc-tab').getAttribute('style')
+      const distantTab = await distant.locator('.doc-tab').getAttribute('style')
+      await page.evaluate(() =>
+        window.dispatchEvent(new CustomEvent('docs:paged-view-probe', { detail: true })),
+      )
+      await expect(distant).toHaveCount(0)
+      await page.keyboard.insertText('WW')
+      await expect(local).toContainText('9WW9')
+      await expect(local.locator('.doc-tab')).not.toHaveAttribute('style', localTab!)
+      expect((await read()).attached).toBeLessThan(original / 2)
+      await page.evaluate(() =>
+        window.dispatchEvent(new CustomEvent('docs:paged-view-probe', { detail: false })),
+      )
+      await expect(distant.locator('.doc-tab')).toHaveAttribute('style', distantTab!)
+      expect((await read()).native).toBe(at + 2)
       await page.keyboard.press('Control+z')
       await expect.poll(documentJSON).toEqual(edit.before)
     })
