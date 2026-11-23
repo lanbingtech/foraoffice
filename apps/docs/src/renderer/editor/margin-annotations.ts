@@ -754,6 +754,10 @@ export interface AnchorBlock {
   originalXml?: string | null
 }
 
+export function hasRevisionAnchors(block: HTMLElement): boolean {
+  return block.matches(REV_SELECTOR) || block.querySelector(REV_SELECTOR) !== null
+}
+
 export function syncMarginAnnotations(
   wrap: HTMLElement,
   pm: HTMLElement,

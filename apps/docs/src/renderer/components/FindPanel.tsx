@@ -475,12 +475,11 @@ export function FindPanel({
     let current: () => number
     if (target === 'page' || target === 'section') {
       if (!lay) return setGotoMiss(true)
-      positions =
-        target === 'page'
-          ? probe?.layout === lay
-            ? probe.positions
-            : pagePositions(view, lay)
-          : sectionPositions(view, lay)
+      if (target === 'page') {
+        const cached = probe?.pagePositions(lay)
+        if (!cached) probe?.restore()
+        positions = cached ?? pagePositions(view, lay)
+      } else positions = sectionPositions(view, lay)
       current = () => {
         if (target === 'page' && lay.pageAtScreenY) {
           const rect = view.coordsAtPos(caret, 1)

@@ -1,6 +1,8 @@
-import { NodeSelection, type EditorState, type Selection } from '@tiptap/pm/state'
+import { NodeSelection, TextSelection, type EditorState, type Selection } from '@tiptap/pm/state'
 import type { DirectEditorProps, EditorView } from '@tiptap/pm/view'
 import type { PageLayout } from './goto'
+import { hasRevisionAnchors } from './margin-annotations'
+import { collectRevisions } from './revisions'
 
 interface Box {
   element: Element
@@ -25,6 +27,7 @@ interface ViewInternals {
 
 const activeViews = new WeakMap<EditorView, PagedViewProbe>()
 const extentStyles = ['box-sizing', 'block-size', 'min-block-size'] as const
+const restoreEvents = ['beforeinput', 'compositionstart', 'cut', 'paste', 'dragstart', 'drop']
 
 function firstMatching<T>(items: readonly T[], matches: (item: T) => boolean): number {
   let low = 0
@@ -73,12 +76,13 @@ export function prepareSmoothDocumentScroll(view: EditorView, from: number): voi
 
 /** Local experiment for the settled, single-surface EditorView. */
 export class PagedViewProbe {
+  readonly hadRevisions: boolean
   private readonly root: HTMLElement
   private readonly internals: ViewInternals
   private readonly rootDesc: ViewInternals['docView']
   private readonly originalStateUpdate: ViewInternals['updateStateInner']
   private readonly originalRootUpdate: ViewInternals['docView']['update']
-  private readonly model: EditorState['doc']
+  private model: EditorState['doc']
   private readonly boxes: Box[]
   private readonly originals: Element[]
   private readonly byModelIndex: Array<number | undefined> = []
@@ -94,6 +98,8 @@ export class PagedViewProbe {
   private readonly scale: number
   private range?: Range
   private smoothTarget?: { range: Range; offset: number }
+  private updatingParagraph = false
+  private geometryPending = false
 
   static start(
     view: EditorView,
@@ -112,8 +118,7 @@ export class PagedViewProbe {
     activeViews.set(view, probe)
     probe.internals.updateStateInner = probe.updateState
     probe.rootDesc.update = probe.updateRoot
-    for (const event of ['beforeinput', 'compositionstart', 'cut', 'paste', 'dragstart', 'drop'])
-      view.dom.addEventListener(event, probe.finish, true)
+    for (const event of restoreEvents) view.dom.addEventListener(event, probe.finish, true)
     view.dom.addEventListener('keydown', probe.keyDown, true)
     pane.addEventListener('scrollend', probe.finishSmoothScroll)
     pane.ownerDocument.defaultView?.addEventListener('resize', probe.finish)
@@ -126,11 +131,12 @@ export class PagedViewProbe {
     private readonly view: EditorView,
     private readonly pane: HTMLElement,
     readonly layout: PageLayout,
-    readonly positions: Array<number | null>,
+    private positions: Array<number | null> | undefined,
     rootStyle: CSSStyleDeclaration,
     private readonly scrollBuffer: number,
   ) {
     this.root = view.dom
+    this.hadRevisions = hasRevisionAnchors(this.root) || collectRevisions(view.state.doc).length > 0
     this.internals = view as unknown as ViewInternals
     this.rootDesc = this.internals.docView
     this.originalStateUpdate = this.internals.updateStateInner
@@ -237,26 +243,61 @@ export class PagedViewProbe {
     }
   }
 
+  get hasPendingGeometry(): boolean {
+    return this.geometryPending
+  }
+
+  keepGeometry(): void {
+    this.geometryPending = false
+  }
+
+  pagePositions(layout: PageLayout): Array<number | null> | undefined {
+    return layout === this.layout ? this.positions : undefined
+  }
+
   restore(observerRunning = true): void {
+    this.leaveWindow(observerRunning, true)
+  }
+
+  private leaveWindow(observerRunning: boolean, reconnect: boolean): void {
     if (!this.range) return
     this.range = undefined
     activeViews.delete(this.view)
     this.internals.updateStateInner = this.originalStateUpdate
     this.rootDesc.update = this.originalRootUpdate
-    for (const event of ['beforeinput', 'compositionstart', 'cut', 'paste', 'dragstart', 'drop'])
-      this.root.removeEventListener(event, this.finish, true)
+    for (const event of restoreEvents) this.root.removeEventListener(event, this.finish, true)
     this.root.removeEventListener('keydown', this.keyDown, true)
     this.pane.removeEventListener('scrollend', this.finishSmoothScroll)
     this.pane.ownerDocument.defaultView?.removeEventListener('resize', this.finish)
     this.editDOM(() => {
-      this.reconcile(this.originals)
+      if (reconnect) this.reconcile(this.originals)
       for (const [name, value, priority] of this.originalStyles)
         this.root.style.setProperty(name, value, priority)
       this.pane.style.overflowAnchor = this.overflowAnchor
     }, observerRunning)
   }
 
-  private finish = (): void => this.restore()
+  private finish = (event: Event): void => {
+    if (
+      event instanceof InputEvent &&
+      event.type === 'beforeinput' &&
+      event.inputType === 'insertText' &&
+      !event.isComposing &&
+      this.view.editable &&
+      this.view.hasFocus()
+    ) {
+      const block = this.selectedParagraph()
+      const targets = event.getTargetRanges()
+      if (
+        block &&
+        targets.length === 1 &&
+        block.contains(targets[0]!.startContainer) &&
+        block.contains(targets[0]!.endContainer)
+      )
+        return
+    }
+    this.restore()
+  }
 
   private finishSmoothScroll = (): void => {
     if (!this.smoothTarget || !this.range) return
@@ -276,10 +317,73 @@ export class PagedViewProbe {
     )
       return
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'g') return
+    if (
+      event.key.length === 1 &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      !event.isComposing &&
+      this.selectedParagraph()
+    )
+      return
     this.restore()
   }
 
+  private selectedParagraph(): Element | undefined {
+    const { selection } = this.view.state
+    if (!(selection instanceof TextSelection)) return
+    const { $from, $to } = selection
+    if ($from.depth !== 1 || $from.parent.type.name !== 'docParagraph' || !$from.sameParent($to))
+      return
+    const index = this.byModelIndex[$from.index(0)]
+    const element = index === undefined ? undefined : this.boxes[index]?.element
+    return element?.parentNode === this.root ? element : undefined
+  }
+
+  private updatesSelectedParagraph(state: EditorState): boolean {
+    if (
+      this.view.composing ||
+      !this.selectedParagraph() ||
+      !(state.selection instanceof TextSelection) ||
+      state.plugins !== this.view.state.plugins ||
+      state.doc.childCount !== this.model.childCount ||
+      !state.doc.sameMarkup(this.model)
+    )
+      return false
+    const start = this.model.content.findDiffStart(state.doc.content)
+    const end = this.model.content.findDiffEnd(state.doc.content)
+    if (start === null || !end) return false
+    const before = this.model.resolve(start)
+    const after = state.doc.resolve(start)
+    const index = this.view.state.selection.$from.index(0)
+    return (
+      before.depth === 1 &&
+      after.depth === 1 &&
+      before.index(0) === index &&
+      after.index(0) === index &&
+      after.parent.sameMarkup(before.parent) &&
+      end.a <= before.end() &&
+      end.b <= after.end() &&
+      state.selection.from >= after.start() &&
+      state.selection.to <= after.end()
+    )
+  }
+
   private updateState = (state: EditorState, props: DirectEditorProps): void => {
+    if (state.doc !== this.model && this.updatesSelectedParagraph(state)) {
+      this.updatingParagraph = true
+      try {
+        this.originalStateUpdate.call(this.view, state, props)
+        if (this.range) {
+          this.positions = undefined
+          this.model = state.doc
+          this.geometryPending = true
+        }
+      } finally {
+        this.updatingParagraph = false
+      }
+      return
+    }
     if (state.doc !== this.model || state.plugins !== this.view.state.plugins) {
       this.restore()
     } else if (!state.selection.eq(this.view.state.selection)) {
@@ -291,8 +395,16 @@ export class PagedViewProbe {
 
   private updateRoot = (...args: unknown[]): boolean => {
     // Upstream has suspended its observer before mutating the view tree.
-    this.restore(false)
-    return this.originalRootUpdate.apply(this.rootDesc, args)
+    if (!this.updatingParagraph) {
+      this.restore(false)
+      return this.originalRootUpdate.apply(this.rootDesc, args)
+    }
+    const updated = this.originalRootUpdate.apply(this.rootDesc, args)
+    if (!updated) this.restore(false)
+    // A descriptor change may make ProseMirror reconcile the whole root.
+    // Its new children then own the DOM. Discard our snapshot without replaying it.
+    else if (this.gaps[0]!.parentNode !== this.root) this.leaveWindow(false, false)
+    return updated
   }
 
   private indexAt(pos: number): number | undefined {
@@ -327,6 +439,10 @@ export class PagedViewProbe {
   }
 
   private present(next: Range, pin: Range, focus: number): HTMLElement | undefined {
+    if (this.geometryPending) {
+      this.restore()
+      return
+    }
     const target = this.smoothTarget
     const sorted = target ? [next, pin, target.range] : [next, pin]
     sorted.sort((a, b) => a.start - b.start)

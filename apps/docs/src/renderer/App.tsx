@@ -317,6 +317,7 @@ import { formattingMarksPluginKey, sectionBreakMap } from './editor/formatting-m
 import {
   COMMENT_AREA_W,
   clearMarginAnnotations,
+  hasRevisionAnchors,
   syncMarginAnnotations,
   type MarginHandlers,
 } from './editor/margin-annotations'
@@ -4577,7 +4578,7 @@ export function App({
     }
     // a keystroke that leaves its paragraph the same height moves no page
     // boundary: keep the previous slicing instead of re-measuring the document
-    const tryFastPass = (edited: Set<number>): boolean => {
+    const tryFastPass = (edited: Set<number>, windowed = false): boolean => {
       const reject = (why: string) => {
         fastReject = why
         return false
@@ -4596,6 +4597,15 @@ export function App({
         const el = editor.view.nodeDOM(pos) as HTMLElement | null
         const prev = el ? lastBlocks.find((b) => b.el === el) : undefined
         if (!el || !prev) return reject('block')
+        if (windowed) {
+          const node = pmDoc.child(idx)
+          if (
+            node.type.name !== 'docParagraph' ||
+            headingLevelOf(node, editor.storage.listNumbering?.styles) ||
+            hasRevisionAnchors(el)
+          )
+            return reject('windowed-anchors')
+        }
         if (
           el.classList.contains('doc-para-join-head') ||
           el.classList.contains('doc-para-join-tail')
@@ -4698,11 +4708,36 @@ export function App({
         return
       }
       laidOutBeforeParagraphsSettled = paragraphsPending
-      if (editor) pagedViewProbe(editor.view)?.restore()
+      const probe = editor && pagedViewProbe(editor.view)
       measuredTypography = editor ? typographyOf(editor.state) : undefined
       activity.update({ pending: false, active: true })
       lastPassAt = performance.now()
-      const stylesChanged = prepareDocStylesRef.current()
+      const zoomEl = scroller.querySelector<HTMLElement>('.doc-zoom')
+      // Read the applied zoom: a deferred pass can outlive its closure's value.
+      const liveZoom = canvasZoomOf(zoomEl, zoom / 100)
+      let stylesChanged = false
+      let windowedFast = false
+      if (
+        probe?.hasPendingGeometry &&
+        fastEdits?.size === 1 &&
+        !forceFull &&
+        !synchronous &&
+        !paragraphsPending &&
+        liveZoom === 1 &&
+        factor === 1 &&
+        !probe.hadRevisions &&
+        comments.length === 0 &&
+        (!hasTocFields || tocRefreshComplete) &&
+        pageLookup?.fromCuts(0) != null
+      ) {
+        stylesChanged = prepareDocStylesRef.current()
+        windowedFast = !stylesChanged && tryFastPass(fastEdits, true)
+        if (windowedFast) probe.keepGeometry()
+      }
+      if (!windowedFast) {
+        probe?.restore()
+        stylesChanged = prepareDocStylesRef.current() || stylesChanged
+      }
       const full = stylesChanged || forceFull
       const keepPublishedRange = !measureMountedTail && !full && !synchronous
       measureMountedTail = false
@@ -4711,11 +4746,6 @@ export function App({
       const dirty = full ? null : dirtyFrom
       dirtyFrom = Infinity
       try {
-        const zoomEl = scroller.querySelector<HTMLElement>('.doc-zoom')
-        // the canvas zoom as applied, not this closure's: a pass reaching the
-        // DOM through a late async callback must never read a zoomed canvas at
-        // factor 1 (split-row fills then land in zoomed px and rows overlap)
-        const liveZoom = canvasZoomOf(zoomEl, zoom / 100)
         const swapZoom = zoomEl !== null && Math.abs(liveZoom - 1) > 0.0001
         const scrollTop = scroller.scrollTop
         const scrollLeft = scroller.scrollLeft
@@ -4725,7 +4755,7 @@ export function App({
         }
         let fast = false
         try {
-          fast = Boolean(edited && edited.size > 0 && tryFastPass(edited))
+          fast = windowedFast || Boolean(edited && edited.size > 0 && tryFastPass(edited))
           if (!fast) {
             if (!edited) fastReject = 'trigger'
             else if (edited.size === 0) fastReject = 'none'
@@ -4745,7 +4775,9 @@ export function App({
         // Measure screen anchors and page capacity only in that final display
         // state, including fast passes that keep the existing pagination.
         const pm = pmEl()
-        if (pm) {
+        // A windowed fast pass retains the cuts and leaves all margin anchors
+        // in place. The full annotation scan requires the offscreen DOM.
+        if (pm && !windowedFast) {
           syncMarginAnnotations(
             (pm.closest('.page-wrap') as HTMLElement) ?? pm,
             pm,

@@ -6,6 +6,7 @@ import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
 
 type ProbeWindow = Window & {
   __commentClickMounts?: boolean[]
+  __editScroll?: Promise<{ atEdit: number; atScroll: number; stillPending: boolean }>
   __aidocs: { editor: Editor; openPath(path: string): Promise<unknown>; save(): Promise<unknown> }
   __pageDebug: { pageCutSig: string; slices: unknown[] }
   __docsLayoutActivity: { snapshot(): { active: number; pending: number; contentPending: boolean } }
@@ -163,11 +164,120 @@ test('a distant viewport retains its size, page, native caret and editable desti
     expect(await targetMounted()).toBe(true)
     expect(await page.locator('.doc-page.ProseMirror > *').count()).toBeLessThan(original / 2)
     await page.locator('.find-panel .find-close').click()
-    await page.evaluate(() => (window as unknown as ProbeWindow).__aidocs.editor.view.focus())
-    await page.keyboard.insertText('edited ')
-    await expect(page.locator('.ProseMirror').first()).toContainText('edited Page 20 first line')
+    const edit = await page.evaluate(() => {
+      const { editor } = (window as unknown as ProbeWindow).__aidocs
+      let at = 0
+      editor.state.doc.forEach((node, offset) => {
+        if (node.textContent === 'Page 20 second line') at = offset + 6
+      })
+      editor.commands.setTextSelection(at)
+      editor.view.focus()
+      return {
+        at,
+        before: editor.state.doc.toJSON(),
+        expected: editor.state.tr.insertText('XYZ', at).doc.toJSON(),
+        top: editor.view.dom.closest('.editor-scroll')!.scrollTop,
+      }
+    })
+    const beforeEdit = await read(edit.top)
+    await page.keyboard.type('XYZ')
+    await expect(page.locator('.ProseMirror').first()).toContainText('Page XYZ20 second line')
+    await page.waitForFunction(() => {
+      const activity = (window as unknown as ProbeWindow).__docsLayoutActivity.snapshot()
+      return !activity.active && !activity.pending && !activity.contentPending
+    })
+    const afterEdit = await read(edit.top)
+    expect(afterEdit.attached).toBeLessThan(original / 2)
+    expect(afterEdit.cuts).toBe(beforeEdit.cuts)
+    expect(afterEdit.scroll).toEqual(beforeEdit.scroll)
+    expect(afterEdit.model).toEqual([beforeEdit.model[0], edit.at + 3, edit.at + 3])
+    expect(afterEdit.native).toBe(edit.at + 3)
+    const documentJSON = () =>
+      page.evaluate(() => (window as unknown as ProbeWindow).__aidocs.editor.state.doc.toJSON())
+    expect(await documentJSON()).toEqual(edit.expected)
+
     await page.keyboard.press('Control+z')
-    await expect(page.locator('.ProseMirror').first()).not.toContainText('edited ')
+    await expect.poll(documentJSON).toEqual(edit.before)
+
+    await test.step('a wrapping edit restores the full layout before a distant remount', async () => {
+      await page.waitForFunction(() => {
+        const activity = (window as unknown as ProbeWindow).__docsLayoutActivity.snapshot()
+        return !activity.active && !activity.pending
+      })
+      const text = ' wrapping'.repeat(50)
+      const expectedWrap = await page.evaluate(
+        ({ at, top, destination, text }) => {
+          const win = window as unknown as ProbeWindow
+          const { editor } = win.__aidocs
+          const pane = editor.view.dom.closest('.editor-scroll')!
+          pane.scrollTop = top
+          editor.commands.setTextSelection(at)
+          editor.view.focus()
+          window.dispatchEvent(new CustomEvent('docs:paged-view-probe', { detail: true }))
+          win.__editScroll = new Promise((done) => {
+            const onEdit = () => {
+              editor.off('update', onEdit)
+              const atEdit = editor.view.dom.childElementCount
+              pane.scrollTop = destination
+              requestAnimationFrame(() =>
+                requestAnimationFrame(() => {
+                  done({
+                    atEdit,
+                    atScroll: editor.view.dom.childElementCount,
+                    stillPending: win.__docsLayoutActivity.snapshot().pending !== 0,
+                  })
+                }),
+              )
+            }
+            editor.on('update', onEdit)
+          })
+          return editor.state.tr.insertText(text, at).doc.toJSON()
+        },
+        { at: edit.at, top: edit.top, destination, text },
+      )
+      await page.keyboard.insertText(text)
+      const scroll = await page.evaluate(() => (window as unknown as ProbeWindow).__editScroll!)
+      expect(scroll.atEdit).toBeLessThan(original / 2)
+      expect(scroll.stillPending).toBe(true)
+      expect(scroll.atScroll).toBe(original)
+      await expect(page.getByText('Page 117 first line', { exact: true }).first()).toBeInViewport()
+      expect(await documentJSON()).toEqual(expectedWrap)
+      await page.keyboard.press('Control+z')
+      await expect.poll(documentJSON).toEqual(edit.before)
+    })
+
+    await test.step('composition retains the full native editing path', async () => {
+      await page.waitForFunction(() => {
+        const activity = (window as unknown as ProbeWindow).__docsLayoutActivity.snapshot()
+        return !activity.active && !activity.pending
+      })
+      const text = '测试'
+      const expected = await page.evaluate(
+        ({ at, top, text }) => {
+          const { editor } = (window as unknown as ProbeWindow).__aidocs
+          editor.view.dom.closest('.editor-scroll')!.scrollTop = top
+          editor.commands.setTextSelection(at)
+          editor.view.focus()
+          window.dispatchEvent(new CustomEvent('docs:paged-view-probe', { detail: true }))
+          return editor.state.tr.insertText(text, at).doc.toJSON()
+        },
+        { at: edit.at, top: edit.top, text },
+      )
+      const root = page.locator('.doc-page.ProseMirror > *')
+      expect(await root.count()).toBeLessThan(original / 2)
+      const cdp = await page.context().newCDPSession(page)
+      try {
+        await cdp.send('Input.imeSetComposition', { text, selectionStart: 2, selectionEnd: 2 })
+        await expect(root).toHaveCount(original)
+        await cdp.send('Input.insertText', { text })
+        await expect.poll(documentJSON).toEqual(expected)
+      } finally {
+        await cdp.detach()
+      }
+      await page.keyboard.press('Control+z')
+      await expect.poll(documentJSON).toEqual(edit.before)
+    })
+
     await page.keyboard.press('Control+a')
     await expect
       .poll(() =>
