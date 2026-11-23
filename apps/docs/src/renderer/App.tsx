@@ -317,6 +317,7 @@ import { formattingMarksPluginKey, sectionBreakMap } from './editor/formatting-m
 import {
   COMMENT_AREA_W,
   clearMarginAnnotations,
+  hasRevisionAnchors,
   syncMarginAnnotations,
   type MarginHandlers,
 } from './editor/margin-annotations'
@@ -357,7 +358,8 @@ import {
   trackChangesOptionsState,
   type TrackChangesOptions,
 } from './editor/track-changes-options'
-import type { PageLayout } from './editor/goto'
+import { pagePositions, type PageLayout } from './editor/goto'
+import { PagedViewProbe, pagedViewProbe } from './editor/paged-view-probe'
 import { Ribbon, type ConvertFormat } from './components/Ribbon'
 import {
   AdjustListIndentsDialog,
@@ -1101,6 +1103,7 @@ export function App({
    *  the document as it stands (TOC numbers, the preview snapshot) */
   const layoutNow = useCallback((): PageLayout | null => {
     const view = editorRef.current?.view
+    if (view) pagedViewProbe(view)?.restore()
     const needsTypography = view !== undefined && hasPendingParagraphMeasurements(view)
     if (needsTypography) flushPendingParagraphMeasurements(view)
     const stylesChanged = prepareDocStylesRef.current()
@@ -4575,7 +4578,7 @@ export function App({
     }
     // a keystroke that leaves its paragraph the same height moves no page
     // boundary: keep the previous slicing instead of re-measuring the document
-    const tryFastPass = (edited: Set<number>): boolean => {
+    const tryFastPass = (edited: Set<number>, windowed = false): boolean => {
       const reject = (why: string) => {
         fastReject = why
         return false
@@ -4594,6 +4597,15 @@ export function App({
         const el = editor.view.nodeDOM(pos) as HTMLElement | null
         const prev = el ? lastBlocks.find((b) => b.el === el) : undefined
         if (!el || !prev) return reject('block')
+        if (windowed) {
+          const node = pmDoc.child(idx)
+          if (
+            node.type.name !== 'docParagraph' ||
+            headingLevelOf(node, editor.storage.listNumbering?.styles) ||
+            hasRevisionAnchors(el)
+          )
+            return reject('windowed-anchors')
+        }
         if (
           el.classList.contains('doc-para-join-head') ||
           el.classList.contains('doc-para-join-tail')
@@ -4696,10 +4708,36 @@ export function App({
         return
       }
       laidOutBeforeParagraphsSettled = paragraphsPending
+      const probe = editor && pagedViewProbe(editor.view)
       measuredTypography = editor ? typographyOf(editor.state) : undefined
       activity.update({ pending: false, active: true })
       lastPassAt = performance.now()
-      const stylesChanged = prepareDocStylesRef.current()
+      const zoomEl = scroller.querySelector<HTMLElement>('.doc-zoom')
+      // Read the applied zoom: a deferred pass can outlive its closure's value.
+      const liveZoom = canvasZoomOf(zoomEl, zoom / 100)
+      let stylesChanged = false
+      let windowedFast = false
+      if (
+        probe?.hasPendingGeometry &&
+        fastEdits?.size === 1 &&
+        !forceFull &&
+        !synchronous &&
+        !paragraphsPending &&
+        liveZoom === 1 &&
+        factor === 1 &&
+        !probe.hadRevisions &&
+        comments.length === 0 &&
+        (!hasTocFields || tocRefreshComplete) &&
+        pageLookup?.fromCuts(0) != null
+      ) {
+        stylesChanged = prepareDocStylesRef.current()
+        windowedFast = !stylesChanged && tryFastPass(fastEdits, true)
+        if (windowedFast) probe.keepGeometry()
+      }
+      if (!windowedFast) {
+        probe?.restore()
+        stylesChanged = prepareDocStylesRef.current() || stylesChanged
+      }
       const full = stylesChanged || forceFull
       const keepPublishedRange = !measureMountedTail && !full && !synchronous
       measureMountedTail = false
@@ -4708,11 +4746,6 @@ export function App({
       const dirty = full ? null : dirtyFrom
       dirtyFrom = Infinity
       try {
-        const zoomEl = scroller.querySelector<HTMLElement>('.doc-zoom')
-        // the canvas zoom as applied, not this closure's: a pass reaching the
-        // DOM through a late async callback must never read a zoomed canvas at
-        // factor 1 (split-row fills then land in zoomed px and rows overlap)
-        const liveZoom = canvasZoomOf(zoomEl, zoom / 100)
         const swapZoom = zoomEl !== null && Math.abs(liveZoom - 1) > 0.0001
         const scrollTop = scroller.scrollTop
         const scrollLeft = scroller.scrollLeft
@@ -4722,7 +4755,7 @@ export function App({
         }
         let fast = false
         try {
-          fast = Boolean(edited && edited.size > 0 && tryFastPass(edited))
+          fast = windowedFast || Boolean(edited && edited.size > 0 && tryFastPass(edited))
           if (!fast) {
             if (!edited) fastReject = 'trigger'
             else if (edited.size === 0) fastReject = 'none'
@@ -4742,7 +4775,9 @@ export function App({
         // Measure screen anchors and page capacity only in that final display
         // state, including fast passes that keep the existing pagination.
         const pm = pmEl()
-        if (pm) {
+        // A windowed fast pass retains the cuts and leaves all margin anchors
+        // in place. The full annotation scan requires the offscreen DOM.
+        if (pm && !windowedFast) {
           syncMarginAnnotations(
             (pm.closest('.page-wrap') as HTMLElement) ?? pm,
             pm,
@@ -7340,6 +7375,7 @@ export function App({
   // matching the heading text of a TOC entry.
   const jumpToAnchor = useCallback(
     (anchor: string, tocTitle = '') => {
+      if (editor) pagedViewProbe(editor.view)?.restore()
       let target: Element | null = null
       if (anchor && doc) {
         const block = doc.parsed.blocks.find((b) => b.originalXml?.includes(`w:name="${anchor}"`))
@@ -7358,7 +7394,7 @@ export function App({
       }
       target?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     },
-    [doc],
+    [doc, editor],
   )
 
   /** ⌘-click / Open Hyperlink: browser for http(s) (main-process openExternal), in-document jump for #bookmark */
@@ -8476,6 +8512,24 @@ export function App({
   useEffect(() => {
     const pane = scrollContainerRef.current
     if (!editor || !pane) return
+    const view = editor.view
+    const toggleProbe = (event: Event) => {
+      if (!(event instanceof CustomEvent)) return
+      pagedViewProbe(view)?.restore()
+      const layout = pageLayoutRef.current
+      const activity = paginationActivity.snapshot()
+      const buffer = event.detail === true ? 4 : event.detail
+      if (
+        (buffer === 2 || buffer === 4 || buffer === 16) &&
+        layout &&
+        !activity.active &&
+        !activity.pending &&
+        !activity.contentPending &&
+        !hasPendingParagraphMeasurements(view)
+      )
+        PagedViewProbe.start(view, pane, layout, pagePositions(view, layout), buffer)
+    }
+    window.addEventListener('docs:paged-view-probe', toggleProbe)
     let frame: number | undefined
     const onScroll = () => {
       if (frame !== undefined) return
@@ -8486,10 +8540,13 @@ export function App({
         const { top } = readScrollPosition(pane)
         publishScrolledPage.current?.()
         screenImages.current?.updateViewport(top)
+        pagedViewProbe(view)?.onScroll(top)
       })
     }
     pane.addEventListener('scroll', onScroll, { passive: true })
     return () => {
+      window.removeEventListener('docs:paged-view-probe', toggleProbe)
+      pagedViewProbe(view)?.restore()
       pane.removeEventListener('scroll', onScroll)
       if (frame !== undefined) cancelAnimationFrame(frame)
     }
@@ -9827,6 +9884,7 @@ export function App({
               <CommentsPanel
                 comments={comments}
                 docNode={editor.state.doc}
+                editorView={editor.view}
                 composing={commentComposing}
                 onSubmitNew={submitNewComment}
                 onReply={replyToComment}

@@ -55,7 +55,9 @@ export function singleInlineEditIndex(tr: Transaction): number | null {
   return FAST_BLOCK_TYPES.has(tr.doc.child(index).type.name) ? index : null
 }
 
-function textOnly(content: { forEach(f: (node: { isText: boolean }) => void): void }): boolean {
+export function textOnly(content: {
+  forEach(f: (node: { isText: boolean }) => void): void
+}): boolean {
   let ok = true
   content.forEach((node) => {
     if (!node.isText) ok = false

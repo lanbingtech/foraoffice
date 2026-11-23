@@ -30,7 +30,7 @@ import type { EditorView } from '@tiptap/pm/view'
 import type { Mark as PmMark, Node as PmNode } from '@tiptap/pm/model'
 import { getLang, t } from '../i18n/locale'
 import { collectRevisions } from './revisions'
-import { absoluteDate, authorInitials, authorInk } from './comment-card'
+import { absoluteDate, authorInitials, authorInk, showCommentAnchors } from './comment-card'
 import { balloonRevKinds, currentBalloonMode } from './revision-view'
 import { trackChangesOptionsState } from './track-changes-options'
 import { commentEndpoints } from './comment-endpoints'
@@ -114,17 +114,8 @@ function makeBalloonIcon(c: CommentInfo, on: boolean, onJump: () => void): HTMLE
   return btn
 }
 
-function flashEls(targets: HTMLElement[]): void {
-  targets[0]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  for (const t of targets) {
-    t.classList.remove('doc-comment-flash')
-    void t.offsetWidth
-    t.classList.add('doc-comment-flash')
-  }
-}
-
 function flashAnchors(pm: HTMLElement, id: string): void {
-  flashEls(
+  showCommentAnchors(
     [...pm.querySelectorAll<HTMLElement>('.doc-comment')].filter((s) =>
       (s.dataset.commentIds ?? '').split(' ').includes(id),
     ),
@@ -763,6 +754,10 @@ export interface AnchorBlock {
   originalXml?: string | null
 }
 
+export function hasRevisionAnchors(block: HTMLElement): boolean {
+  return block.matches(REV_SELECTOR) || block.querySelector(REV_SELECTOR) !== null
+}
+
 export function syncMarginAnnotations(
   wrap: HTMLElement,
   pm: HTMLElement,
@@ -851,7 +846,9 @@ export function syncMarginAnnotations(
   ) => {
     const { wrapRect } = initialGeometry()
     // block-anchored threads have no .doc-comment span: flash the block itself
-    const flash = blockAnchor ? () => flashEls([blockAnchor]) : () => flashAnchors(pm, c.id)
+    const flash = blockAnchor
+      ? () => showCommentAnchors([blockAnchor])
+      : () => flashAnchors(pm, c.id)
     const top = (rect.top - wrapRect.top) / f
     const selected = flags.focus === c.id || flags.popup === c.id
     icons.push({

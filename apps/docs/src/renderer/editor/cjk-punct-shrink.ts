@@ -14,6 +14,7 @@ import { sameLine } from './justify-shrink'
 import { rangeSlot } from '../dom-range'
 import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
 import { WRAP_WIDTHS_COMMITTED_EVENT, type WrapWidthChanges } from './column-layout'
+import { paragraphEditMeasurement, type ParagraphEditMeasurement } from './paged-view-probe'
 
 /**
  * Word's CJK line breaking (settings characterSpacingControl =
@@ -510,6 +511,7 @@ function charAdvancePx(font: string, ch: string): number {
 
 class CjkPunctShrinkView {
   private lastSig = ''
+  private measuredFrom?: number
   private results = new SettledParagraphCache<MeasuredShrink[]>(shiftShrinks, (r) => r.length === 0)
   private seenSigs = new Set<string>()
   private frozen = false
@@ -653,33 +655,41 @@ class CjkPunctShrinkView {
           )
       return
     }
-    if (this.frozen) return
     if (!view.dom.isConnected) return () => () => this.scheduleRetry()
 
+    const scope = paragraphEditMeasurement(view)
+    if (this.measuredFrom !== scope?.from) {
+      this.restartConvergence()
+      this.measuredFrom = scope?.from
+    }
+    if (this.frozen) return
     const paras: Array<{ node: ProseMirrorNode; pos: number }> = []
-    view.state.doc.descendants((node, pos) => {
+    const addCandidate = (node: ProseMirrorNode, pos: number) => {
       if (!node.isTextblock) return true
       // justification usually comes from the paragraph style, not a direct
       // attr: filter on the rendered alignment in measureParagraph instead
       if (isCandidate(node)) paras.push({ node, pos })
       return false
-    })
+    }
+    if (scope) addCandidate(scope.node, scope.from)
+    else view.state.doc.descendants(addCandidate)
 
     const read = this.results.startMeasurePass(
       view,
       paras,
       (para, el, reuseNoOpWhile) => this.measureParagraph(para.node, para.pos, el, reuseNoOpWhile),
-      { trackProposal: true },
+      { trackProposal: true, independentParagraph: scope?.node },
     )
     return (deadline: number) => {
       const measured = read(deadline)
-      if (measured) return () => this.publishMeasurement(old, measured)
+      if (measured) return () => this.publishMeasurement(old, measured, scope)
     }
   }
 
   private publishMeasurement(
     old: DecorationSet | undefined,
     measuredParas: Array<MeasuredShrink[] | null>,
+    scope?: ParagraphEditMeasurement,
   ) {
     const { view } = this
     const shrinks: MeasuredShrink[] = []
@@ -723,9 +733,12 @@ class CjkPunctShrinkView {
         { hang: s.hang === true, style },
       )
     })
-    const next = DecorationSet.create(view.state.doc, decos)
-    const rendered = old?.find() ?? []
-    const proposed = next.find()
+    const previous = old ?? DecorationSet.empty
+    const rendered = scope ? previous.find(scope.from + 1, scope.to - 1) : previous.find()
+    const next = scope
+      ? previous.remove(rendered).add(view.state.doc, decos)
+      : DecorationSet.create(view.state.doc, decos)
+    const proposed = scope ? next.find(scope.from + 1, scope.to - 1) : next.find()
     if (
       rendered.length === proposed.length &&
       rendered.every((decoration, index) => {

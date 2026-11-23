@@ -9,7 +9,7 @@ import {
   type Ref,
 } from 'react'
 import type { Editor } from '@tiptap/core'
-import { TextSelection, type Transaction } from '@tiptap/pm/state'
+import { NodeSelection, TextSelection, type Transaction } from '@tiptap/pm/state'
 import { DecorationSet } from '@tiptap/pm/view'
 import { useI18n, type StringKey } from '../i18n/locale'
 import { searchPluginKey } from '../editor/extensions'
@@ -39,6 +39,7 @@ import {
   type GoToTarget,
   type PageLayout,
 } from '../editor/goto'
+import { pagedViewProbe, revealDocumentRange } from '../editor/paged-view-probe'
 
 export { foldCase } from '../editor/find'
 
@@ -153,6 +154,7 @@ function jumpTo(editor: Editor, pos: number, centerCaret = false): void {
   const { state, view } = editor
   const clamped = Math.max(0, Math.min(pos, state.doc.content.size))
   const sel = TextSelection.near(state.doc.resolve(clamped), 1)
+  revealDocumentRange(view, sel.from, sel instanceof NodeSelection ? sel.from : sel.to)
   if (centerCaret) {
     view.dispatch(state.tr.setSelection(sel))
     const scroller = view.dom.closest('.editor-scroll')
@@ -467,11 +469,17 @@ export function FindPanel({
     const lay = layout?.() ?? null
     const caret = editor.state.selection.from
     const view = editor.view
+    const probe = pagedViewProbe(view)
+    if (target === 'section' || target === 'line') probe?.restore()
     let positions: Array<number | null>
     let current: () => number
     if (target === 'page' || target === 'section') {
       if (!lay) return setGotoMiss(true)
-      positions = target === 'page' ? pagePositions(view, lay) : sectionPositions(view, lay)
+      if (target === 'page') {
+        const cached = probe?.pagePositions(lay)
+        if (!cached) probe?.restore()
+        positions = cached ?? pagePositions(view, lay)
+      } else positions = sectionPositions(view, lay)
       current = () => {
         if (target === 'page' && lay.pageAtScreenY) {
           const rect = view.coordsAtPos(caret, 1)
@@ -503,9 +511,12 @@ export function FindPanel({
       idx = gotoItems.findIndex((i) => i.label === gotoInput)
       if (idx < 0) idx = null
     } else idx = resolveGoToIndex(explicit ? gotoInput : '', current, positions.length, dir)
-    const positionAt = (index: number) =>
-      positions[index] ??
-      (target === 'page' && lay ? pagePositionWithoutGap(view, lay, index) : null)
+    const positionAt = (index: number) => {
+      if (positions[index] != null) return positions[index]
+      if (target !== 'page' || !lay) return null
+      probe?.restore()
+      return pagePositionWithoutGap(view, lay, index)
+    }
     let pos = idx === null ? null : positionAt(idx)
     if (idx !== null && target === 'page' && (!explicit || !gotoInput.trim())) {
       for (let next = idx + dir; pos === null && next >= 0 && next < positions.length; next += dir)

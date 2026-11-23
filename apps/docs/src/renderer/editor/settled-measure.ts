@@ -379,6 +379,7 @@ export class SettledParagraphCache<T> {
   private gen = 0
   private wrapVersion = 0
   private scopedPass = false
+  private localNode?: ProseMirrorNode
   private rootWidth: number | undefined
 
   /**
@@ -394,6 +395,7 @@ export class SettledParagraphCache<T> {
 
   clear(): void {
     this.scopedPass = false
+    this.localNode = undefined
     this.results.clear()
     this.previousResults = undefined
   }
@@ -423,12 +425,18 @@ export class SettledParagraphCache<T> {
   }
 
   /** Start a new read pass and drop paragraphs the previous pass never visited. */
-  beginPass(view: EditorView): void {
-    this.gen++
+  beginPass(view: EditorView, independentParagraph?: ProseMirrorNode): void {
     this.previousResults = undefined
-    for (const [node, entry] of this.results)
-      if (entry.gen < this.gen - 1) this.results.delete(node)
-    this.floats = floatsOf(view)
+    if (independentParagraph) {
+      if (this.localNode && this.localNode !== independentParagraph)
+        this.results.delete(this.localNode)
+    } else {
+      this.gen++
+      for (const [node, entry] of this.results)
+        if (entry.gen < this.gen - 1) this.results.delete(node)
+    }
+    this.localNode = independentParagraph
+    this.floats = independentParagraph ? [] : floatsOf(view)
     this.floatBands.clear()
   }
 
@@ -480,9 +488,9 @@ export class SettledParagraphCache<T> {
     view: EditorView,
     paragraphs: ParagraphPosition[],
     read: (para: ParagraphPosition, el: HTMLElement, reuseNoOpWhile: ReuseNoOpWhile) => T | null,
-    options?: { trackProposal: boolean },
+    options?: { trackProposal: boolean; independentParagraph?: ProseMirrorNode },
   ): (deadline: number) => Array<T | null> | undefined {
-    this.beginPass(view)
+    this.beginPass(view, options?.independentParagraph)
     if (options?.trackProposal) this.previousResults = new Map()
     // Only a scoped reuse decision needs a geometry read before hiding gaps.
     const width = this.scopedPass && this.results.size > 0 ? view.dom.offsetWidth : undefined

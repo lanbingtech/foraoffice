@@ -13,6 +13,7 @@ import {
 import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
 import { DOC_CSS_COMMITTED_EVENT } from './cjk-punct-shrink'
 import { WRAP_WIDTHS_COMMITTED_EVENT, type WrapWidthChanges } from './column-layout'
+import { paragraphEditMeasurement, type ParagraphEditMeasurement } from './paged-view-probe'
 
 /**
  * Word 2013+ (settings compatibilityMode >= 15) justified line breaking pulls
@@ -258,6 +259,7 @@ export function sameLine(
 
 class JustifyShrinkView {
   private lastSig = ''
+  private measuredFrom?: number
   private seenSigs = new Set<string>()
   private frozen = false
   private retryRaf = 0
@@ -402,28 +404,36 @@ class JustifyShrinkView {
     }
     if (!view.dom.isConnected) return () => () => this.scheduleRetry()
 
+    const scope = paragraphEditMeasurement(view)
+    if (this.measuredFrom !== scope?.from) {
+      this.restartConvergence()
+      this.measuredFrom = scope?.from
+    }
     const paras: Array<{ node: ProseMirrorNode; pos: number }> = []
-    view.state.doc.descendants((node, pos) => {
+    const addCandidate = (node: ProseMirrorNode, pos: number) => {
       if (!node.isTextblock) return true
       if (isShrinkCandidate(node)) paras.push({ node, pos })
       return false
-    })
+    }
+    if (scope) addCandidate(scope.node, scope.from)
+    else view.state.doc.descendants(addCandidate)
 
     const read = this.results.startMeasurePass(
       view,
       paras,
       (para, el, reuseNoOpWhile) => this.measureParagraph(para.node, para.pos, el, reuseNoOpWhile),
-      { trackProposal: this.measurement.pending },
+      { trackProposal: this.measurement.pending, independentParagraph: scope?.node },
     )
     return (deadline: number) => {
       const measured = read(deadline)
-      if (measured) return () => this.publishMeasurement(old, measured)
+      if (measured) return () => this.publishMeasurement(old, measured, scope)
     }
   }
 
   private publishMeasurement(
     old: DecorationSet | undefined,
     measuredParas: Array<MeasuredShrink[] | null>,
+    scope?: ParagraphEditMeasurement,
   ) {
     this.results.acceptMeasuredResults()
     const { view } = this
@@ -456,9 +466,28 @@ class JustifyShrinkView {
       const style = `word-spacing:${-s.perChar}px`
       return Decoration.inline(s.from, s.to, { class: 'doc-jshrink', style }, { style })
     })
-    view.dispatch(
-      view.state.tr.setMeta(justifyShrinkPluginKey, decos).setMeta('addToHistory', false),
-    )
+    if (scope) {
+      const previous = old ?? DecorationSet.empty
+      const rendered = previous.find(scope.from + 1, scope.to - 1)
+      if (
+        rendered.length === decos.length &&
+        rendered.every(
+          (d, i) =>
+            d.from === decos[i].from &&
+            d.to === decos[i].to &&
+            d.spec.style === decos[i].spec.style,
+        )
+      )
+        return
+      const next = previous.remove(rendered).add(view.state.doc, decos)
+      view.dispatch(
+        view.state.tr.setMeta(justifyShrinkPluginKey, next.find()).setMeta('addToHistory', false),
+      )
+    } else {
+      view.dispatch(
+        view.state.tr.setMeta(justifyShrinkPluginKey, decos).setMeta('addToHistory', false),
+      )
+    }
   }
 
   /** null = not measurable right now (hidden / not mounted) → retry */
