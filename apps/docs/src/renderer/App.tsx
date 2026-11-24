@@ -360,7 +360,6 @@ import {
 } from './editor/track-changes-options'
 import { pagePositions, type PageLayout } from './editor/goto'
 import { viewportLayout, type ViewportLayout } from './editor/viewport-layout'
-import type { PmNode } from './editor/convert'
 import { PagedViewProbe, pagedViewProbe } from './editor/paged-view-probe'
 import { Ribbon, type ConvertFormat } from './components/Ribbon'
 import {
@@ -845,14 +844,14 @@ export function App({
   onRuntime,
   onViewportLayout,
   onViewportOpen,
-  onOpenedSource,
+  sourceImport,
   agentUi,
   embedded = false,
 }: {
   onRuntime?: (value: DocsAppRuntime | null) => void
   onViewportLayout?: (value: ViewportLayout | null) => void
   onViewportOpen?: (editor: Editor | null) => void
-  onOpenedSource?: (document: PmNode) => void
+  sourceImport?: FileActionContext['sourceImport']
   agentUi?: DocsAgentUi
   embedded?: boolean
 } = {}) {
@@ -2452,7 +2451,7 @@ export function App({
     }
   }, [doc?.parsed, editor, setDocCss, tornDown])
   fileCtxRef.current = {
-    onOpenedSource,
+    sourceImport,
     commitDocumentState: (operation) => flushSync(operation),
     editor,
     doc,

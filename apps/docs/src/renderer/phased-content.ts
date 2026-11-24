@@ -22,6 +22,8 @@ import type { PmNode } from './editor/convert'
 export interface PhasedContentHost {
   /** The editor whose source indices this stream owns. */
   owner?: object
+  /** Wait for the initial source producer to release or cancel the tail mount. */
+  canMountTail?: Promise<boolean>
   /** full replace (Tiptap setContent) */
   setContent(doc: PmNode): void
   /** append top-level nodes at the document end, outside undo history */
@@ -366,5 +368,11 @@ export function setContentPhased(
     if (index < content.length) schedule(appendChunk)
     else finish(true)
   }
-  schedule(appendChunk)
+  if (host.canMountTail) {
+    void host.canMountTail.then((mount) => {
+      if (my !== token) return
+      if (mount) schedule(appendChunk)
+      else finish(false)
+    })
+  } else schedule(appendChunk)
 }

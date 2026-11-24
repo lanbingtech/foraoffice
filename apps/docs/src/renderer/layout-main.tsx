@@ -62,13 +62,20 @@ function runLayout(
   let receivedRevision = 0
   let revision = 0
   let stopSource: ((reason: Error) => void) | undefined
+  let releaseTail!: (mount: boolean) => void
+  const canMountTail = new Promise<boolean>((resolve) => (releaseTail = resolve))
   const edits: Array<Extract<LayoutMessage, { type: 'edit' }>> = []
+  const finishSource = (mount: boolean) => {
+    stopSource = undefined
+    releaseTail(mount)
+  }
   const fail = (reason: string) => {
     if (failed) return
     failed = true
     layout = null
     edits.length = 0
     stopSource?.(new Error(reason))
+    finishSource(false)
     port.postMessage({ type: 'failure', reason })
   }
   const publishSource = ({ content = [], ...sourceRoot }: PmNode) => {
@@ -76,10 +83,7 @@ function runLayout(
     let offset = 0
     const blocks = new ReadableStream<PmNode[]>({
       start(controller) {
-        stopSource = (reason) => {
-          stopSource = undefined
-          controller.error(reason)
-        }
+        stopSource = (reason) => controller.error(reason)
       },
       pull(controller) {
         if (offset < content.length) {
@@ -89,12 +93,11 @@ function runLayout(
         }
         if (offset >= content.length) {
           controller.close()
-          stopSource = undefined
+          finishSource(true)
         }
       },
-      cancel() {
-        stopSource = undefined
-      },
+      // A plain discard still wants geometry. An aborted read retires the open.
+      cancel: (reason) => finishSource(reason === undefined),
     })
     port.postMessage(
       { type: 'source', revision: 0, root: sourceRoot, blocks } satisfies LayoutReply,
@@ -219,12 +222,13 @@ function runLayout(
       <App
         onViewportLayout={publish}
         onViewportOpen={reportOpen}
-        onOpenedSource={includeSource ? publishSource : undefined}
+        sourceImport={includeSource ? { publish: publishSource, canMountTail } : undefined}
       />
     </LocaleProvider>,
   )
   return () => {
     stopSource?.(new Error('The background layout connection closed'))
+    finishSource(false)
     try {
       root.unmount()
     } finally {

@@ -148,8 +148,11 @@ export type PendingPdfExport = {
 /** The App state the file actions need; built fresh per call. */
 export interface FileActionContext {
   beforeDocumentReplace?(): void
-  /** The imported body, in source order and before any layout-derived changes. */
-  onOpenedSource?(document: PmNode): void
+  sourceImport?: {
+    /** The imported body, in source order and before any layout-derived changes. */
+    publish(document: PmNode): void
+    canMountTail: Promise<boolean>
+  }
   /** Publish a replacement or saved baseline and its authored stores before lifecycle completion. */
   commitDocumentState?(operation: () => void): void
   editor: Editor | null
@@ -557,6 +560,7 @@ function phasedHostFor(ctx: FileActionContext): PhasedContentHost {
   const editor = ctx.editor!
   return {
     owner: editor,
+    canMountTail: ctx.sourceImport?.canMountTail,
     setContent: (doc) => setOpenedEditorContent(editor, doc),
     appendNodes: (nodes, attempt) => appendStreamedNodes(editor, nodes, attempt),
     appliedAppend: (attempt) => streamedAppendApplied(editor.state, attempt),
@@ -772,7 +776,7 @@ export async function loadFile(
         ctx.setStatus(t('appOpenedFile', { name: result.name }))
       }
     })
-    if (source && currentOpen()) ctx.onOpenedSource?.(source)
+    if (source && currentOpen()) ctx.sourceImport?.publish(source)
     void getDocsHost().getRecentFiles().then(ctx.setRecent)
     return 'ok'
   } catch (err) {

@@ -31,6 +31,8 @@ type LayoutTestWindow = Window & {
   layoutClosed: boolean
 }
 
+const paragraphsPerPage = 70
+
 test('the Docs layout port opens in isolation and never publishes a failed document', async () => {
   const folder = test.info().outputPath('background-layout')
   await mkdir(folder, { recursive: true })
@@ -42,11 +44,17 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
         .flatMap((n) => [
           `<w:p>${n > 1 ? '<w:pPr><w:pageBreakBefore/></w:pPr>' : ''}<w:r><w:t>Page ${n}</w:t></w:r></w:p>`,
           ...Array.from(
-            { length: 19 },
+            { length: paragraphsPerPage - 1 },
             (_, i) => `<w:p><w:r><w:t>Page ${n}, paragraph ${i + 1}</w:t></w:r></w:p>`,
           ),
         ])
         .join(''),
+      stylesXml:
+        '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+        '<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="16"/></w:rPr></w:rPrDefault>' +
+        '<w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="180" w:lineRule="exact"/></w:pPr></w:pPrDefault></w:docDefaults>' +
+        '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>' +
+        '</w:styles>',
     }),
   )
   const env = Object.fromEntries(
@@ -61,7 +69,9 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
   try {
     const page = await app.firstWindow()
     await expect(page.locator('.ProseMirror').first()).toContainText('Page 3')
-    const connect = (open: 'cancel' | 'valid' | 'invalid' | 'stale-scale') =>
+    const connect = (
+      open: 'cancel' | 'discard-source' | 'abort-source' | 'valid' | 'invalid' | 'stale-scale',
+    ) =>
       page.evaluate(
         async ({ open, fixture }) => {
           const owner = window as unknown as LayoutTestWindow
@@ -79,6 +89,21 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
               owner.layoutReplies.push(snapshot)
               const imported = owner.layoutSource
               imported.root = snapshot.root
+              if (open === 'discard-source') {
+                void blocks.cancel()
+                return
+              }
+              if (open === 'abort-source') {
+                const abort = new AbortController()
+                void blocks
+                  .pipeTo(new WritableStream({ write: () => abort.abort() }), {
+                    signal: abort.signal,
+                  })
+                  .catch((error) => {
+                    if (error.name !== 'AbortError') throw error
+                  })
+                return
+              }
               void blocks
                 .pipeTo(
                   new WritableStream({
@@ -111,7 +136,7 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
           )
           if (open === 'cancel' || open === 'stale-scale') return
           const bytes =
-            open === 'valid'
+            open !== 'invalid'
               ? await fetch(file.dataUrl).then((r) => r.arrayBuffer())
               : new ArrayBuffer(10)
           ports.port1.postMessage(
@@ -169,10 +194,10 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
       revision: 0,
       beforeLayout: true,
       rootType: 'doc',
-      chunks: [50, 10],
+      chunks: [50, 50, 50, 50, 10],
       lines: [1, 2, 3].flatMap((n) => [
         `Page ${n}`,
-        ...Array.from({ length: 19 }, (_, i) => `Page ${n}, paragraph ${i + 1}`),
+        ...Array.from({ length: paragraphsPerPage - 1 }, (_, i) => `Page ${n}, paragraph ${i + 1}`),
       ]),
     })
     const worker = app.windows().find((window) => window.url().includes('/layout.html'))!
@@ -291,6 +316,25 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
           JSON.stringify(reply.initial?.model?.document ?? null).includes('Revised Page 1'),
       ),
     )
+
+    await connect('discard-source')
+    await page.waitForFunction(() =>
+      (window as unknown as LayoutTestWindow).layoutReplies.some(
+        (reply) => reply.type === 'layout' && reply.pages?.length === 3,
+      ),
+    )
+
+    await connect('abort-source')
+    await page.waitForFunction(() =>
+      (window as unknown as LayoutTestWindow).layoutReplies.some(
+        (reply) => reply.type === 'failure',
+      ),
+    )
+    expect(
+      await page.evaluate(() =>
+        (window as unknown as LayoutTestWindow).layoutReplies.map((reply) => reply.type),
+      ),
+    ).toEqual(['source', 'failure'])
 
     await connect('invalid')
     await page.waitForFunction(() =>

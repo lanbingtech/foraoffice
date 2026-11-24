@@ -63,7 +63,8 @@ export type LayoutReply =
   | { type: 'failure'; reason: string }
 
 interface LayoutClientEvents {
-  /** Bind reads to this signal, for example with `blocks.pipeTo(writable, { signal })`. */
+  /** Consume the source or cancel it without an error to continue to layout.
+   * Bind reads to the connection signal with `blocks.pipeTo(writable, { signal })`. */
   source?(source: ImportedSource, signal: AbortSignal): void
   layout(layout: LayoutPublication | null, publication: number): void
   viewport(reply: ViewportPublication & { content: ViewportContent }): void

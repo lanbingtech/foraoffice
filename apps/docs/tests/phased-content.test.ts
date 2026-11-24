@@ -170,6 +170,56 @@ describe('setContentPhased', () => {
     await expect(waitForFullContent()).resolves.toBe(true)
   })
 
+  it('mounts the prefix before source delivery and schedules the tail after delivery', async () => {
+    const { host, state } = makeHost()
+    const scheduler = makeScheduler()
+    let release!: (mount: boolean) => void
+    host.canMountTail = new Promise<boolean>((resolve) => (release = resolve))
+    const document = docOf(PHASED_MIN_BLOCKS + 20)
+
+    setContentPhased(host, document, scheduler.schedule)
+    expect(state.mounted).toHaveLength(PHASE1_BLOCKS)
+    expect(state.loading).toBe(true)
+    expect(scheduler.pending()).toBe(0)
+    release(true)
+    await host.canMountTail
+    while (scheduler.pending()) scheduler.drain()
+    expect(state.mounted).toEqual(document.content)
+    await expect(waitForFullContent()).resolves.toBe(true)
+  })
+
+  it('does not schedule the deferred tail of a replaced document', async () => {
+    const { host, state } = makeHost()
+    const scheduler = makeScheduler()
+    let release!: (mount: boolean) => void
+    host.canMountTail = new Promise<boolean>((resolve) => (release = resolve))
+    setContentPhased(host, docOf(PHASED_MIN_BLOCKS + 20), scheduler.schedule)
+    const oldDocument = waitForFullContent()
+
+    const replacement = docOf(2)
+    setContentPhased(host, replacement, scheduler.schedule)
+    release(true)
+    await host.canMountTail
+    await expect(oldDocument).resolves.toBe(false)
+    expect(scheduler.pending()).toBe(0)
+    expect(state.mounted).toEqual(replacement.content)
+  })
+
+  it('settles an interrupted source handoff without mounting the tail', async () => {
+    const { host, state } = makeHost()
+    const scheduler = makeScheduler()
+    let release!: (mount: boolean) => void
+    host.canMountTail = new Promise<boolean>((resolve) => (release = resolve))
+    setContentPhased(host, docOf(PHASED_MIN_BLOCKS + 20), scheduler.schedule)
+
+    release(false)
+    await expect(waitForFullContent()).resolves.toBe(false)
+    expect(state.mounted).toHaveLength(PHASE1_BLOCKS)
+    expect(state.loading).toBe(false)
+    expect(scheduler.pending()).toBe(0)
+    cancelPhasedContent()
+  })
+
   it('streaming is not an edit: the dirty flag survives every chunk', () => {
     const { host, state } = makeHost()
     const s = makeScheduler()
