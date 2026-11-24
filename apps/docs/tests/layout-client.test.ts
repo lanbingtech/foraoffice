@@ -25,14 +25,33 @@ class TestPort extends EventTarget {
   }
 }
 
-function client() {
+function client(resolution?: MediaQueryList) {
   const port = new TestPort()
   const events = { layout: vi.fn(), viewport: vi.fn(), failure: vi.fn() }
-  const layout = new LayoutClient(port as unknown as MessagePort, events)
+  const layout = new LayoutClient(port as unknown as MessagePort, events, resolution)
   return { port, events, layout }
 }
 
 describe('the authoritative layout connection', () => {
+  it('retires published geometry at a display scale change before handling pending messages', () => {
+    const resolution = Object.assign(new EventTarget(), { matches: true })
+    const { layout, port, events } = client(resolution as unknown as MediaQueryList)
+    port.receive({ type: 'layout', pages: [], publication: 3, revision: 0 })
+
+    resolution.matches = false
+    port.receive({ type: 'layout', pages: [], publication: 4, revision: 0 })
+    layout.request({ top: 0, bottom: 40 })
+    resolution.dispatchEvent(new Event('change'))
+
+    expect(events.layout.mock.calls).toEqual([
+      [expect.objectContaining({ publication: 3 }), 3],
+      [null, 3],
+    ])
+    expect(port.closed).toBe(true)
+    expect(port.sent).toHaveLength(0)
+    expect(events.failure).toHaveBeenCalledExactlyOnceWith('The document display scale changed')
+  })
+
   it('drops superseded scroll replies and invalidates same-revision stale geometry', () => {
     const { layout, port, events } = client()
     const content = { canvas: { left: 0, top: 0, width: 80, height: 100 }, blocks: [] }

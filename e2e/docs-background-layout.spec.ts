@@ -18,6 +18,7 @@ type LayoutTestWindow = Window & {
   desktop: DesktopApi
   layoutPort: MessagePort
   layoutReplies: Reply[]
+  layoutClosed: boolean
 }
 
 test('the Docs layout port opens in isolation and never publishes a failed document', async () => {
@@ -47,7 +48,7 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
   try {
     const page = await app.firstWindow()
     await expect(page.locator('.ProseMirror').first()).toContainText('Page 3')
-    const connect = (open: 'cancel' | 'valid' | 'invalid') =>
+    const connect = (open: 'cancel' | 'valid' | 'invalid' | 'stale-scale') =>
       page.evaluate(
         async ({ open, fixture }) => {
           const owner = window as unknown as LayoutTestWindow
@@ -56,6 +57,8 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
           const ports = new MessageChannel()
           owner.layoutPort = ports.port1
           owner.layoutReplies = []
+          owner.layoutClosed = false
+          ports.port1.addEventListener('close', () => (owner.layoutClosed = true), { once: true })
           ports.port1.onmessage = ({ data }: MessageEvent<Reply>) => {
             owner.layoutReplies.push(data)
             if (data.type !== 'layout') return
@@ -67,11 +70,16 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
             })
           }
           window.postMessage(
-            { type: 'docs:connect-layout', width: innerWidth, height: innerHeight },
+            {
+              type: 'docs:connect-layout',
+              width: innerWidth,
+              height: innerHeight,
+              expectedScale: window.devicePixelRatio + (open === 'stale-scale' ? 1 : 0),
+            },
             '*',
             [ports.port2],
           )
-          if (open === 'cancel') return
+          if (open === 'cancel' || open === 'stale-scale') return
           const bytes =
             open === 'valid'
               ? await fetch(file.dataUrl).then((r) => r.arrayBuffer())
@@ -91,6 +99,10 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
       )
     const windowCount = () =>
       app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)
+    await connect('stale-scale')
+    await page.waitForFunction(() => (window as unknown as LayoutTestWindow).layoutClosed)
+    await expect.poll(windowCount).toBe(1)
+
     await connect('cancel')
     await expect.poll(windowCount).toBe(2)
     await page.evaluate(() => (window as unknown as LayoutTestWindow).layoutPort.close())

@@ -57,14 +57,16 @@ export class LayoutClient {
   constructor(
     private readonly port: MessagePort,
     private readonly events: LayoutClientEvents,
+    private readonly resolution?: MediaQueryList,
   ) {
     port.addEventListener('message', this.receive)
     port.addEventListener('close', this.lost, { once: true })
+    resolution?.addEventListener('change', this.displayChanged)
     port.start()
   }
 
   request(bounds: ViewportBounds): void {
-    if (this.closed || !this.active) return
+    if (!this.displayIsCurrent() || !this.active) return
     const { geometry, publication, revision } = this.active
     const sequence = ++this.sequence
     if (geometry) {
@@ -87,7 +89,7 @@ export class LayoutClient {
   }
 
   apply(transactions: readonly Transaction[]): void {
-    if (this.closed) return
+    if (!this.displayIsCurrent()) return
     const steps = transactions.flatMap((transaction) =>
       transaction.steps.map((step) => step.toJSON()),
     )
@@ -102,6 +104,7 @@ export class LayoutClient {
     this.closed = true
     this.port.removeEventListener('message', this.receive)
     this.port.removeEventListener('close', this.lost)
+    this.resolution?.removeEventListener('change', this.displayChanged)
     this.port.close()
     this.clear()
   }
@@ -122,8 +125,21 @@ export class LayoutClient {
     this.events.failure('The background layout connection closed')
   }
 
-  private receive = ({ data }: MessageEvent<LayoutReply>): void => {
+  private displayChanged = (): void => {
     if (this.closed) return
+    this.dispose()
+    this.events.failure('The document display scale changed')
+  }
+
+  private displayIsCurrent(): boolean {
+    if (this.closed) return false
+    if (this.resolution?.matches !== false) return true
+    this.displayChanged()
+    return false
+  }
+
+  private receive = ({ data }: MessageEvent<LayoutReply>): void => {
+    if (!this.displayIsCurrent()) return
     switch (data.type) {
       case 'layout':
         if (data.revision !== this.revision || data.publication <= this.latestPublication) return
@@ -159,12 +175,26 @@ export function connectDesktopLayout(
   events: LayoutClientEvents,
 ): LayoutClient {
   const { port1, port2 } = new MessageChannel()
-  window.postMessage(
-    { type: 'docs:connect-layout', width: window.innerWidth, height: window.innerHeight },
-    '*',
-    [port2],
-  )
-  const client = new LayoutClient(port1, events)
-  port1.postMessage(open, [open.file.data])
+  const expectedScale = window.devicePixelRatio
+  const resolution = window.matchMedia(`(resolution: ${expectedScale}dppx)`)
+  const client = new LayoutClient(port1, events, resolution)
+  try {
+    // Clone the owned input before asking the preload to create a worker.
+    port1.postMessage(open, [open.file.data])
+    window.postMessage(
+      {
+        type: 'docs:connect-layout',
+        width: window.innerWidth,
+        height: window.innerHeight,
+        expectedScale,
+      },
+      '*',
+      [port2],
+    )
+  } catch (error) {
+    client.dispose()
+    port2.close()
+    throw error
+  }
   return client
 }

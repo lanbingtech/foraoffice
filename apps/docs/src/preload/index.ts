@@ -29,16 +29,19 @@ window.addEventListener('message', (event) => {
     return
   }
   if (event.data?.type !== 'docs:connect-layout' || event.ports.length !== 1) return
-  const { width, height } = event.data
-  if (typeof width !== 'number' || typeof height !== 'number') {
+  const { width, height, expectedScale } = event.data
+  const deviceScaleFactor = window.devicePixelRatio
+  if (
+    typeof width !== 'number' ||
+    typeof height !== 'number' ||
+    expectedScale !== deviceScaleFactor
+  ) {
     event.ports[0].close()
     return
   }
-  ipcRenderer.postMessage(
-    'docs:connect-layout',
-    { width, height, deviceScaleFactor: window.devicePixelRatio },
-    [event.ports[0]],
-  )
+  ipcRenderer.postMessage('docs:connect-layout', { width, height, deviceScaleFactor }, [
+    event.ports[0],
+  ])
 })
 
 const api: DesktopApi = {
