@@ -1,5 +1,13 @@
 import { getTextBetween, getTextSerializersFromSchema } from '@tiptap/core'
-import { AllSelection, EditorState, type Selection, type Transaction } from '@tiptap/pm/state'
+import { redoNoScroll, undoNoScroll } from '@tiptap/pm/history'
+import { keydownHandler } from '@tiptap/pm/keymap'
+import {
+  AllSelection,
+  EditorState,
+  type Command,
+  type Selection,
+  type Transaction,
+} from '@tiptap/pm/state'
 import { Mapping, StepMap } from '@tiptap/pm/transform'
 import { Decoration, DecorationSet, EditorView, type EditorProps } from '@tiptap/pm/view'
 import { positionViewportColumnSplits, projectViewportDecorations } from './viewport-decorations'
@@ -24,6 +32,7 @@ interface SourceState {
 }
 
 export interface ViewportRangeRequest {
+  /** A selection request must reveal the owner's selection in the measured range. */
   reason: 'layout' | 'geometry' | 'selection' | 'transaction' | 'source'
   revision: number
   selection: Selection
@@ -268,6 +277,7 @@ export function createViewportSurface(
   let disposed = false
   let endingComposition = false
   let compositionTimer: number | undefined
+  const pendingHistory: Command[] = []
   let newest: ViewportPacket | undefined
   let deferred: ViewportPacket | undefined
   let invalidated: Pick<ViewportPacket, 'revision' | 'publication'> | undefined
@@ -436,8 +446,60 @@ export function createViewportSurface(
     if (updated.state.doc !== source.state.doc) request('geometry', updated)
   }
 
+  const canRunHistory = () => !disposed && editable()
+
+  const applyHistory = (command: Command) => {
+    if (!canRunHistory()) return
+    const source = options.readSource()
+    // History belongs to the whole document and can target an unmounted page.
+    command(source.state, (transaction) => {
+      options.dispatch(transaction)
+      if (disposed) return
+      const updated = options.readSource()
+      if (
+        updated.state.doc !== source.state.doc ||
+        !updated.state.selection.eq(source.state.selection)
+      )
+        request('selection', updated)
+    })
+  }
+
+  const drainHistory = () => {
+    if (view?.composing) return
+    for (const command of pendingHistory.splice(0)) applyHistory(command)
+  }
+
+  const runHistory = (command: Command) => {
+    if (!endingComposition) applyHistory(command)
+    else if (canRunHistory() && pendingHistory.push(command) === 1) {
+      // ProseMirror may flush the final composition mutation in its own
+      // microtask. Run after that flush and before another input task.
+      window.queueMicrotask(() => window.queueMicrotask(drainHistory))
+    }
+    return true
+  }
+
+  const undo = () => runHistory(undoNoScroll)
+  const redo = () => runHistory(redoNoScroll)
+  const historyKeyDown = keydownHandler({
+    'Mod-z': undo,
+    'Shift-Mod-z': redo,
+    'Mod-y': redo,
+    'Mod-я': undo,
+    'Shift-Mod-я': redo,
+  })
+
+  const historyInput = (editor: EditorView, event: InputEvent) => {
+    const command =
+      event.inputType === 'historyUndo' ? undo : event.inputType === 'historyRedo' ? redo : null
+    if (!command || editor.composing || event.isComposing) return false
+    event.preventDefault()
+    return command()
+  }
+
   const handleKeyDown = (editor: EditorView, event: KeyboardEvent): boolean => {
     if (event.isComposing || editor.composing) return false
+    if (historyKeyDown(editor, event)) return true
     if (selectAll(editor, event)) return true
     if (event.key !== 'Backspace' && event.key !== 'Delete') return false
     const source = options.readSource()
@@ -482,7 +544,9 @@ export function createViewportSurface(
     compositionTimer = window.setTimeout(() => {
       compositionTimer = undefined
       endingComposition = false
-      if (!deferred || view?.composing) return
+      if (view?.composing) return
+      drainHistory()
+      if (!deferred) return
       const packet = deferred
       deferred = undefined
       if (!retired(packet) && packet.revision === options.readSource().revision) paint(packet)
@@ -579,6 +643,7 @@ export function createViewportSurface(
       nodeViews: options.nodeViews?.(source.state),
       handleKeyDown,
       handleDOMEvents: {
+        beforeinput: historyInput,
         compositionend: finishComposition,
         copy: copySelection,
         cut: copySelection,
@@ -641,6 +706,7 @@ export function createViewportSurface(
     destroy() {
       disposed = true
       window.clearTimeout(compositionTimer)
+      pendingHistory.length = 0
       deferred = undefined
       current = undefined
       view?.destroy()

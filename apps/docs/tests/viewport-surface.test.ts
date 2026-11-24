@@ -1,6 +1,13 @@
 import { Editor } from '@tiptap/core'
+import { history } from '@tiptap/pm/history'
 import { Schema } from '@tiptap/pm/model'
-import { AllSelection, EditorState, TextSelection, type Transaction } from '@tiptap/pm/state'
+import {
+  AllSelection,
+  EditorState,
+  TextSelection,
+  type Plugin,
+  type Transaction,
+} from '@tiptap/pm/state'
 import { Decoration, DecorationSet, EditorView } from '@tiptap/pm/view'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { columnSplitDecoration, patchSplitNodeViews } from '../src/renderer/editor/column-layout'
@@ -56,14 +63,14 @@ afterEach(() => {
   document.body.replaceChildren()
 })
 
-function fixture(isEditable = true) {
+function fixture(isEditable = true, plugins: Plugin[] = []) {
   const doc = schema.node('doc', null, [
     paragraph('abc'),
     paragraph('DEF'),
     schema.nodes.docParagraph.create(null, [picture('one'), picture('two'), picture('three')]),
     paragraph('xyz'),
   ])
-  let state = EditorState.create({ doc, selection: TextSelection.create(doc, 7, 6) })
+  let state = EditorState.create({ doc, selection: TextSelection.create(doc, 7, 6), plugins })
   let revision = 0
   const requestRange = vi.fn()
   const dispatch = vi.fn((tr: Transaction) => {
@@ -107,6 +114,146 @@ function placed(blocks: ViewportContent['blocks']): ViewportContent {
 }
 
 describe('viewport surface', () => {
+  it('undoes an edit outside a retired viewport and redoes from the owner history', () => {
+    const { surface, read, dispatch, requestRange } = fixture(true, [history()])
+    const original = read().state.doc
+    dispatch(read().state.tr.setSelection(TextSelection.create(original, 2)))
+    dispatch(read().state.tr.insertText('!', 2))
+    const edited = read().state.doc
+    surface.publish({
+      revision: 1,
+      publication: 1,
+      sequence: 1,
+      content: placed([{ from: 6, to: 11, box: box(30, 400) }]),
+    })
+    const view = surface.view!
+    view.focus()
+    surface.invalidate(1)
+    const apply = dispatch.getMockImplementation()!
+    dispatch.mockImplementationOnce((transaction) => {
+      apply(transaction)
+      surface.publish({
+        revision: 2,
+        publication: 2,
+        sequence: 2,
+        content: placed([{ from: 5, to: 10, box: box(30, 400) }]),
+      })
+    })
+    const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform)
+    const undo = new KeyboardEvent('keydown', {
+      key: 'z',
+      ctrlKey: !mac,
+      metaKey: mac,
+      bubbles: true,
+      cancelable: true,
+    })
+    view.dom.dispatchEvent(undo)
+    expect(undo.defaultPrevented).toBe(true)
+    expect(read().state.doc.eq(original)).toBe(true)
+    expect(view.state.doc.textContent).toBe('DEF')
+    expect(requestRange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        reason: 'selection',
+        revision: 2,
+        selection: read().state.selection,
+      }),
+    )
+    expect(read().state.selection.from).toBe(2)
+
+    const redo = new InputEvent('beforeinput', {
+      inputType: 'historyRedo',
+      bubbles: true,
+      cancelable: true,
+    })
+    view.dom.dispatchEvent(redo)
+    expect(redo.defaultPrevented).toBe(true)
+    expect(read().state.doc.eq(edited)).toBe(true)
+    expect(requestRange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        reason: 'selection',
+        revision: 3,
+        selection: read().state.selection,
+      }),
+    )
+  })
+
+  it('preserves owner history when the viewport is read-only', () => {
+    const { surface, read, dispatch, setEditable } = fixture(true, [history()])
+    dispatch(read().state.tr.insertText('!', 2))
+    const edited = read().state
+    surface.publish({
+      revision: 1,
+      publication: 1,
+      sequence: 1,
+      content: placed([{ from: 6, to: 11, box: box(30, 400) }]),
+    })
+    setEditable(false)
+    const event = new InputEvent('beforeinput', {
+      inputType: 'historyUndo',
+      bubbles: true,
+      cancelable: true,
+    })
+    surface.view!.dom.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(true)
+    expect(read().state).toBe(edited)
+  })
+
+  it('runs undo after composition settles and before the next input task', async () => {
+    const { surface, dispatch, read } = fixture(true, [history()])
+    dispatch(read().state.tr.insertText('中', 2))
+    const changed = read().state.doc
+    surface.publish({
+      revision: 1,
+      publication: 1,
+      sequence: 1,
+      content: placed([{ from: 6, to: 11, box: box(30, 400) }]),
+    })
+    const view = surface.view!
+    view.dom.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+    const laterInput = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        dispatch(read().state.tr.insertText('?', 2))
+        resolve()
+      }, 0)
+    })
+    view.dom.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
+    const undo = new InputEvent('beforeinput', {
+      inputType: 'historyUndo',
+      bubbles: true,
+      cancelable: true,
+    })
+    view.dom.dispatchEvent(undo)
+    expect(undo.defaultPrevented).toBe(true)
+    expect(read().state.doc).toBe(changed)
+
+    await laterInput
+    expect(read().state.doc.textContent).toBe('a?bcDEFxyz')
+  })
+
+  it('stops requesting ranges if owner history dispatch destroys the viewport', () => {
+    const { surface, read, dispatch, requestRange } = fixture(true, [history()])
+    dispatch(read().state.tr.insertText('!', 2))
+    surface.publish({
+      revision: 1,
+      publication: 1,
+      sequence: 1,
+      content: placed([{ from: 6, to: 11, box: box(30, 400) }]),
+    })
+    const apply = dispatch.getMockImplementation()!
+    dispatch.mockImplementationOnce((transaction) => {
+      apply(transaction)
+      surface.destroy()
+    })
+    surface.view!.dom.dispatchEvent(
+      new InputEvent('beforeinput', {
+        inputType: 'historyUndo',
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(requestRange).not.toHaveBeenCalled()
+  })
+
   it('refreshes native editability when the owner republishes the same placements', () => {
     const { surface, setEditable } = fixture()
     const content = placed([{ from: 5, to: 10, box: box(30, 400) }])
