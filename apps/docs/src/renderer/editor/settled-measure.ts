@@ -48,6 +48,23 @@ export function hasCoupledWrapGeometry(
   )
 }
 
+/** Resolve an already verified inline edit when its wrap is independent. */
+export function independentParagraphEdit(view: EditorView, index: number) {
+  const { doc } = view.state
+  const node = doc.child(index)
+  if (view.composing || node.type.name !== 'docParagraph') return
+  let from = 0
+  for (let i = 0; i < index; i++) from += doc.child(i).nodeSize
+  const element = view.nodeDOM(from)
+  if (
+    !(element instanceof HTMLElement) ||
+    element.parentElement !== view.dom ||
+    hasCoupledWrapGeometry(view)
+  )
+    return
+  return { node, element, from, to: from + node.nodeSize }
+}
+
 interface FloatElement {
   element: Element
   context: Element

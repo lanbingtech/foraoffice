@@ -2,7 +2,7 @@ import { NodeSelection, TextSelection, type EditorState, type Selection } from '
 import type { DirectEditorProps, EditorView } from '@tiptap/pm/view'
 import type { PageLayout } from './goto'
 import { hasRevisionAnchors } from './margin-annotations'
-import { textOnly } from './pagination-fast-path'
+import { appliedInlineEditIndex } from './pagination-fast-path'
 import { collectRevisions } from './revisions'
 import { hasCoupledWrapGeometry } from './settled-measure'
 
@@ -380,24 +380,15 @@ export class PagedViewProbe {
       !state.doc.sameMarkup(this.model)
     )
       return false
-    const start = this.model.content.findDiffStart(state.doc.content)
-    const end = this.model.content.findDiffEnd(state.doc.content)
-    if (start === null || !end) return false
-    const before = this.model.resolve(start)
-    const after = state.doc.resolve(start)
-    const index = this.view.state.selection.$from.index(0)
+    const before = this.view.state.selection.$from
+    const after = state.selection.$from
+    const index = before.index(0)
     return (
-      before.depth === 1 &&
+      appliedInlineEditIndex(this.view.state, state) === index &&
       after.depth === 1 &&
-      before.index(0) === index &&
       after.index(0) === index &&
       after.parent.sameMarkup(before.parent) &&
-      end.a <= before.end() &&
-      end.b <= after.end() &&
-      state.selection.from >= after.start() &&
-      state.selection.to <= after.end() &&
-      textOnly(this.model.slice(start, Math.max(start, end.a)).content) &&
-      textOnly(state.doc.slice(start, Math.max(start, end.b)).content)
+      state.selection.to <= after.end()
     )
   }
 
