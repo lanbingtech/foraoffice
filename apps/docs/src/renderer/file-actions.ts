@@ -92,6 +92,7 @@ import { TABLE_TRAILING_SKIP, setLazyMediaHashes } from './editor/extensions'
 import { setStaticAsciiResolver } from './editor/protected-render'
 import { FORMAT_MARKS, serializeMarks } from './editor/caret-marks'
 import { TRACK_IGNORE } from './editor/revisions'
+import { SOURCE_DOCUMENT_REPLACED, sourceCompositionKey } from './editor/source-composition'
 import {
   cancelPhasedContent,
   hasFailedPhasedContent,
@@ -541,6 +542,7 @@ function setOpenedEditorContent(editor: Editor, doc: PmNode): void {
     .setMeta(TABLE_TRAILING_SKIP, true)
     .setMeta(PHASED_APPEND, true)
     .setMeta(streamedAppendKey, attempt)
+    .setMeta(sourceCompositionKey, SOURCE_DOCUMENT_REPLACED)
     .setContent(doc)
     .command(selectOpenedDocumentStart)
     .run()

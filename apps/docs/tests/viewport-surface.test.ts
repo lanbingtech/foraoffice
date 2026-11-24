@@ -14,6 +14,10 @@ import { columnSplitDecoration, patchSplitNodeViews } from '../src/renderer/edit
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { setPageGaps } from '../src/renderer/editor/pagination-gaps'
 import {
+  sourceCompositionKey,
+  sourceCompositionPlugin,
+} from '../src/renderer/editor/source-composition'
+import {
   readViewportDecorations,
   viewDecorationWindow,
 } from '../src/renderer/editor/viewport-decorations'
@@ -167,6 +171,76 @@ it('requests a new range when an accepted follow-up edits outside the visible mo
   expect(requestRange).toHaveBeenCalledWith(
     expect.objectContaining({ reason: 'source', transaction: undefined }),
   )
+})
+
+it.each(['compositionend', 'retirement'])(
+  'preserves source composition across unrelated transactions and completes it on %s',
+  async (ending) => {
+    let pending = false
+    const sourceComposition = new Plugin({
+      appendTransaction(transactions, _previous, current) {
+        if (transactions.some((transaction) => transaction.getMeta('composition'))) {
+          pending = true
+          return null
+        }
+        if (!pending || sourceCompositionKey.getState(current)) return null
+        pending = false
+        const end = current.selection.head
+        return current.tr.addMark(end - 1, end, current.schema.marks.inserted.create())
+      },
+    })
+    const { surface, dispatch, read, requestRange } = fixture(true, [
+      sourceCompositionPlugin,
+      sourceComposition,
+    ])
+    surface.publish({
+      revision: 0,
+      publication: 1,
+      sequence: 1,
+      content: placed([{ from: 5, to: 10, box: box(30, 400) }]),
+    })
+    const view = surface.view!
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 2)))
+    view.dom.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+    view.dispatch(view.state.tr.insertText('你').setMeta('composition', 1))
+    expect(view.dom.querySelector('ins')).toBeNull()
+    dispatch(read().state.tr.setMeta('unrelated', true))
+    expect(read().state.doc.rangeHasMark(7, 8, schema.marks.inserted)).toBe(false)
+    if (ending === 'retirement') {
+      surface.destroy()
+      expect(read().state.doc.rangeHasMark(7, 8, schema.marks.inserted)).toBe(true)
+      expect(sourceCompositionKey.getState(read().state)).toBeNull()
+      return
+    }
+    view.dom.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(view.dom.querySelector('ins')?.textContent).toBe('你')
+    expect(read().state.doc.rangeHasMark(7, 8, schema.marks.inserted)).toBe(true)
+    view.dispatch(view.state.tr.insertText('好'))
+    expect(view.state.doc.textContent).toBe('D你好EF')
+    expect(read().state.doc.child(1).textContent).toBe('D你好EF')
+    expect(requestRange).not.toHaveBeenCalled()
+  },
+)
+
+it('does not start a native composition when the source dispatch retires the surface', () => {
+  const { surface, dispatch, read } = fixture(true, [sourceCompositionPlugin])
+  surface.publish({
+    revision: 0,
+    publication: 1,
+    sequence: 1,
+    content: placed([{ from: 5, to: 10, box: box(30, 400) }]),
+  })
+  const apply = dispatch.getMockImplementation()!
+  dispatch.mockImplementationOnce((transaction) => {
+    surface.destroy()
+    return apply(transaction)
+  })
+  const view = surface.view!
+  view.dom.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+  expect(view.isDestroyed).toBe(true)
+  expect(sourceCompositionKey.getState(read().state)).toBeNull()
 })
 
 describe('viewport surface', () => {

@@ -18,6 +18,7 @@ import { selectBoxAt, selectedBoxPlugin } from './selected-box'
 import { drawingChildInteraction } from './drawing-child-interaction'
 import { drawingLineSize } from './drawing-line'
 import { appendedStreamedTail, StreamingTailGuardExtension } from './streaming-tail-guard'
+import { SourceCompositionExtension } from './source-composition'
 import { wrapGroupCss, type WrapPicture } from './wrap-group'
 import type { ChainedCommands, RawCommands } from '@tiptap/core'
 import { Gapcursor } from '@tiptap/extensions'
@@ -7413,6 +7414,7 @@ export const AutoLinkOnDelimiter = Extension.create({
 
 export const editorExtensions = [
   StreamingTailGuardExtension,
+  SourceCompositionExtension,
   ScriptFonts,
   DocDocument,
   DocText,

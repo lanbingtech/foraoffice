@@ -10,6 +10,7 @@ import {
 } from '@tiptap/pm/state'
 import { Mapping, StepMap } from '@tiptap/pm/transform'
 import { Decoration, DecorationSet, EditorView, type EditorProps } from '@tiptap/pm/view'
+import { sourceCompositionKey } from './source-composition'
 import { positionViewportColumnSplits, projectViewportDecorations } from './viewport-decorations'
 import {
   createViewportEditing,
@@ -277,6 +278,7 @@ export function createViewportSurface(
   let view: EditorView | undefined
   let disposed = false
   let endingComposition = false
+  let compositionSession: symbol | undefined
   let compositionTimer: number | undefined
   const pendingHistory: Command[] = []
   let newest: ViewportPacket | undefined
@@ -337,28 +339,21 @@ export function createViewportSurface(
     return formatted?.length ? geometry.add(state.doc, [...formatted]) : geometry
   }
 
-  const dispatchTransaction = (transaction: Transaction) => {
+  const commit = (source: SourceState, transaction: Transaction, projected: Transaction) => {
     const mounted = current
-    if (!mounted || !view) return
-    const source = options.readSource()
-    if (transaction.docChanged && !editable()) return
-    if (retired(mounted.stamp) && !view.composing && transaction.getMeta('composition') == null) {
-      return request('layout', source)
-    }
-    if (source.state.doc !== mounted.editing.source) return request('source', source, transaction)
-    if (mounted.parked && (transaction.docChanged || !transaction.selectionSet))
-      return request('selection', source, transaction)
-    const projected = projectViewportTransaction(
-      mounted.editing,
-      source.state,
-      transaction,
-      view.state.selection,
-    )
-    if (!projected) return request('transaction', source, transaction)
-
     const applied = options.dispatch(projected)
-    if (current !== mounted || !view) return
+    if (!mounted || current !== mounted || !view) return
     const confirmed = options.readSource()
+    if (mounted.editing.source !== source.state.doc) return request('source', confirmed)
+    if (
+      !transaction.docChanged &&
+      !transaction.selectionSet &&
+      !transaction.storedMarksSet &&
+      confirmed.state.doc === source.state.doc &&
+      confirmed.state.selection.eq(source.state.selection) &&
+      confirmed.state.storedMarks === source.state.storedMarks
+    )
+      return
     let visible = transaction
     if (!confirmed.state.doc.eq(projected.doc)) {
       const completed =
@@ -404,6 +399,27 @@ export function createViewportSurface(
       storedMarks: selection && !view.composing ? confirmed.state.storedMarks : null,
     })
     view.updateState(local)
+  }
+
+  const dispatchTransaction = (transaction: Transaction) => {
+    const mounted = current
+    if (!mounted || !view) return
+    const source = options.readSource()
+    if (transaction.docChanged && !editable()) return
+    if (retired(mounted.stamp) && !view.composing && transaction.getMeta('composition') == null) {
+      return request('layout', source)
+    }
+    if (source.state.doc !== mounted.editing.source) return request('source', source, transaction)
+    if (mounted.parked && (transaction.docChanged || !transaction.selectionSet))
+      return request('selection', source, transaction)
+    const projected = projectViewportTransaction(
+      mounted.editing,
+      source.state,
+      transaction,
+      view.state.selection,
+    )
+    if (!projected) return request('transaction', source, transaction)
+    commit(source, transaction, projected)
   }
 
   const selectAll = (_view: EditorView, event: KeyboardEvent): boolean => {
@@ -474,8 +490,24 @@ export function createViewportSurface(
     })
   }
 
-  const drainHistory = () => {
-    if (view?.composing) return
+  const closeComposition = (
+    source: SourceState,
+    session = compositionSession,
+  ): Transaction | undefined => {
+    if (compositionSession === session) compositionSession = undefined
+    if (session && sourceCompositionKey.getState(source.state) === session)
+      return source.state.tr.setMeta(sourceCompositionKey, null)
+  }
+
+  const settleInput = () => {
+    if (!view || view.composing) return
+    if (compositionSession) {
+      const source = options.readSource()
+      const transaction = closeComposition(source)
+      // The browser may finish with no further DOM mutation. Let the source
+      // finalize the input before a queued command reads its history.
+      if (transaction) commit(source, view.state.tr, transaction)
+    }
     for (const command of pendingHistory.splice(0)) applyHistory(command)
   }
 
@@ -484,7 +516,7 @@ export function createViewportSurface(
     else if (canRunHistory() && pendingHistory.push(command) === 1) {
       // ProseMirror may flush the final composition mutation in its own
       // microtask. Run after that flush and before another input task.
-      window.queueMicrotask(() => window.queueMicrotask(drainHistory))
+      window.queueMicrotask(() => window.queueMicrotask(settleInput))
     }
     return true
   }
@@ -548,14 +580,36 @@ export function createViewportSurface(
     return true
   }
 
+  const startComposition = (activeView: EditorView) => {
+    const source = options.readSource()
+    if (
+      activeView.editable &&
+      (options.editable?.(source.state) ?? true) &&
+      current?.editing.source === source.state.doc &&
+      sourceCompositionKey.getState(source.state) === null
+    ) {
+      const session = Symbol()
+      compositionSession = session
+      options.dispatch(source.state.tr.setMeta(sourceCompositionKey, session))
+      if (disposed || activeView.isDestroyed) {
+        const transaction = closeComposition(options.readSource(), session)
+        if (transaction) options.dispatch(transaction)
+        return true
+      }
+    }
+    return false
+  }
+
   const finishComposition = () => {
     endingComposition = true
+    // ProseMirror's microtask publishes the final DOM mutation first.
+    window.queueMicrotask(() => window.queueMicrotask(settleInput))
     window.clearTimeout(compositionTimer)
     compositionTimer = window.setTimeout(() => {
       compositionTimer = undefined
       endingComposition = false
       if (view?.composing) return
-      drainHistory()
+      settleInput()
       if (!deferred) return
       const packet = deferred
       deferred = undefined
@@ -654,6 +708,7 @@ export function createViewportSurface(
       handleKeyDown,
       handleDOMEvents: {
         beforeinput: historyInput,
+        compositionstart: startComposition,
         compositionend: finishComposition,
         copy: copySelection,
         cut: copySelection,
@@ -714,6 +769,7 @@ export function createViewportSurface(
       if (deferred && retired(deferred)) deferred = undefined
     },
     destroy() {
+      if (disposed) return
       disposed = true
       window.clearTimeout(compositionTimer)
       pendingHistory.length = 0
@@ -721,6 +777,10 @@ export function createViewportSurface(
       current = undefined
       view?.destroy()
       view = undefined
+      if (compositionSession) {
+        const transaction = closeComposition(options.readSource())
+        if (transaction) options.dispatch(transaction)
+      }
     },
   }
 }

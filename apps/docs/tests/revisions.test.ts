@@ -23,6 +23,10 @@ import { deleteTableColumn, insertRowsOrColumns } from '../src/renderer/editor/t
 import { replaceInlineRange } from '../src/renderer/ai/protocol'
 import { setAuthorName } from '../src/renderer/author-name'
 import {
+  SOURCE_DOCUMENT_REPLACED,
+  sourceCompositionKey,
+} from '../src/renderer/editor/source-composition'
+import {
   acceptAllRevisions,
   acceptCurrentRevision,
   applyRevisions,
@@ -32,6 +36,7 @@ import {
   gotoRevision,
   rejectAllRevisions,
   rejectCurrentRevision,
+  TRACK_IGNORE,
   type TrackChangesStorage,
 } from '../src/renderer/editor/revisions'
 
@@ -1098,6 +1103,32 @@ describe('IME composition deferral', () => {
     expect(ranges[0]).toMatchObject({ kind: 'ins', author: 'Tester' })
     expect(editor.state.doc.textBetween(ranges[0].from, ranges[0].to)).toBe('ね')
     editor.destroy()
+  })
+
+  it('discards an old pending composition when another document replaces the source', () => {
+    const editor = createEditor([para(text('before'))])
+    try {
+      editor.storage.trackChanges.enabled = true
+      editor.view.dispatch(editor.state.tr.setMeta(sourceCompositionKey, Symbol()))
+      editor.view.dispatch(editor.state.tr.insertText('ni', 2).setMeta('composition', 1))
+      expect(collectRevisions(editor.state.doc)).toHaveLength(0)
+      editor.view.dispatch(
+        editor.state.tr
+          .replaceWith(
+            0,
+            editor.state.doc.content.size,
+            editor.schema.nodeFromJSON(para(text('new file'))),
+          )
+          .setMeta(TRACK_IGNORE, true)
+          .setMeta(sourceCompositionKey, SOURCE_DOCUMENT_REPLACED),
+      )
+      expect(sourceCompositionKey.getState(editor.state)).toBeNull()
+      editor.view.dispatch(editor.state.tr)
+      expect(editor.state.doc.textContent).toBe('new file')
+      expect(collectRevisions(editor.state.doc)).toHaveLength(0)
+    } finally {
+      editor.destroy()
+    }
   })
 
   it('records the selection a composition replaced as a struck deletion', () => {
