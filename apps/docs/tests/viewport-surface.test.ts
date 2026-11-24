@@ -11,7 +11,7 @@ import {
   createViewportSurface,
   type ViewportSurface,
 } from '../src/renderer/editor/viewport-surface'
-import type { ViewportContent } from '../src/renderer/editor/viewport-layout'
+import { viewportLayout, type ViewportContent } from '../src/renderer/editor/viewport-layout'
 
 const schema = new Schema({
   nodes: {
@@ -22,6 +22,15 @@ const schema = new Schema({
       toDOM: () => ['p', 0],
     },
     docAnchor: { group: 'block', atom: true, toDOM: () => ['div'], toText: () => 'source atom' },
+    docToc: {
+      group: 'block',
+      atom: true,
+      toDOM: () => [
+        'div',
+        ['span', { class: 'doc-toc-tail' }],
+        ['span', { class: 'doc-toc-tail' }],
+      ],
+    },
     docInlineImage: {
       inline: true,
       group: 'inline',
@@ -306,6 +315,13 @@ describe('viewport surface', () => {
             },
           ),
           columnSplitDecoration(6, 'float:left;width:40px'),
+          Decoration.inline(
+            7,
+            8,
+            { class: 'doc-cjkshrink', style: 'letter-spacing:-2px' },
+            { paintInViewport: 'inline' },
+          ),
+          Decoration.inline(6, 9, { class: 'owner-highlight' }),
           Decoration.node(5, 10, { class: 'owner-selection' }),
         ]),
     })
@@ -320,6 +336,60 @@ describe('viewport surface', () => {
       expect(el.classList.contains('owner-selection')).toBe(false)
       expect(el.style.getPropertyValue('--doc-grid-pitch')).toBe('26px')
       expect(el.querySelector<HTMLElement>('.doc-col-split-float')?.style.width).toBe('40px')
+      const letter = el.querySelector<HTMLElement>('.doc-cjkshrink')
+      expect(letter?.textContent).toBe('E')
+      expect(letter?.style.letterSpacing).toBe('-2px')
+      expect(el.querySelector('.owner-highlight')).toBeNull()
+    } finally {
+      authority.destroy()
+    }
+  })
+
+  it('replays each measured TOC leader length from the owner and clears retired lengths', () => {
+    const doc = schema.node('doc', null, [schema.nodes.docToc.create()])
+    const state = EditorState.create({ doc })
+    const surface = createViewportSurface(
+      document.body.appendChild(document.createElement('div')),
+      {
+        readSource: () => ({ state, revision: 0 }),
+        dispatch: vi.fn(),
+        requestRange: vi.fn(),
+      },
+    )
+    mounted.push(surface)
+    const authority = new EditorView(document.body, { state })
+    const ownerNode = authority.nodeDOM(0) as HTMLElement
+    vi.spyOn(ownerNode, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 500, 22))
+    vi.spyOn(authority.dom, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 500, 22))
+    const ownerTails = ownerNode.querySelectorAll<HTMLElement>('.doc-toc-tail')
+    ownerTails[0].style.setProperty('--doc-toc-gap', '83.25px')
+    ownerTails[1].style.setProperty('--doc-toc-gap', '0px')
+    const read = () =>
+      viewportLayout(authority, {
+        blocks: [],
+        sections: [],
+        slices: [],
+        cuts: [],
+        geoms: [],
+        hfHeights: [],
+        rowSplits: [],
+        carries: [],
+      }).read({ top: 0, bottom: 24 })!
+    try {
+      surface.publish({ publication: 1, revision: 0, sequence: 1, content: read() })
+      const painted = surface.view!.dom.querySelectorAll<HTMLElement>('.doc-toc-tail')
+      expect(Array.from(painted, (el) => el.style.getPropertyValue('--doc-toc-gap'))).toEqual([
+        '83.25px',
+        '0px',
+      ])
+
+      ownerTails[0].style.removeProperty('--doc-toc-gap')
+      ownerTails[1].style.setProperty('--doc-toc-gap', '72px')
+      surface.publish({ publication: 2, revision: 0, sequence: 2, content: read() })
+      expect(Array.from(painted, (el) => el.style.getPropertyValue('--doc-toc-gap'))).toEqual([
+        '',
+        '72px',
+      ])
     } finally {
       authority.destroy()
     }
@@ -430,7 +500,9 @@ describe('viewport surface', () => {
               pictures: [{ from: 12, to: 13, box: box(61, 810, 80, 120) }],
             },
           ]),
-          decorations: [{ from: 10, to: 15, attrs: { class: 'picture-frame' }, through: 15 }],
+          decorations: [
+            { from: 10, to: 15, attrs: { class: 'picture-frame' }, inline: false, through: 15 },
+          ],
         },
       }),
     ).toBe('applied')

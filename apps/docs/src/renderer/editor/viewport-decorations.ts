@@ -6,7 +6,7 @@ type DecorationSpan = {
   from: number
   to: number
   through: number
-} & ({ attrs: Record<string, string> } | { columnSplit: string; direct: boolean })
+} & ({ attrs: Record<string, string>; inline: boolean } | { columnSplit: string; direct: boolean })
 
 export type ViewportDecorations = readonly DecorationSpan[]
 
@@ -22,7 +22,10 @@ export function readViewportDecorations(view: EditorView): ViewportDecorations {
       const picked = set.find(
         undefined,
         undefined,
-        (spec) => spec.paintInViewport === true || typeof spec.viewportColumnSplit === 'string',
+        (spec) =>
+          spec.paintInViewport === true ||
+          spec.paintInViewport === 'inline' ||
+          typeof spec.viewportColumnSplit === 'string',
       )
       for (const raw of picked) {
         const { from, to, type, spec } = raw as DecoratedRange
@@ -45,6 +48,7 @@ export function readViewportDecorations(view: EditorView): ViewportDecorations {
           from,
           to,
           attrs: { ...(classes ? { class: classes } : {}), ...(style ? { style } : {}) },
+          inline: spec.paintInViewport === 'inline',
           through: to,
         })
       }
@@ -98,6 +102,11 @@ export function projectViewportDecorations(
       continue
     }
     const to = editing.toLocal(span.to)
+    if (span.inline) {
+      if (from !== undefined && to !== undefined && from < to)
+        result.push(Decoration.inline(from, to, span.attrs))
+      continue
+    }
     if (from !== undefined && to !== undefined && from < to) {
       result.push(Decoration.node(from, to, span.attrs))
     } else {

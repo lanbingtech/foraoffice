@@ -26,6 +26,7 @@ interface PositionedBlock {
   box: LayoutBox
   pictures?: PictureFragment[]
   hidden?: boolean
+  tocLeaders?: readonly (number | null)[]
 }
 
 interface MeasuredBlock {
@@ -161,7 +162,18 @@ export function viewportLayout(view: EditorView, layout: PageLayout): ViewportLa
         if (bounds.height > 0 && bounds.width > 0) ink = boxInCanvas(bounds, root, scale)
       }
       const hidden = box.height === 0 && !ink
-      const placement: PositionedBlock = { from, to, box, pictures, hidden }
+      const leaders = Array.from(dom.querySelectorAll<HTMLElement>('.doc-toc-tail'), (tail) => {
+        const value = Number.parseFloat(tail.style.getPropertyValue('--doc-toc-gap'))
+        return Number.isFinite(value) && value >= 0 ? value : null
+      })
+      const placement: PositionedBlock = {
+        from,
+        to,
+        box,
+        pictures,
+        hidden,
+        ...(leaders.some((value) => value !== null) ? { tocLeaders: leaders } : {}),
+      }
       const coverage = ink ?? box
       blocks.push({ placement, through: coverage.top + coverage.height, ink })
       if (hidden) empty[from] = placement

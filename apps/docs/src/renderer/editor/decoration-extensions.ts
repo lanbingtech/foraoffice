@@ -211,6 +211,7 @@ export const tabStopPluginKey = new PluginKey<DecorationSet>('tabStops')
 /** transaction meta: the lowest doc position whose paragraph changed height
  *  after a tab decoration landed; the paginator resumes a pass from there */
 export const tabReflowMeta = 'tabReflow'
+export const TAB_GEOMETRY_COMMITTED_EVENT = 'genoffice:tab-geometry-committed'
 
 /** first paragraph whose height moved since the heights were taken, if any */
 export function tabReflowStart(
@@ -632,6 +633,7 @@ class TabLayoutView {
       return
     }
     this.signalReflow()
+    view.dom.dispatchEvent(new Event(TAB_GEOMETRY_COMMITTED_EVENT))
     this.measure(this.dispatchScope)
   }
 
@@ -773,7 +775,12 @@ class TabLayoutView {
     const decos: Decoration[] = []
     for (const r of paraRanges)
       decos.push(
-        Decoration.node(r.from, r.to, { class: 'has-tab-stops' }, { class: 'has-tab-stops' }),
+        Decoration.node(
+          r.from,
+          r.to,
+          { class: 'has-tab-stops' },
+          { class: 'has-tab-stops', paintInViewport: true },
+        ),
       )
     for (const t of tabs) {
       // the wrap's forced break and a glyph leader share ::before; the blank
@@ -789,7 +796,13 @@ class TabLayoutView {
         class: `doc-tab${leader}${underline}${collapse}${glue}${box}${wrap}`,
         style: fixed ? `width:${t.fixed}px` : `tab-size:${t.cssSize}px`,
       }
-      decos.push(Decoration.inline(t.pos, t.pos + 1, attrs, { ...attrs, wrap: t.wrap }))
+      decos.push(
+        Decoration.inline(t.pos, t.pos + 1, attrs, {
+          ...attrs,
+          wrap: t.wrap,
+          paintInViewport: 'inline',
+        }),
+      )
     }
     const previous = roots
       ? tabDecorationsInRanges(old, edit && !retry ? [edit] : paraRanges)
@@ -892,6 +905,7 @@ class TabLayoutView {
       p.tail.style.setProperty('--doc-toc-gap', p.gap)
       this.tocGaps.set(p.tail, p.gap)
     }
+    view.dom.dispatchEvent(new Event(TAB_GEOMETRY_COMMITTED_EVENT))
     let from: number | null = null
     for (const c of changed) {
       if (Math.abs(c.el.getBoundingClientRect().height - c.before) <= 0.5) continue

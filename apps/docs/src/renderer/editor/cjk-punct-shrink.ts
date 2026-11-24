@@ -755,7 +755,7 @@ class CjkPunctShrinkView {
         s.from,
         s.from + 1,
         { class: 'doc-cjkshrink', style },
-        { hang: s.hang === true, style },
+        { hang: s.hang === true, style, paintInViewport: 'inline' },
       )
     })
     const previous = old ?? DecorationSet.empty

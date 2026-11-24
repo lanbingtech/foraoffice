@@ -157,6 +157,21 @@ function pictureBorders(view: EditorView, content: ViewportContent): BorderOffse
   return borders
 }
 
+function positionTocLeaders(view: EditorView, content: ViewportContent): void {
+  view.state.doc.forEach((_node, position, index) => {
+    const root = view.nodeDOM(position)
+    if (!(root instanceof HTMLElement)) return
+    const widths = content.blocks[index].tocLeaders
+    const tails = root.querySelectorAll<HTMLElement>('.doc-toc-tail')
+    tails.forEach((tail, i) => {
+      const width = widths?.length === tails.length ? widths[i] : null
+      if (typeof width === 'number' && Number.isFinite(width) && width >= 0)
+        tail.style.setProperty('--doc-toc-gap', `${width}px`)
+      else tail.style.removeProperty('--doc-toc-gap')
+    })
+  })
+}
+
 function localSelection(selection: Selection, editing: EditingViewport): Selection | undefined {
   if (selection instanceof AllSelection) return new AllSelection(editing.doc)
   const anchor = editing.toLocal(selection.anchor)
@@ -233,6 +248,7 @@ function samePlacements(previous: ViewportContent, next: ViewportContent): boole
         block.to === other.to &&
         block.box === other.box &&
         block.hidden === other.hidden &&
+        block.tocLeaders === other.tocLeaders &&
         block.pictures?.length === other.pictures?.length &&
         (block.pictures?.every((picture, i) => picture === other.pictures?.[i]) ?? true)
       )
@@ -577,6 +593,7 @@ export function createViewportSurface(
       view.updateState(state)
     }
     positionViewportColumnSplits(view, content.decorations ?? [], editing)
+    positionTocLeaders(view, content)
     options.onPublished?.(packet)
     return 'applied'
   }

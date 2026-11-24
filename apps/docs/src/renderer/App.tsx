@@ -16,7 +16,7 @@ import { paginationActivity, trackPaginationActivity } from './pagination-activi
 import { createDocumentStoryDiagnostic, disposeOwnedDiagnostic } from './document-story-diagnostic'
 import { observePaginationFonts } from './pagination-fonts'
 import { justifyShrinkPluginKey } from './editor/justify-shrink'
-import { tabReflowMeta } from './editor/decoration-extensions'
+import { TAB_GEOMETRY_COMMITTED_EVENT, tabReflowMeta } from './editor/decoration-extensions'
 import {
   useCallback,
   useEffect,
@@ -6451,6 +6451,17 @@ export function App({
     }
     document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, onContentSettled)
     const paragraphHost = editor?.view.dom
+    const onTabGeometry = () => {
+      // Horizontal changes also affect the painted viewport and its caret
+      // hit targets, even when no paragraph became taller.
+      if (!viewportPublished) return
+      invalidateViewport()
+      queueMicrotask(() => {
+        if (!disposed) publishViewportIfSettled()
+      })
+    }
+    if (onViewportLayout)
+      paragraphHost?.addEventListener(TAB_GEOMETRY_COMMITTED_EVENT, onTabGeometry)
     const onParagraphsSettled = () => {
       if (!waitingForParagraphs && !laidOutBeforeParagraphsSettled) return
       const finalTypography = editor ? typographyOf(editor.state) : undefined
@@ -6573,6 +6584,7 @@ export function App({
       publishScrolledPage.current = undefined
       streamResize.disconnect()
       document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, onContentSettled)
+      paragraphHost?.removeEventListener(TAB_GEOMETRY_COMMITTED_EVENT, onTabGeometry)
       paragraphHost?.removeEventListener(PARAGRAPH_MEASUREMENTS_SETTLED_EVENT, onParagraphsSettled)
       editor?.off('update', onDocUpdate)
       editor?.off('transaction', onShrinkTr)
