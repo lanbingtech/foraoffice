@@ -4339,6 +4339,7 @@ export function App({
     let flowRead: { pm: HTMLElement; reader: ReturnType<typeof createBlockMeasurer> } | undefined
     let timer: number | null = null
     let viewportAppendOnly = false
+    let viewportMeasuredDocument: Editor['state']['doc'] | undefined
     let waitingForParagraphs = false
     let editedWhileMeasuring = false
     let laidOutBeforeParagraphsSettled = false
@@ -4622,7 +4623,10 @@ export function App({
           return reject('join')
         items.push({ el, prev })
       }
-      return blocksKeepSlicing(items, slices, factor) || reject('geometry')
+      if (onViewportLayout && !viewportMeasuredDocument) return reject('partial-layout')
+      if (!blocksKeepSlicing(items, slices, factor)) return reject('geometry')
+      if (onViewportLayout) viewportMeasuredDocument = pmDoc
+      return true
     }
     let hasTocFields = false
     let tocRefreshComplete = false
@@ -4686,7 +4690,15 @@ export function App({
     }
     const publishViewportIfSettled = () => {
       const layout = pageLayoutRef.current
-      if (!onViewportLayout || viewportPublished || !layout || !editor || timer !== null) return
+      if (
+        !onViewportLayout ||
+        viewportPublished ||
+        !layout ||
+        !editor ||
+        viewportMeasuredDocument !== editor.state.doc ||
+        timer !== null
+      )
+        return
       const state = paginationActivity.snapshot()
       if (
         state.pending ||
@@ -5183,6 +5195,8 @@ export function App({
       pageCuts = cuts
       lastBlocks = blocks
       lastPassChildCount = measuredCount
+      if (onViewportLayout)
+        viewportMeasuredDocument = model?.childCount === measuredCount ? model : undefined
       pageLayoutRef.current = {
         blocks,
         slices,

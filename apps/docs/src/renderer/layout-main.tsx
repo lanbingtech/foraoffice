@@ -124,10 +124,10 @@ function runLayout(
   }
   const publish = (next: ViewportLayout | null) => {
     const previous = layout
-    layout = next
+    layout = editor && next?.document !== editor.state.doc ? null : next
     publication++
     if (!opened || failed) return
-    if (!next) {
+    if (!layout) {
       if (previous) port.postMessage({ type: 'invalidated', publication })
       return
     }
@@ -135,10 +135,10 @@ function runLayout(
       type: 'layout',
       publication,
       revision,
-      pages: next.pages,
-      starts: next.pageStarts(),
-      geometry: next.geometry(),
-      initial: next.read({ top: 0, bottom: height }),
+      pages: layout.pages,
+      starts: layout.pageStarts(),
+      geometry: layout.geometry(),
+      initial: layout.read({ top: 0, bottom: height }),
     })
   }
   const reportOpen = (openedEditor: Editor | null) => {
