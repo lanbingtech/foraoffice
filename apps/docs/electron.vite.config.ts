@@ -40,10 +40,26 @@ export default defineConfig({
     // Sandboxed preload scripts cannot require arbitrary npm packages at
     // runtime, so the drop-open bridge must be bundled, not externalized.
     plugins: [externalizeDepsPlugin({ exclude: ['@genoffice/electron-utils'] })],
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve(__dirname, 'src/preload/index.ts'),
+          layout: resolve(__dirname, 'src/preload/layout.ts'),
+        },
+      },
+    },
   },
   renderer: {
     plugins: [react()],
     resolve: { alias: localAlias },
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve(__dirname, 'src/renderer/index.html'),
+          layout: resolve(__dirname, 'src/renderer/layout.html'),
+        },
+      },
+    },
     server: {
       // Overridable so multiple genoffice dev instances can coexist (default 5173).
       port: Number(process.env.DOCS_DEV_PORT) || 5173,

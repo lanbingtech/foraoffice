@@ -359,6 +359,7 @@ import {
   type TrackChangesOptions,
 } from './editor/track-changes-options'
 import { pagePositions, type PageLayout } from './editor/goto'
+import { viewportLayout, type ViewportLayout } from './editor/viewport-layout'
 import { PagedViewProbe, pagedViewProbe } from './editor/paged-view-probe'
 import { Ribbon, type ConvertFormat } from './components/Ribbon'
 import {
@@ -841,10 +842,14 @@ export interface DocsAppRuntime {
 
 export function App({
   onRuntime,
+  onViewportLayout,
+  onViewportOpen,
   agentUi,
   embedded = false,
 }: {
   onRuntime?: (value: DocsAppRuntime | null) => void
+  onViewportLayout?: (value: ViewportLayout | null) => void
+  onViewportOpen?: (editor: Editor | null) => void
   agentUi?: DocsAgentUi
   embedded?: boolean
 } = {}) {
@@ -2594,14 +2599,17 @@ export function App({
       setDocPwdPrompt({ path: info.path, name: info.name, value: '', errorKey: '', busy: false }),
   }
 
-  const loadFile = useCallback(async (result: OpenDocxResult) => {
-    const outcome = await loadFileImpl(fileCtxRef.current, result)
-    // a failed open with no document yet (boot, or the open that superseded the
-    // boot open) must land on blank instead of the "Opening…" screen
-    if (outcome === 'failed' && !fileCtxRef.current.doc && !getDocsDocumentHost())
-      await newFileImpl(fileCtxRef.current)
-    return outcome
-  }, [])
+  const loadFile = useCallback(
+    async (result: OpenDocxResult) => {
+      const outcome = await loadFileImpl(fileCtxRef.current, result)
+      if (onViewportOpen) onViewportOpen(outcome === 'ok' ? fileCtxRef.current.editor : null)
+      // The interactive UI falls back to a blank document on a failed boot.
+      else if (outcome === 'failed' && !fileCtxRef.current.doc && !getDocsDocumentHost())
+        await newFileImpl(fileCtxRef.current)
+      return outcome
+    },
+    [onViewportOpen],
+  )
   const resetFile = useCallback(() => newFileImpl(fileCtxRef.current), [])
   const commitOpenedFile = useCallback(
     async (result: OpenDocxResult) => {
@@ -4669,8 +4677,33 @@ export function App({
         }
       }
     }
+    let viewportPublished = false
+    const invalidateViewport = () => {
+      if (viewportPublished) {
+        viewportPublished = false
+        onViewportLayout?.(null)
+      }
+    }
+    const publishViewportIfSettled = () => {
+      const layout = pageLayoutRef.current
+      if (!onViewportLayout || viewportPublished || !layout || !editor || timer !== null) return
+      const state = paginationActivity.snapshot()
+      if (
+        state.pending ||
+        state.active ||
+        state.contentPending ||
+        state.fontProbes ||
+        hasFailedPhasedContent() ||
+        hasPendingParagraphMeasurements(editor.view) ||
+        document.fonts.status !== 'loaded'
+      )
+        return
+      viewportPublished = true
+      onViewportLayout(viewportLayout(editor.view, layout))
+    }
     const remeasure = (forceFull = false, synchronous = false) => {
       if (disposed) return
+      invalidateViewport()
       timer = null
       const viewportOnly = viewportAppendOnly
       viewportAppendOnly = false
@@ -4827,6 +4860,7 @@ export function App({
         restoreNaturalFlow?.()
         restoreNaturalFlow = undefined
       }
+      publishViewportIfSettled()
     }
     const remeasurePass = (dirty: number | null, keepPublishedRange: boolean) => {
       const pm = pmEl()
@@ -6310,6 +6344,7 @@ export function App({
       const streaming = isPhasedContentPending()
       if (streaming && trigger === 'append' && trackStreamingCoverage && !streamNeedsLayout())
         return
+      invalidateViewport()
       if (trigger !== 'follow-up') measureMountedTail = true
       if (fastIndex === null) fastEdits = null
       else fastEdits?.add(fastIndex)
@@ -6430,11 +6465,15 @@ export function App({
         first = cjk === null ? justify : justify === null ? cjk : Math.min(cjk, justify)
       }
       if (!waitingForParagraphs && first === null) {
-        if (timer === null) activity.update({ pending: false })
+        if (timer === null) {
+          activity.update({ pending: false })
+          publishViewportIfSettled()
+        }
         return
       }
       // Typography can change wrapping without changing the document. Include
       // it in an already queued pass, or resume the pass that waited for it.
+      invalidateViewport()
       measureMountedTail = true
       fastEdits = null
       if (first !== null && dirtyFrom !== null) {
@@ -6519,6 +6558,7 @@ export function App({
     return () => {
       disposed = true
       flowRead?.reader.dispose()
+      invalidateViewport()
       activity.dispose()
       disposeOwnedDiagnostic(
         (window as unknown as Record<string, Record<string, unknown>>).__pageDebug,
@@ -6540,6 +6580,7 @@ export function App({
   }, [
     doc,
     docCss,
+    onViewportLayout,
     multipageMode,
     publishPage,
     section,
@@ -8499,6 +8540,7 @@ export function App({
   )
   if (runtimeDocumentRef.current) runtimeDocumentRef.current.annotations = docsAnnotations
   fileCtxRef.current.beforeDocumentReplace = () => {
+    if (window.desktop) window.postMessage('docs:disconnect-layout', '*')
     docsCommands.releaseAll()
     docsAnnotations.reset()
     // The pane survives a document replacement. Reset its position together

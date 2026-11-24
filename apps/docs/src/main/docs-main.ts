@@ -2,6 +2,7 @@
 import { tDocsNative as tMain } from '../shared/native-i18n'
 import { createHash, randomUUID } from 'node:crypto'
 import { handOffBytes } from './byte-handoff'
+import { disposeLayoutRenderer, openLayoutRenderer } from './layout-renderer'
 import { RecoveryCopies } from '../services/recovery-copies'
 import { archiveOriginal as archiveDocxOriginal } from '../services/original-archive'
 import {
@@ -693,6 +694,7 @@ async function diskChangedExternally(wcId: number, filePath: string): Promise<bo
  * workaround), so the orphan must lose write access and stop its timers — otherwise
  * its 30s recovery loop resurrects content the user already discarded. */
 export function teardownDocsRenderer(contents: WebContents): void {
+  disposeLayoutRenderer(contents)
   teardownZoteroIpc(contents)
   tornDownWcIds.add(contents.id)
   releaseSpellIgnores(contents.id)
@@ -1659,6 +1661,45 @@ export function registerDocsIpc(): void {
     requestDocsClose(event.sender, dialogParent(event)),
   )
   ipcMain.handle('docs:system-locale', () => app.getSystemLocale())
+  ipcMain.on('docs:disconnect-layout', (event) => {
+    if (event.senderFrame === event.sender.mainFrame) disposeLayoutRenderer(event.sender)
+  })
+
+  ipcMain.on('docs:connect-layout', (event, dimensions: unknown) => {
+    const [port] = event.ports
+    if (!port) return
+    const size = dimensions as { width?: unknown; height?: unknown } | null
+    const width = Number(size?.width)
+    const height = Number(size?.height)
+    const owner = event.sender
+    if (
+      event.ports.length !== 1 ||
+      event.senderFrame !== owner.mainFrame ||
+      !openDocByWc.has(owner.id) ||
+      tornDownWcIds.has(owner.id) ||
+      !Number.isInteger(width) ||
+      !Number.isInteger(height) ||
+      width < 1 ||
+      height < 1 ||
+      width > 8192 ||
+      height > 8192
+    ) {
+      for (const transferred of event.ports) transferred.close()
+      return
+    }
+    const url = new URL(rendererUrl(runtime.rendererUrl, 'docs'))
+    url.pathname = new URL('layout.html', url).pathname
+    if (new URL(owner.getURL()).searchParams.get('mode') === 'tab')
+      url.searchParams.set('mode', 'tab')
+    void openLayoutRenderer(owner, port, {
+      rendererUrl: url.href,
+      preloadPath: join(dirname(runtime.preloadPath), 'layout.js'),
+      width,
+      height,
+    }).catch(() => {
+      // The transferred port closes on failure. The document stays with its owner.
+    })
+  })
 
   configureMetricsCache(userDataPath('font-metrics'))
   ipcMain.handle('docs:font-metrics', (_event, family: string) =>
