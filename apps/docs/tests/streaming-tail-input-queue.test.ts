@@ -11,7 +11,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
-import { PHASED_APPEND } from '../src/renderer/editor/streaming-tail-guard'
+import { PHASED_APPEND, streamedAppendApplied } from '../src/renderer/editor/streaming-tail-guard'
 import { appendStreamedNodes } from '../src/renderer/file-actions'
 import {
   PHASE1_BLOCKS,
@@ -19,6 +19,7 @@ import {
   cancelPhasedContent,
   isPhasedContentPending,
   setContentPhased,
+  waitForFullContent,
   type PhasedContentHost,
 } from '../src/renderer/phased-content'
 
@@ -70,9 +71,14 @@ function type(editor: Editor, text: string): void {
 }
 
 /** mounts the first phase and returns the scheduled tail chunks */
-function startStreamingOpen(editor: Editor, blocks: number): Array<() => void> {
+function startStreamingOpen(
+  editor: Editor,
+  blocks: number,
+  fail?: (nodes: Parameters<typeof appendStreamedNodes>[1], attempt: object) => void,
+): Array<() => void> {
   const chunks: Array<() => void> = []
   const host: PhasedContentHost = {
+    owner: editor,
     setContent: (doc) =>
       editor
         .chain()
@@ -80,12 +86,13 @@ function startStreamingOpen(editor: Editor, blocks: number): Array<() => void> {
         .setMeta(PHASED_APPEND, true)
         .setContent(doc as never)
         .run(),
-    appendNodes: (nodes) => appendStreamedNodes(editor, nodes as never),
+    appendNodes: (nodes, attempt) =>
+      fail ? fail(nodes, attempt) : appendStreamedNodes(editor, nodes, attempt),
+    appliedAppend: (attempt) => streamedAppendApplied(editor.state, attempt),
     isDestroyed: () => editor.isDestroyed,
     resetHistory: () => {},
     setLoading: () => {},
     getDirty: () => false,
-    setDirty: () => {},
   }
   const doc = { type: 'doc', content: Array.from({ length: blocks }, (_, i) => para(`block ${i}`)) }
   setContentPhased(host, doc as never, (cb) => chunks.push(cb))
@@ -95,6 +102,42 @@ function startStreamingOpen(editor: Editor, blocks: number): Array<() => void> {
 const TAIL_DOC = PHASED_MIN_BLOCKS + 10
 
 describe('typing on the streaming tail of a phased open', () => {
+  it('retains held input on the partial document when both attempts fail', async () => {
+    const editor = createEditor()
+    const chunks = startStreamingOpen(editor, TAIL_DOC, () => {
+      throw new Error('append failed')
+    })
+    const mounted = editor.state.doc.childCount
+    editor.commands.setTextSelection(endOfBlock(editor, mounted - 1))
+    type(editor, 'Z')
+
+    while (chunks.length) chunks.shift()!()
+    await expect(waitForFullContent()).resolves.toBe(false)
+    expect(editor.state.doc.childCount).toBe(mounted)
+    expect(editor.state.doc.lastChild?.textContent).toBe(`block ${mounted - 1}Z`)
+  })
+
+  it('replays held input and keeps a reentrant edit after an installed chunk throws', () => {
+    const editor = createEditor()
+    let first = true
+    const chunks = startStreamingOpen(editor, TAIL_DOC, (nodes, attempt) => {
+      appendStreamedNodes(editor, nodes, attempt)
+      if (!first) return
+      first = false
+      editor.view.dispatch(editor.state.tr.insertText('!', endOfBlock(editor, 0)))
+      throw new Error('observer failed after dispatch')
+    })
+    const mounted = editor.state.doc.childCount
+    editor.commands.setTextSelection(endOfBlock(editor, mounted - 1))
+    type(editor, 'Z')
+
+    while (chunks.length) chunks.shift()!()
+    expect(editor.state.doc.childCount).toBe(TAIL_DOC)
+    expect(editor.state.doc.child(0).textContent).toBe('block 0!')
+    expect(editor.state.doc.child(mounted - 1).textContent).toBe(`block ${mounted - 1}Z`)
+    expect(editor.state.doc.lastChild?.textContent).toBe(`block ${TAIL_DOC - 1}`)
+  })
+
   it('keeps the character and inserts it as an undoable edit once the tail lands', () => {
     const editor = createEditor()
     const chunks = startStreamingOpen(editor, TAIL_DOC)

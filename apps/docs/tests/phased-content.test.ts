@@ -22,8 +22,9 @@ const docOf = (blocks: number): PmNode => ({
   })),
 })
 
-/** host that records events; appends mark dirty like the editor's onUpdate does */
+/** Host that records events without treating appends as edits. */
 function makeHost(destroyed = false) {
+  let installed: object | undefined
   const state = {
     mounted: [] as PmNode[],
     events: [] as string[],
@@ -35,11 +36,12 @@ function makeHost(destroyed = false) {
       state.mounted = [...(d.content ?? [])]
       state.events.push(`set:${state.mounted.length}`)
     },
-    appendNodes: (nodes) => {
+    appendNodes: (nodes, attempt) => {
       state.mounted.push(...nodes)
-      state.dirty = true
+      installed = attempt
       state.events.push(`append:${nodes.length}`)
     },
+    appliedAppend: (attempt) => installed === attempt,
     isDestroyed: () => destroyed,
     resetHistory: () => state.events.push('resetHistory'),
     setLoading: (v) => {
@@ -47,9 +49,6 @@ function makeHost(destroyed = false) {
       state.events.push(`loading:${v}`)
     },
     getDirty: () => state.dirty,
-    setDirty: (v) => {
-      state.dirty = v
-    },
   }
   return { host, state }
 }
@@ -168,7 +167,7 @@ describe('setContentPhased', () => {
     )
     expect(state.loading).toBe(false)
     expect(state.events).toContain('resetHistory')
-    await expect(waitForFullContent()).resolves.toBeUndefined()
+    await expect(waitForFullContent()).resolves.toBe(true)
   })
 
   it('streaming is not an edit: the dirty flag survives every chunk', () => {
@@ -179,14 +178,30 @@ describe('setContentPhased', () => {
     expect(state.dirty).toBe(false)
   })
 
+  it('keeps a foreground edit made synchronously within a successful append', () => {
+    const { host, state } = makeHost()
+    const scheduler = makeScheduler()
+    const append = host.appendNodes
+    host.appendNodes = (nodes, attempt) => {
+      append(nodes, attempt)
+      state.mounted[0] = { type: 'docParagraph', content: [{ type: 'text', text: 'live edit' }] }
+      state.dirty = true
+    }
+    setContentPhased(host, docOf(PHASED_MIN_BLOCKS + 1), scheduler.schedule, () => 0)
+    while (scheduler.pending()) scheduler.drain()
+    expect(state.mounted[0].content?.[0].text).toBe('live edit')
+    expect(state.dirty).toBe(true)
+    expect(state.events).not.toContain('resetHistory')
+  })
+
   it('reduces the next append workload after a slow batch without dropping content', async () => {
     const { host, state } = makeHost()
     const scheduler = makeScheduler()
     const total = PHASE1_BLOCKS + PHASE_CHUNK_BLOCKS * 3
     let now = 0
     const append = host.appendNodes
-    host.appendNodes = (nodes) => {
-      append(nodes)
+    host.appendNodes = (nodes, attempt) => {
+      append(nodes, attempt)
       now += nodes.length * 8
     }
     setContentPhased(host, docOf(total), scheduler.schedule, () => now)
@@ -200,7 +215,7 @@ describe('setContentPhased', () => {
     expect(state.mounted.map((node) => node.attrs?.docxIndex)).toEqual(
       Array.from({ length: total }, (_, i) => i),
     )
-    await expect(waitForFullContent()).resolves.toBeUndefined()
+    await expect(waitForFullContent()).resolves.toBe(true)
   })
 
   it.each([
@@ -211,8 +226,8 @@ describe('setContentPhased', () => {
     const scheduler = makeScheduler()
     let now = 0
     const append = host.appendNodes
-    host.appendNodes = (nodes) => {
-      append(nodes)
+    host.appendNodes = (nodes, attempt) => {
+      append(nodes, attempt)
       now += 5
     }
     setContentPhased(
@@ -235,13 +250,14 @@ describe('setContentPhased', () => {
     const { host, state } = makeHost()
     const s = makeScheduler()
     setContentPhased(host, docOf(blocks), s.schedule)
+    const completion = waitForFullContent()
     s.drain() // first chunk lands
     const landed = state.mounted.length
     cancelPhasedContent()
     while (s.pending() > 0) s.drain()
     expect(state.mounted.length).toBe(landed)
     expect(state.loading).toBe(false)
-    await expect(waitForFullContent()).resolves.toBeUndefined()
+    await expect(completion).resolves.toBe(false)
   })
 
   it('a second phased mount cancels the first tail', () => {
@@ -284,6 +300,25 @@ describe('setContentPhased', () => {
     }
   })
 
+  it('cancels old output waiters when clearing loading starts a replacement', async () => {
+    const first = makeHost()
+    const second = makeHost()
+    const oldFrames = makeScheduler()
+    const newFrames = makeScheduler()
+    const blocks = PHASED_MIN_BLOCKS + 1
+    first.host.setLoading = (loading) => {
+      if (!loading) setContentPhased(second.host, docOf(blocks), newFrames.schedule, () => 0)
+    }
+
+    setContentPhased(first.host, docOf(blocks), oldFrames.schedule, () => 0)
+    const completion = waitForFullContent()
+    while (oldFrames.pending()) oldFrames.drain()
+    await expect(completion).resolves.toBe(false)
+    expect(isPhasedContentPending()).toBe(true)
+    while (newFrames.pending()) newFrames.drain()
+    await expect(waitForFullContent()).resolves.toBe(true)
+  })
+
   it('holds the save gate for the winning stream when the first mount starts another open', async () => {
     const first = makeHost()
     const second = makeHost()
@@ -303,7 +338,7 @@ describe('setContentPhased', () => {
       await Promise.resolve()
       expect(gateOpened).toBe(false)
       while (newFrames.pending()) newFrames.drain()
-      await expect(gate).resolves.toBeUndefined()
+      await expect(gate).resolves.toBe(true)
       expect(gateOpened).toBe(true)
       expect(second.state.mounted.length).toBe(blocks)
     } finally {
@@ -338,29 +373,111 @@ describe('setContentPhased', () => {
     }
   })
 
-  it('a rejected chunk falls back to the one-pass mount and releases the save gate', async () => {
+  it('a rejected chunk appends the missing suffix and releases the save gate', async () => {
     const blocks = PHASE1_BLOCKS + PHASE_CHUNK_BLOCKS * 2
     const { host, state } = makeHost()
-    const { appendNodes, setContent } = host
+    const { appendNodes } = host
     let appends = 0
-    host.appendNodes = (nodes) => {
+    host.appendNodes = (nodes, attempt) => {
       if (++appends === 2) throw new Error('schema refused')
-      appendNodes(nodes)
-    }
-    host.setContent = (d) => {
-      setContent(d)
-      state.dirty = true
+      appendNodes(nodes, attempt)
     }
     const s = makeScheduler()
     setContentPhased(host, docOf(blocks), s.schedule)
     state.dirty = false
     while (s.pending() > 0) s.drain()
     expect(state.mounted.length).toBe(blocks)
-    expect(state.events.at(-3)).toBe(`set:${blocks}`)
-    // the remount is not an edit either
+    expect(state.events.filter((event) => event.startsWith('set:'))).toEqual([
+      `set:${PHASE1_BLOCKS}`,
+    ])
+    expect(appends).toBe(3)
+    expect(state.events).toContain('resetHistory')
     expect(state.dirty).toBe(false)
     expect(state.loading).toBe(false)
-    await expect(waitForFullContent()).resolves.toBeUndefined()
+    await expect(waitForFullContent()).resolves.toBe(true)
+  })
+
+  it.each([false, true])(
+    'preserves live edits during a failed append (chunk installed: %s)',
+    async (mounted) => {
+      const { host, state } = makeHost()
+      const scheduler = makeScheduler()
+      const original = docOf(PHASED_MIN_BLOCKS + PHASE_CHUNK_BLOCKS)
+      setContentPhased(host, original, scheduler.schedule, () => 0)
+      scheduler.drain()
+
+      const edited = { ...state.mounted[0], content: [{ type: 'text', text: 'live edit' }] }
+      const append = host.appendNodes
+      host.appendNodes = (nodes, attempt) => {
+        host.appendNodes = append
+        if (mounted) append(nodes, attempt)
+        state.mounted[0] = edited
+        state.dirty = true
+        throw new Error('append failed')
+      }
+
+      while (scheduler.pending()) scheduler.drain()
+      expect(state.mounted).toEqual([edited, ...original.content!.slice(1)])
+      expect(state.dirty).toBe(true)
+      expect(state.loading).toBe(false)
+      expect(state.events).not.toContain('resetHistory')
+      await expect(waitForFullContent()).resolves.toBe(true)
+    },
+  )
+
+  it('reports failed completion when neither append can install the tail', async () => {
+    const { host, state } = makeHost()
+    const scheduler = makeScheduler()
+    host.appendNodes = () => {
+      throw new Error('append failed')
+    }
+    setContentPhased(host, docOf(PHASED_MIN_BLOCKS + 1), scheduler.schedule, () => 0)
+    const completion = waitForFullContent()
+    while (scheduler.pending()) scheduler.drain()
+    expect(state.mounted).toHaveLength(PHASE1_BLOCKS)
+    expect(state.loading).toBe(false)
+    expect(isPhasedContentPending()).toBe(false)
+    await expect(completion).resolves.toBe(false)
+    await expect(waitForFullContent()).resolves.toBe(false)
+  })
+
+  it('keeps output blocked until a replacement actually mounts', async () => {
+    const { host } = makeHost()
+    const scheduler = makeScheduler()
+    setContentPhased(host, docOf(PHASED_MIN_BLOCKS + 1), scheduler.schedule, () => 0)
+    const failure = new Error('mount failed')
+    expect(() =>
+      setContentPhased(
+        {
+          ...host,
+          setContent: () => {
+            throw failure
+          },
+        },
+        docOf(1),
+        scheduler.schedule,
+      ),
+    ).toThrow(failure)
+    await expect(waitForFullContent()).resolves.toBe(false)
+
+    setContentPhased(host, docOf(1), scheduler.schedule)
+    await expect(waitForFullContent()).resolves.toBe(true)
+  })
+
+  it('blocks output when the initial mount installs a prefix and then throws', async () => {
+    const { host, state } = makeHost()
+    const scheduler = makeScheduler()
+    const failure = new Error('mount failed')
+    const set = host.setContent
+    host.setContent = (doc) => {
+      set(doc)
+      throw failure
+    }
+    expect(() => setContentPhased(host, docOf(PHASED_MIN_BLOCKS + 1), scheduler.schedule)).toThrow(
+      failure,
+    )
+    expect(state.mounted).toHaveLength(PHASE1_BLOCKS)
+    await expect(waitForFullContent()).resolves.toBe(false)
   })
 
   it('reports a pending tail only while chunks remain', () => {

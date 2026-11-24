@@ -16,9 +16,8 @@ import type { PmNode } from './editor/convert'
  *   tail guard refuses edits in or after the last mounted block),
  * - saves must wait on waitForFullContent() — a mid-stream save would
  *   serialize, and write to disk, a truncated document,
- * - appends bypass undo history and restore the dirty flag, so streaming is
- *   not an edit; history resets once the tail lands unless the user edited
- *   meanwhile (their undo stack must survive).
+ * - appends bypass undo history and leave the dirty flag alone. History resets
+ *   after a clean open with no foreground edits.
  */
 export interface PhasedContentHost {
   /** The editor whose source indices this stream owns. */
@@ -26,18 +25,22 @@ export interface PhasedContentHost {
   /** full replace (Tiptap setContent) */
   setContent(doc: PmNode): void
   /** append top-level nodes at the document end, outside undo history */
-  appendNodes(nodes: PmNode[]): void
+  appendNodes(nodes: PmNode[], attempt: object): void
+  /** Check the installed editor state, even when an observer threw during dispatch. */
+  appliedAppend(attempt: object): boolean
   isDestroyed(): boolean
   resetHistory(): void
-  /** read-only + save-gate flag while the tail streams */
+  /** Loading flag while the tail streams. */
   setLoading(loading: boolean): void
   getDirty(): boolean
-  setDirty(dirty: boolean): void
+  onFailure?(error: unknown): void
 }
 
 /** dispatched on document once a streamed tail has fully landed (layout
  *  measurers skip the tail's chunks and measure the whole document once) */
 export const PHASED_CONTENT_SETTLED_EVENT = 'genoffice:phased-content-settled'
+/** Carries the editor whose mount ended with missing source blocks. */
+export const PHASED_CONTENT_FAILED_EVENT = 'genoffice:phased-content-failed'
 
 /** Maximum ordinary blocks in the first synchronous mount. */
 export const PHASE1_BLOCKS = 64
@@ -137,7 +140,8 @@ function nodeMountWork(node: PmNode, limit: number): number {
 
 /** bumping the token cancels the pending tail (its chunks become no-ops) */
 let token = 0
-let settled: Promise<void> = Promise.resolve()
+let settled = Promise.resolve(true)
+let failed = false
 /** clears the loading flag / resolves settled when a load is cancelled mid-stream */
 let cancelPending: (() => void) | null = null
 let unmountedSource: { owner: object; has: (index: number) => boolean } | null = null
@@ -147,9 +151,14 @@ export function unmountedSourceBlocksOf(owner: object): ((index: number) => bool
   return unmountedSource?.owner === owner ? unmountedSource.has : undefined
 }
 
-/** Resolves when the streaming tail has fully landed (immediately when none is pending). */
-export function waitForFullContent(): Promise<void> {
+/** False if this stream failed or was replaced before all blocks landed. */
+export function waitForFullContent(): Promise<boolean> {
   return settled
+}
+
+/** The current document may be truncated after a failed or abandoned mount. */
+export function hasFailedPhasedContent(): boolean {
+  return failed
 }
 
 /** true while a phased open still has tail chunks to append */
@@ -163,13 +172,24 @@ function replaceStream(): number {
   // The loading callback may start its own open. Drop the old owner first.
   unmountedSource = null
   cancelPending = null
+  failed ||= cancel !== null
+  settled = Promise.resolve(!failed)
   cancel?.()
   return generation
 }
 
-/** Any full content replacement outside the phased path must drop a pending tail. */
-export function cancelPhasedContent(): void {
-  replaceStream()
+function completeReplacement(generation: number): void {
+  if (generation !== token) return
+  failed = false
+  settled = Promise.resolve(true)
+}
+
+/** Cancel the tail. A successful full replacement also releases the output gate. */
+export function cancelPhasedContent(replace?: () => void): void {
+  const generation = replaceStream()
+  if (!replace || generation !== token) return
+  replace()
+  completeReplacement(generation)
 }
 
 /**
@@ -229,6 +249,7 @@ export function setContentPhased(
       weights.every((work) => work <= MAX_APPEND_WORK))
   ) {
     host.setContent(pmDoc)
+    completeReplacement(my)
     return
   }
   const firstEnd = batchFrom(0, PHASE1_BLOCKS * ORDINARY_BLOCK_WORK).end
@@ -240,6 +261,9 @@ export function setContentPhased(
     }
     unmountedSource = { owner: host.owner, has: (index) => remaining.has(index) }
   }
+  // The first mount can throw after installing an incomplete prefix.
+  failed = true
+  settled = Promise.resolve(false)
   try {
     host.setContent({ ...pmDoc, content: content.slice(0, firstEnd) })
   } catch (error) {
@@ -247,41 +271,67 @@ export function setContentPhased(
     throw error
   }
   if (my !== token) return
-  let settle!: () => void
-  settled = new Promise<void>((resolve) => (settle = resolve))
-  const release = () => {
+  failed = false
+  let settle!: (complete: boolean) => void
+  settled = new Promise<boolean>((resolve) => (settle = resolve))
+  const release = (complete: boolean) => {
     try {
       host.setLoading(false)
     } finally {
-      settle()
+      settle(complete && my === token)
     }
   }
-  cancelPending = release
+  cancelPending = () => release(false)
   host.setLoading(true)
   if (my !== token) return
   let index = firstEnd
   let budget = MAX_APPEND_WORK
   let previous: { finished: number; dispatchMs: number; work: number } | undefined
-  // a refused chunk remounted the whole document: whatever the user typed
-  // before is gone with it, and an undo must not bring the truncated
-  // pre-remount document back
-  let remounted = false
-  const finish = () => {
+  const finish = (complete: boolean) => {
     if (my !== token) return
     // still "pending" through the history reset: it re-creates the plugin
     // views, whose constructors would otherwise measure the whole document
     // once before the settled event asks for the same pass again
-    if (!host.isDestroyed() && (remounted || !host.getDirty())) host.resetHistory()
+    if (complete && !host.getDirty()) host.resetHistory()
     if (my !== token) return
-    unmountedSource = null
+    if (complete || host.isDestroyed()) unmountedSource = null
+    failed = !complete && !host.isDestroyed()
     cancelPending = null
-    release()
-    if (my === token && typeof document !== 'undefined')
-      document.dispatchEvent(new Event(PHASED_CONTENT_SETTLED_EVENT))
+    release(complete)
+    if (my !== token || typeof document === 'undefined') return
+    if (complete) document.dispatchEvent(new Event(PHASED_CONTENT_SETTLED_EVENT))
+    else if (failed && host.owner)
+      document.dispatchEvent(new CustomEvent(PHASED_CONTENT_FAILED_EVENT, { detail: host.owner }))
+  }
+  const publish = (nodes: PmNode[]) => {
+    const attempt = {}
+    for (const node of nodes) {
+      const source = node.attrs?.docxIndex
+      if (typeof source !== 'number') continue
+      const n = remaining.get(source) ?? 0
+      if (n > 1) remaining.set(source, n - 1)
+      else remaining.delete(source)
+    }
+    let failure: { error: unknown } | undefined
+    try {
+      host.appendNodes(nodes, attempt)
+    } catch (error) {
+      failure = { error }
+    }
+    if (my !== token || host.isDestroyed()) return
+    const applied = host.appliedAppend(attempt)
+    if (!applied) {
+      for (const node of nodes) {
+        const source = node.attrs?.docxIndex
+        if (typeof source === 'number') remaining.set(source, (remaining.get(source) ?? 0) + 1)
+      }
+      failure ??= { error: new Error('The editor refused the streamed content') }
+    }
+    return { applied, failure }
   }
   const appendChunk = () => {
     if (my !== token) return
-    if (host.isDestroyed()) return finish()
+    if (host.isDestroyed()) return finish(false)
     if (previous) {
       // Layout and painting can happen after dispatch. Size the next append
       // against dispatch work and any delay beyond the intentional timer wait.
@@ -293,41 +343,28 @@ export function setContentPhased(
         Math.max(ORDINARY_BLOCK_WORK, Math.floor(previous.work * scale)),
       )
     }
-    const { end, work } = batchFrom(index, budget)
-    const chunk = content.slice(index, end)
+    const start = index
+    const { end, work } = batchFrom(start, budget)
+    const started = now()
+    const result = publish(content.slice(start, end))
+    if (!result) return finish(false)
+    if (result.failure) {
+      // A dispatch can throw after installing its state. Append only the
+      // missing source blocks to the current model, keeping foreground edits
+      // and the held input's position mapping intact.
+      const missing = result.applied ? end : start
+      if (missing === content.length) return finish(true)
+      const recovery = publish(content.slice(missing))
+      if (recovery?.applied) return finish(true)
+      finish(false)
+      if (my === token && recovery?.failure) host.onFailure?.(recovery.failure.error)
+      return
+    }
+    const finished = now()
+    previous = { finished, dispatchMs: finished - started, work }
     index = end
-    for (const node of chunk) {
-      const source = node.attrs?.docxIndex
-      if (typeof source !== 'number') continue
-      const n = remaining.get(source) ?? 0
-      if (n > 1) remaining.set(source, n - 1)
-      else remaining.delete(source)
-    }
-    const wasDirty = host.getDirty()
-    try {
-      const started = now()
-      host.appendNodes(chunk)
-      const finished = now()
-      previous = { finished, dispatchMs: finished - started, work }
-    } catch {
-      if (my !== token) return
-      // a refused chunk falls back to the one-pass mount instead of leaving the file truncated
-      remounted = true
-      remaining.clear()
-      try {
-        host.setContent(pmDoc)
-      } catch {
-        /* same failure as the one-pass path */
-      }
-      if (my !== token) return
-      host.setDirty(wasDirty)
-      return finish()
-    }
-    if (my !== token) return
-    host.setDirty(wasDirty)
-    if (my !== token) return
     if (index < content.length) schedule(appendChunk)
-    else finish()
+    else finish(true)
   }
   schedule(appendChunk)
 }

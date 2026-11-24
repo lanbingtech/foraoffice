@@ -14,19 +14,21 @@ const blocks = (n: number): PmNode[] =>
   Array.from({ length: n }, (_, i) => ({ type: 'paragraph', attrs: { docxIndex: i } }) as PmNode)
 
 function host(): PhasedContentHost & { mounted: number } {
+  let installed: object | undefined
   const h = {
     mounted: 0,
     setContent(doc: PmNode) {
       h.mounted = doc.content?.length ?? 0
     },
-    appendNodes(nodes: PmNode[]) {
+    appendNodes(nodes: PmNode[], attempt: object) {
       h.mounted += nodes.length
+      installed = attempt
     },
+    appliedAppend: (attempt: object) => installed === attempt,
     isDestroyed: () => false,
     resetHistory() {},
     setLoading() {},
     getDirty: () => false,
-    setDirty() {},
   }
   return h
 }

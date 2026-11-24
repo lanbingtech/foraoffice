@@ -563,6 +563,7 @@ import { BlockIndex } from './pagination-index'
 import {
   isPhasedContentPending,
   PHASED_CONTENT_SETTLED_EVENT,
+  hasFailedPhasedContent,
   unmountedSourceBlocksOf,
   waitForFullContent,
 } from './phased-content'
@@ -8808,14 +8809,16 @@ export function App({
     onShowGrid: setShowGrid,
     onSplitView: setSplitView,
     onPagePreview: () => {
+      if (hasFailedPhasedContent()) return
       const generation = currentDocGeneration()
       const current = fileCtxRef.current.doc
       if (!isPhasedContentPending()) {
         setShowPagePreview(true)
         return
       }
-      void waitForFullContent().then(() => {
+      void waitForFullContent().then((complete) => {
         if (
+          complete &&
           current &&
           fileCtxRef.current.doc === current &&
           currentDocGeneration() === generation &&
