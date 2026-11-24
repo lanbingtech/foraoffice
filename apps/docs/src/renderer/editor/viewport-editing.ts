@@ -218,6 +218,36 @@ export function projectViewportTransaction(
   return finishViewportTransaction(result, local)
 }
 
+/** Mirror the source's accepted edits when they all fit in the actual window. */
+export function projectViewportFollowUps(
+  viewport: EditingViewport,
+  state: EditorState,
+  submitted: Transaction,
+  followUps: readonly Transaction[],
+): Transaction | undefined {
+  const last = followUps.at(-1)
+  if (!last || state.doc !== submitted.before) return
+  const from = viewport.sourceRange.from
+  const offset = from - viewport.localRange.from
+  const clippedEnd = viewport.doc.content.size - viewport.localRange.to
+  const mapping = new Mapping([StepMap.offset(-offset)])
+  const result = state.tr
+  for (const step of submitted.steps) result.step(step)
+  for (const followUp of followUps) {
+    for (const [index, step] of followUp.steps.entries()) {
+      const range = affectedRange(step, followUp.docs[index])
+      const end = offset + result.doc.content.size - clippedEnd
+      if (!range || range.from < from || range.to > end) return
+      const local = step.map(mapping)
+      if (!local || result.maybeStep(local).failed) return
+    }
+  }
+  const to = offset + result.doc.content.size - clippedEnd
+  if (to > last.doc.content.size || !last.doc.slice(from, to, true).content.eq(result.doc.content))
+    return
+  return result
+}
+
 function finishViewportTransaction(result: Transaction, local: Transaction): Transaction {
   if (local.storedMarksSet) result.setStoredMarks(local.storedMarks)
   const addToHistory = local.getMeta('addToHistory')

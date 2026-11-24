@@ -13,6 +13,7 @@ import { Decoration, DecorationSet, EditorView, type EditorProps } from '@tiptap
 import { positionViewportColumnSplits, projectViewportDecorations } from './viewport-decorations'
 import {
   createViewportEditing,
+  projectViewportFollowUps,
   projectViewportTransaction,
   type EditingViewport,
 } from './viewport-editing'
@@ -42,8 +43,8 @@ export interface ViewportRangeRequest {
 export interface ViewportSurfaceOptions {
   readSource(): SourceState
   editable?(source: EditorState): boolean
-  /** Dispatch into the owner. readSource observes the resulting state before this returns. */
-  dispatch(transaction: Transaction): void
+  /** Dispatch synchronously. Return the applied chain when the owner appends steps. */
+  dispatch(transaction: Transaction): readonly Transaction[] | void
   requestRange(request: ViewportRangeRequest): void
   onPublished?(packet: ViewportPacket): void
   attributes?: Record<string, string>
@@ -355,10 +356,19 @@ export function createViewportSurface(
     )
     if (!projected) return request('transaction', source, transaction)
 
-    options.dispatch(projected)
+    const applied = options.dispatch(projected)
     if (current !== mounted || !view) return
     const confirmed = options.readSource()
-    if (!confirmed.state.doc.eq(projected.doc)) return request('source', confirmed, transaction)
+    let visible = transaction
+    if (!confirmed.state.doc.eq(projected.doc)) {
+      const completed =
+        applied &&
+        applied[0] === projected &&
+        applied.at(-1)?.doc === confirmed.state.doc &&
+        projectViewportFollowUps(mounted.editing, view.state, transaction, applied.slice(1))
+      if (!completed) return request('source', confirmed)
+      visible = completed
+    }
     if (
       transaction.docChanged &&
       source.state.selection instanceof AllSelection &&
@@ -368,10 +378,10 @@ export function createViewportSurface(
       return request('geometry', confirmed)
 
     // Reflect only confirmed changes from the owner in this view.
-    const editing = confirmedEditing(mounted.editing, transaction, confirmed.state.doc)
-    const geometry = mounted.geometry.map(transaction.mapping, editing.doc)
+    const editing = confirmedEditing(mounted.editing, visible, confirmed.state.doc)
+    const geometry = mounted.geometry.map(visible.mapping, editing.doc)
     if (
-      transaction.docChanged &&
+      visible.docChanged &&
       !retainsPlacements(mounted.editing, editing, mounted.content, geometry)
     ) {
       // The owner has the edit. Keep the last measured window until a new

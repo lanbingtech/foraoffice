@@ -4,8 +4,8 @@ import { Schema } from '@tiptap/pm/model'
 import {
   AllSelection,
   EditorState,
+  Plugin,
   TextSelection,
-  type Plugin,
   type Transaction,
 } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, EditorView } from '@tiptap/pm/view'
@@ -24,6 +24,7 @@ import {
 import { viewportLayout, type ViewportContent } from '../src/renderer/editor/viewport-layout'
 
 const schema = new Schema({
+  marks: { inserted: { toDOM: () => ['ins', 0] } },
   nodes: {
     doc: { content: 'block+' },
     docParagraph: {
@@ -73,9 +74,11 @@ function fixture(isEditable = true, plugins: Plugin[] = []) {
   let state = EditorState.create({ doc, selection: TextSelection.create(doc, 7, 6), plugins })
   let revision = 0
   const requestRange = vi.fn()
-  const dispatch = vi.fn((tr: Transaction) => {
-    state = state.apply(tr)
-    if (tr.docChanged) revision++
+  const dispatch = vi.fn<(tr: Transaction) => readonly Transaction[] | void>((tr) => {
+    const applied = state.applyTransaction(tr)
+    state = applied.state
+    if (applied.transactions.some((transaction) => transaction.docChanged)) revision++
+    return applied.transactions
   })
   const mount = document.createElement('div')
   document.body.appendChild(mount)
@@ -112,6 +115,59 @@ function fixture(isEditable = true, plugins: Plugin[] = []) {
 function placed(blocks: ViewportContent['blocks']): ViewportContent {
   return { canvas, blocks }
 }
+
+it('paints the source transaction chain before accepting the next visible edit', () => {
+  const appendSourceEdits = new Plugin({
+    appendTransaction(transactions, _previous, current) {
+      if (!transactions.some((transaction) => transaction.docChanged)) return null
+      const end = current.selection.head
+      return current.tr
+        .insertText('!', end)
+        .addMark(end - 1, end + 1, current.schema.marks.inserted.create())
+    },
+  })
+  const { surface, read, requestRange } = fixture(true, [appendSourceEdits])
+  surface.publish({
+    revision: 0,
+    publication: 1,
+    sequence: 1,
+    content: placed([{ from: 5, to: 10, box: box(30, 400) }]),
+  })
+  const view = surface.view!
+  view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 2)))
+  view.dispatch(view.state.tr.insertText('X'))
+  expect(read().state.doc.child(1).textContent).toBe('DX!EF')
+  expect(view.state.doc.textContent).toBe('DX!EF')
+  expect(view.dom.querySelector('ins')?.textContent).toBe('X!')
+  view.dispatch(view.state.tr.insertText('Y'))
+  expect(read().state.doc.child(1).textContent).toBe('DX!Y!EF')
+  expect(view.state.doc.textContent).toBe('DX!Y!EF')
+  expect(view.state.selection.head).toBe(read().state.selection.head - 5)
+  expect(requestRange).not.toHaveBeenCalled()
+})
+
+it('requests a new range when an accepted follow-up edits outside the visible model', () => {
+  const appendOutside = new Plugin({
+    appendTransaction(transactions, _previous, current) {
+      if (!transactions.some((transaction) => transaction.docChanged)) return null
+      return current.tr.insertText('!', 1)
+    },
+  })
+  const { surface, read, requestRange } = fixture(true, [appendOutside])
+  surface.publish({
+    revision: 0,
+    publication: 1,
+    sequence: 1,
+    content: placed([{ from: 5, to: 10, box: box(30, 400) }]),
+  })
+  const view = surface.view!
+  view.dispatch(view.state.tr.insertText('X'))
+  expect(read().state.doc.child(0).textContent).toBe('!abc')
+  expect(view.state.doc.textContent).toBe('DEF')
+  expect(requestRange).toHaveBeenCalledWith(
+    expect.objectContaining({ reason: 'source', transaction: undefined }),
+  )
+})
 
 describe('viewport surface', () => {
   it('undoes an edit outside a retired viewport and redoes from the owner history', () => {
