@@ -34,7 +34,11 @@ window.addEventListener('message', (event) => {
     event.ports[0].close()
     return
   }
-  ipcRenderer.postMessage('docs:connect-layout', { width, height }, [event.ports[0]])
+  ipcRenderer.postMessage(
+    'docs:connect-layout',
+    { width, height, deviceScaleFactor: window.devicePixelRatio },
+    [event.ports[0]],
+  )
 })
 
 const api: DesktopApi = {

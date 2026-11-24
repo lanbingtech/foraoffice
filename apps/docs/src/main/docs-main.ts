@@ -1668,9 +1668,14 @@ export function registerDocsIpc(): void {
   ipcMain.on('docs:connect-layout', (event, dimensions: unknown) => {
     const [port] = event.ports
     if (!port) return
-    const size = dimensions as { width?: unknown; height?: unknown } | null
+    const size = dimensions as {
+      width?: unknown
+      height?: unknown
+      deviceScaleFactor?: unknown
+    } | null
     const width = Number(size?.width)
     const height = Number(size?.height)
+    const deviceScaleFactor = size?.deviceScaleFactor
     const owner = event.sender
     if (
       event.ports.length !== 1 ||
@@ -1682,7 +1687,12 @@ export function registerDocsIpc(): void {
       width < 1 ||
       height < 1 ||
       width > 8192 ||
-      height > 8192
+      height > 8192 ||
+      typeof deviceScaleFactor !== 'number' ||
+      !Number.isFinite(deviceScaleFactor) ||
+      deviceScaleFactor <= 0 ||
+      width * deviceScaleFactor > 8192 ||
+      height * deviceScaleFactor > 8192
     ) {
       for (const transferred of event.ports) transferred.close()
       return
@@ -1696,6 +1706,7 @@ export function registerDocsIpc(): void {
       preloadPath: join(dirname(runtime.preloadPath), 'layout.js'),
       width,
       height,
+      deviceScaleFactor,
     }).catch(() => {
       // The transferred port closes on failure. The document stays with its owner.
     })

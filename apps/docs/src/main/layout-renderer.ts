@@ -12,6 +12,7 @@ export interface LayoutRendererOptions {
    * to establish exact CSS dimensions inside the offscreen renderer. */
   width: number
   height: number
+  deviceScaleFactor: number
 }
 
 const workers = new WeakMap<WebContents, (reason: Error) => void>()
@@ -43,7 +44,7 @@ function trustedLayoutUrl(owner: WebContents, value: string): string {
 export async function openLayoutRenderer(
   owner: WebContents,
   port: MessagePortMain,
-  { rendererUrl, preloadPath, width, height }: LayoutRendererOptions,
+  { rendererUrl, preloadPath, width, height, deviceScaleFactor }: LayoutRendererOptions,
 ): Promise<void> {
   disposeLayoutRenderer(owner)
   let entry: string
@@ -68,7 +69,9 @@ export async function openLayoutRenderer(
         nodeIntegration: false,
         sandbox: true,
         backgroundThrottling: false,
-        offscreen: true,
+        // Blink rounds layout metrics using the backing scale. Device
+        // emulation alone changes the reported ratio without matching those metrics.
+        offscreen: { deviceScaleFactor },
       },
     })
   } catch (error) {

@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { _electron as electron, expect, test } from '@playwright/test'
+import { _electron as electron, expect, test, type Page } from '@playwright/test'
 import type { DesktopApi } from '../apps/docs/src/shared/ipc'
 import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
 
@@ -41,7 +41,7 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
     ),
   ) as Record<string, string>
   const app = await electron.launch({
-    args: [resolve(__dirname, '../apps/docs'), fixture],
+    args: ['--force-device-scale-factor=1.25', resolve(__dirname, '../apps/docs'), fixture],
     env: { ...env, AI_OFFICE_USER_DATA: join(folder, 'profile'), GENOFFICE_LANG: 'en' },
   })
   try {
@@ -108,6 +108,20 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
       return { pages: layout?.pages?.length, starts: layout?.starts?.length }
     })
     expect(visible).toEqual({ pages: 3, starts: 3 })
+    const worker = app.windows().find((window) => window.url().includes('/layout.html'))!
+    const measurePaper = (target: Page) =>
+      target.evaluate(() => {
+        const paper = document.createElement('div')
+        paper.style.position = 'absolute'
+        paper.style.width = '793.733333px'
+        document.body.appendChild(paper)
+        const width = paper.getBoundingClientRect().width
+        paper.remove()
+        return { scale: window.devicePixelRatio, width }
+      })
+    const foregroundPaper = await measurePaper(page)
+    expect(foregroundPaper.scale).toBe(1.25)
+    expect(await measurePaper(worker)).toEqual(foregroundPaper)
     const identity = await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows().map((win) => ({
         layout: win.webContents.getURL().includes('/layout.html'),
