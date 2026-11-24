@@ -1,5 +1,6 @@
 import { Extension } from '@tiptap/core'
-import { Plugin, PluginKey, type EditorState } from '@tiptap/pm/state'
+import { PluginKey, type EditorState } from '@tiptap/pm/state'
+import { presentationPlugin } from './authored-document'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { rangeSlot } from '../dom-range'
@@ -464,7 +465,12 @@ class JustifyShrinkView {
     if (shrinks.length === 0 && (!old || old === DecorationSet.empty)) return
     const decos = shrinks.map((s) => {
       const style = `word-spacing:${-s.perChar}px`
-      return Decoration.inline(s.from, s.to, { class: 'doc-jshrink', style }, { style })
+      return Decoration.inline(
+        s.from,
+        s.to,
+        { class: 'doc-jshrink', style },
+        { style, paintInViewport: 'inline' },
+      )
     })
     if (scope) {
       const previous = old ?? DecorationSet.empty
@@ -792,7 +798,7 @@ export const JustifyShrinkExtension = Extension.create({
   addProseMirrorPlugins() {
     const storage = this.storage as JustifyShrinkStorage
     return [
-      new Plugin({
+      presentationPlugin({
         key: justifyShrinkPluginKey,
         state: {
           init: () => DecorationSet.empty,

@@ -4,6 +4,7 @@ import { Extension } from '@tiptap/core'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Mapping } from '@tiptap/pm/transform'
 import type { ParaFormat, Run } from '@genoffice/docx-engine'
+import { insertedContent, sourceCompositionKey } from './source-composition'
 
 /** paragraph-like blocks that carry the bidi attribute */
 const DIR_BLOCKS = new Set(['docParagraph', 'docHeading', 'docListItem'])
@@ -165,27 +166,21 @@ export const AutoDirectionExtension = Extension.create({
       new Plugin({
         key: new PluginKey('autoDirection'),
         appendTransaction(transactions, oldState, newState) {
-          if (!transactions.some((tr) => tr.docChanged)) return null
           // rewriting the paragraph DOM mid-composition would break the IME
-          if (editor.view?.composing) return null
+          if (editor.view?.composing || sourceCompositionKey.getState(newState)) return null
+          const committedComposition = transactions.some(
+            (tr) => tr.getMeta(sourceCompositionKey) === null,
+          )
+            ? sourceCompositionKey.getState(oldState)
+            : null
+          if (!committedComposition && !transactions.some((tr) => tr.docChanged)) return null
 
           // only plain text insertions (typing, text paste) qualify; block-level
           // replacements (document load, Enter splits, AI edits) are skipped
-          let textInserted = false
-          for (const tr of transactions) {
-            for (const step of tr.steps) {
-              const slice = (step as { slice?: { content?: import('@tiptap/pm/model').Fragment } })
-                .slice
-              if (!slice?.content || slice.content.childCount === 0) continue
-              let onlyText = true
-              slice.content.forEach((child) => {
-                if (!child.isText) onlyText = false
-              })
-              if (onlyText) textInserted = true
-              else return null
-            }
-          }
-          if (!textInserted) return null
+          const inserted = insertedContent(transactions)
+          if (inserted === 'structure' || committedComposition?.inserted === 'structure')
+            return null
+          if (inserted !== 'text' && committedComposition?.inserted !== 'text') return null
 
           const $head = newState.selection.$head
           let depth = 0
@@ -206,12 +201,14 @@ export const AutoDirectionExtension = Extension.create({
           // the flip only happens on the paragraph's first strong character:
           // if the pre-change paragraph already had one, leave it alone
           const mapping = new Mapping()
+          if (committedComposition) mapping.appendMapping(committedComposition.mapping)
           for (const tr of transactions) mapping.appendMapping(tr.mapping)
+          const before = committedComposition?.before ?? oldState.doc
           const oldPos = Math.min(
             mapping.invert().map(newState.selection.head),
-            oldState.doc.content.size,
+            before.content.size,
           )
-          const $old = oldState.doc.resolve(oldPos)
+          const $old = before.resolve(oldPos)
           for (let d = $old.depth; d > 0; d -= 1) {
             if (!DIR_BLOCKS.has($old.node(d).type.name)) continue
             if (firstStrongDir($old.node(d).textContent)) return null

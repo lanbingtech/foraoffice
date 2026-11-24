@@ -1,7 +1,8 @@
 import { Extension } from '@tiptap/core'
 import { charClass, isEastAsianChar } from '@genoffice/docx-engine'
 import type { Node as PmNode } from '@tiptap/pm/model'
-import { Plugin, PluginKey } from '@tiptap/pm/state'
+import { PluginKey } from '@tiptap/pm/state'
+import { presentationPlugin } from './authored-document'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { touchedTopLevelBlocks } from './touched-blocks'
 
@@ -66,7 +67,7 @@ export const ScriptFonts = Extension.create({
   addProseMirrorPlugins() {
     const editor = this.editor
     return [
-      new Plugin<DecorationSet>({
+      presentationPlugin<DecorationSet>({
         key,
         state: {
           init: (_, state) =>

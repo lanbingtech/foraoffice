@@ -18,6 +18,12 @@ import { selectBoxAt, selectedBoxPlugin } from './selected-box'
 import { drawingChildInteraction } from './drawing-child-interaction'
 import { drawingLineSize } from './drawing-line'
 import { appendedStreamedTail, StreamingTailGuardExtension } from './streaming-tail-guard'
+import { SourceCompositionExtension } from './source-composition'
+import {
+  CLEAR_DOCUMENT_PLUGIN,
+  markPresentationPlugin,
+  presentationPlugin,
+} from './authored-document'
 import { wrapGroupCss, type WrapPicture } from './wrap-group'
 import type { ChainedCommands, RawCommands } from '@tiptap/core'
 import { Gapcursor } from '@tiptap/extensions'
@@ -1038,7 +1044,7 @@ export const WordSelectAllDelete = Extension.create({
   onBeforeCreate() {
     // on 'mount', not onCreate: tiptap defers the create event to a timeout,
     // which would leave the first user edit with the plugin still active
-    this.editor.on('mount', () => this.editor.unregisterPlugin('clearDocument'))
+    this.editor.on('mount', () => this.editor.unregisterPlugin(CLEAR_DOCUMENT_PLUGIN))
   },
 })
 
@@ -1854,7 +1860,7 @@ export const LineFactorExtension = Extension.create({
     const eaOf: EaFamilyOf = eaFamilyResolver(getStorage)
     const asciiOf = asciiFamilyResolver(getStorage)
     return [
-      new Plugin<DecorationSet>({
+      presentationPlugin<DecorationSet>({
         key,
         state: {
           init: (_config, state) => lineFactorDecos(state.doc, eaOf, asciiOf),
@@ -2230,12 +2236,14 @@ export const AnchorLineExtension = Extension.create({
       return decos
     }
     return [
-      blockDecorationPlugin({
-        key: new PluginKey('anchorLine'),
-        build: (doc) => build(doc.content),
-        append: (tr, tail, old) => old.add(tr.doc, build(tail.content, tail.from)),
-        needsRecompute: (node) => containsNode(node, (n) => n.type.name === 'docProtected'),
-      }),
+      markPresentationPlugin(
+        blockDecorationPlugin({
+          key: new PluginKey('anchorLine'),
+          build: (doc) => build(doc.content),
+          append: (tr, tail, old) => old.add(tr.doc, build(tail.content, tail.from)),
+          needsRecompute: (node) => containsNode(node, (n) => n.type.name === 'docProtected'),
+        }),
+      ),
     ]
   },
 })
@@ -2278,12 +2286,14 @@ export const RuleOverlayExtension = Extension.create({
       return decos
     }
     return [
-      blockDecorationPlugin({
-        key: new PluginKey('ruleOverlay'),
-        build: (doc) => build(doc.content),
-        append: (tr, tail, old) => old.add(tr.doc, build(tail.content, tail.from)),
-        needsRecompute: (node) => containsNode(node, hasRules),
-      }),
+      markPresentationPlugin(
+        blockDecorationPlugin({
+          key: new PluginKey('ruleOverlay'),
+          build: (doc) => build(doc.content),
+          append: (tr, tail, old) => old.add(tr.doc, build(tail.content, tail.from)),
+          needsRecompute: (node) => containsNode(node, hasRules),
+        }),
+      ),
     ]
   },
 })
@@ -2543,7 +2553,7 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
 
     const key = new PluginKey<CachedMarkers>('listNumbering')
     return [
-      new Plugin<CachedMarkers>({
+      presentationPlugin<CachedMarkers>({
         key,
         state: {
           init: (_config, state) => compute(state.doc),
@@ -7413,6 +7423,7 @@ export const AutoLinkOnDelimiter = Extension.create({
 
 export const editorExtensions = [
   StreamingTailGuardExtension,
+  SourceCompositionExtension,
   ScriptFonts,
   DocDocument,
   DocText,

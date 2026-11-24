@@ -1,6 +1,7 @@
 import { Extension } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
-import { Plugin, PluginKey } from '@tiptap/pm/state'
+import { PluginKey } from '@tiptap/pm/state'
+import { presentationPlugin } from './authored-document'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import type { EditorView } from '@tiptap/pm/view'
 import { splitFloatStyle } from '../pagination-lines'
@@ -42,7 +43,7 @@ export const ColumnLayoutExtension = Extension.create({
 
   addProseMirrorPlugins() {
     return [
-      new Plugin<DecorationSet>({
+      presentationPlugin<DecorationSet>({
         key,
         state: {
           init: () => DecorationSet.empty,
@@ -133,13 +134,22 @@ export interface ColumnBlockSpec {
 
 const SPLIT_CLASS = 'doc-col-split-float'
 
-function splitFloatEl(style: string): HTMLElement {
-  const span = document.createElement('span')
+function splitFloatEl(owner: Document, style: string): HTMLElement {
+  const span = owner.createElement('span')
   span.className = SPLIT_CLASS
   span.contentEditable = 'false'
   span.setAttribute('aria-hidden', 'true')
   span.style.cssText = style
   return span
+}
+
+export function columnSplitDecoration(pos: number, style: string): Decoration {
+  return Decoration.widget(pos, (view) => splitFloatEl(view.dom.ownerDocument, style), {
+    side: -1,
+    key: `col-split-${style}`,
+    ignoreSelection: true,
+    viewportColumnSplit: style,
+  })
 }
 
 const PATCH_PROPS = [
@@ -371,14 +381,7 @@ export function setColumnLayout(
       spec.vertical || spec.split ? undefined : { class: specClass(spec, false), style }
     decos.push(columnDecoration(from, to, { class: cls, style }, continuation))
     const split = splitOf.get(spec.el)
-    if (split)
-      decos.push(
-        Decoration.widget(from + 1, () => splitFloatEl(split), {
-          side: -1,
-          key: `col-split-${split}`,
-          ignoreSelection: true,
-        }),
-      )
+    if (split) decos.push(columnSplitDecoration(from + 1, split))
   }
   const next = DecorationSet.create(view.state.doc, decos)
   const prev = key.getState(view.state)
@@ -410,7 +413,7 @@ export function setColumnLayout(
  * Custom leaf NodeViews cannot host the split widget decoration. Maintain
  * their leading float after the editor updates its DOM.
  */
-function patchSplitNodeViews(view: EditorView, splitOf: Map<HTMLElement, string>): void {
+export function patchSplitNodeViews(view: EditorView, splitOf: Map<HTMLElement, string>): void {
   const obs = (view as unknown as { domObserver?: { stop(): void; start(): void } }).domObserver
   obs?.stop()
   try {
@@ -426,7 +429,7 @@ function patchSplitNodeViews(view: EditorView, splitOf: Map<HTMLElement, string>
     for (const [el, style] of splitOf) {
       if (el.querySelector(`:scope > .${SPLIT_CLASS}`)) continue
       el.setAttribute('data-col-split-patch', '1')
-      el.insertBefore(splitFloatEl(style), el.firstChild)
+      el.insertBefore(splitFloatEl(el.ownerDocument, style), el.firstChild)
     }
   } finally {
     obs?.start()

@@ -16,7 +16,7 @@ import { paginationActivity, trackPaginationActivity } from './pagination-activi
 import { createDocumentStoryDiagnostic, disposeOwnedDiagnostic } from './document-story-diagnostic'
 import { observePaginationFonts } from './pagination-fonts'
 import { justifyShrinkPluginKey } from './editor/justify-shrink'
-import { tabReflowMeta } from './editor/decoration-extensions'
+import { TAB_GEOMETRY_COMMITTED_EVENT, tabReflowMeta } from './editor/decoration-extensions'
 import {
   useCallback,
   useEffect,
@@ -359,6 +359,8 @@ import {
   type TrackChangesOptions,
 } from './editor/track-changes-options'
 import { pagePositions, type PageLayout } from './editor/goto'
+import { viewportLayout, type ViewportLayout } from './editor/viewport-layout'
+import { layoutReplicaPlugins } from './editor/authored-document'
 import { PagedViewProbe, pagedViewProbe } from './editor/paged-view-probe'
 import { Ribbon, type ConvertFormat } from './components/Ribbon'
 import {
@@ -563,6 +565,7 @@ import { BlockIndex } from './pagination-index'
 import {
   isPhasedContentPending,
   PHASED_CONTENT_SETTLED_EVENT,
+  hasFailedPhasedContent,
   unmountedSourceBlocksOf,
   waitForFullContent,
 } from './phased-content'
@@ -840,10 +843,18 @@ export interface DocsAppRuntime {
 
 export function App({
   onRuntime,
+  onViewportLayout,
+  onInitialViewport,
+  onViewportOpen,
+  sourceImport,
   agentUi,
   embedded = false,
 }: {
   onRuntime?: (value: DocsAppRuntime | null) => void
+  onViewportLayout?: (value: ViewportLayout | null) => void
+  onInitialViewport?: (value: ViewportLayout, modelEnd: number, paperEnd: number) => void
+  onViewportOpen?: (editor: Editor | null) => void
+  sourceImport?: FileActionContext['sourceImport']
   agentUi?: DocsAgentUi
   embedded?: boolean
 } = {}) {
@@ -1451,6 +1462,12 @@ export function App({
   const editor = useEditor({
     extensions: editorExtensions,
     content: { type: 'doc', content: [{ type: 'docParagraph' }] },
+    onMount: ({ editor: mounted }) => {
+      if (onViewportLayout)
+        mounted.view.updateState(
+          mounted.state.reconfigure({ plugins: layoutReplicaPlugins(mounted.state.plugins) }),
+        )
+    },
     editorProps: {
       // Word checks spelling as you type by default; user toggle in Review → Spelling.
       // useEditor re-applies these options on every render, so the value must
@@ -2443,6 +2460,7 @@ export function App({
     }
   }, [doc?.parsed, editor, setDocCss, tornDown])
   fileCtxRef.current = {
+    sourceImport,
     commitDocumentState: (operation) => flushSync(operation),
     editor,
     doc,
@@ -2593,14 +2611,17 @@ export function App({
       setDocPwdPrompt({ path: info.path, name: info.name, value: '', errorKey: '', busy: false }),
   }
 
-  const loadFile = useCallback(async (result: OpenDocxResult) => {
-    const outcome = await loadFileImpl(fileCtxRef.current, result)
-    // a failed open with no document yet (boot, or the open that superseded the
-    // boot open) must land on blank instead of the "Opening…" screen
-    if (outcome === 'failed' && !fileCtxRef.current.doc && !getDocsDocumentHost())
-      await newFileImpl(fileCtxRef.current)
-    return outcome
-  }, [])
+  const loadFile = useCallback(
+    async (result: OpenDocxResult) => {
+      const outcome = await loadFileImpl(fileCtxRef.current, result)
+      if (onViewportOpen) onViewportOpen(outcome === 'ok' ? fileCtxRef.current.editor : null)
+      // The interactive UI falls back to a blank document on a failed boot.
+      else if (outcome === 'failed' && !fileCtxRef.current.doc && !getDocsDocumentHost())
+        await newFileImpl(fileCtxRef.current)
+      return outcome
+    },
+    [onViewportOpen],
+  )
   const resetFile = useCallback(() => newFileImpl(fileCtxRef.current), [])
   const commitOpenedFile = useCallback(
     async (result: OpenDocxResult) => {
@@ -4330,6 +4351,8 @@ export function App({
     let flowRead: { pm: HTMLElement; reader: ReturnType<typeof createBlockMeasurer> } | undefined
     let timer: number | null = null
     let viewportAppendOnly = false
+    let viewportMeasuredDocument: Editor['state']['doc'] | undefined
+    let independentlyMeasuredPrefix = false
     let waitingForParagraphs = false
     let editedWhileMeasuring = false
     let laidOutBeforeParagraphsSettled = false
@@ -4613,7 +4636,10 @@ export function App({
           return reject('join')
         items.push({ el, prev })
       }
-      return blocksKeepSlicing(items, slices, factor) || reject('geometry')
+      if (onViewportLayout && !viewportMeasuredDocument) return reject('partial-layout')
+      if (!blocksKeepSlicing(items, slices, factor)) return reject('geometry')
+      if (onViewportLayout) viewportMeasuredDocument = pmDoc
+      return true
     }
     let hasTocFields = false
     let tocRefreshComplete = false
@@ -4668,8 +4694,57 @@ export function App({
         }
       }
     }
+    let viewportPublished = false
+    const invalidateViewport = () => {
+      if (viewportPublished) {
+        viewportPublished = false
+        onViewportLayout?.(null)
+      }
+    }
+    const publishViewportIfSettled = () => {
+      const layout = pageLayoutRef.current
+      if (
+        !onViewportLayout ||
+        viewportPublished ||
+        !layout ||
+        !editor ||
+        viewportMeasuredDocument !== editor.state.doc
+      )
+        return
+      const state = paginationActivity.snapshot()
+      if (
+        state.active ||
+        state.fontProbes ||
+        hasFailedPhasedContent() ||
+        hasPendingParagraphMeasurements(editor.view) ||
+        document.fonts.status !== 'loaded'
+      )
+        return
+      if (state.contentPending) {
+        if (
+          !onInitialViewport ||
+          layout.cuts.length < 2 ||
+          (timer !== null && !independentlyMeasuredPrefix)
+        )
+          return
+        // Only existing independent feedback may reserve a prefix. Unknown
+        // or non-local dependencies set dirtyFrom to null.
+        const model = editor.state.doc
+        const unchanged = timer === null ? model.childCount : dirtyFrom
+        if (unchanged === null || unchanged === 0) return
+        let measuredThrough = 0
+        for (let i = 0; i < Math.min(unchanged, model.childCount); i++)
+          measuredThrough += model.child(i).nodeSize
+        onInitialViewport(viewportLayout(editor.view, layout), measuredThrough, completePaperEnd)
+        return
+      }
+      if (state.pending || timer !== null) return
+      viewportPublished = true
+      onViewportLayout(viewportLayout(editor.view, layout))
+    }
     const remeasure = (forceFull = false, synchronous = false) => {
       if (disposed) return
+      invalidateViewport()
       timer = null
       const viewportOnly = viewportAppendOnly
       viewportAppendOnly = false
@@ -4745,6 +4820,7 @@ export function App({
       fastEdits = new Set()
       const dirty = full ? null : dirtyFrom
       dirtyFrom = Infinity
+      independentlyMeasuredPrefix = false
       try {
         const swapZoom = zoomEl !== null && Math.abs(liveZoom - 1) > 0.0001
         const scrollTop = scroller.scrollTop
@@ -4826,6 +4902,7 @@ export function App({
         restoreNaturalFlow?.()
         restoreNaturalFlow = undefined
       }
+      publishViewportIfSettled()
     }
     const remeasurePass = (dirty: number | null, keepPublishedRange: boolean) => {
       const pm = pmEl()
@@ -5148,6 +5225,8 @@ export function App({
       pageCuts = cuts
       lastBlocks = blocks
       lastPassChildCount = measuredCount
+      if (onViewportLayout)
+        viewportMeasuredDocument = model?.childCount === measuredCount ? model : undefined
       pageLayoutRef.current = {
         blocks,
         slices,
@@ -6108,6 +6187,7 @@ export function App({
           !blocks.some(
             (block) => block.floated || block.floatTable || block.floatBottom !== undefined,
           )
+        independentlyMeasuredPrefix = independentFeedback
         const docIndexAt = (position: number | null) =>
           independentFeedback && position !== null
             ? editor.state.doc.resolve(position).index(0)
@@ -6309,6 +6389,7 @@ export function App({
       const streaming = isPhasedContentPending()
       if (streaming && trigger === 'append' && trackStreamingCoverage && !streamNeedsLayout())
         return
+      invalidateViewport()
       if (trigger !== 'follow-up') measureMountedTail = true
       if (fastIndex === null) fastEdits = null
       else fastEdits?.add(fastIndex)
@@ -6415,6 +6496,17 @@ export function App({
     }
     document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, onContentSettled)
     const paragraphHost = editor?.view.dom
+    const onTabGeometry = () => {
+      // Horizontal changes also affect the painted viewport and its caret
+      // hit targets, even when no paragraph became taller.
+      if (!viewportPublished) return
+      invalidateViewport()
+      queueMicrotask(() => {
+        if (!disposed) publishViewportIfSettled()
+      })
+    }
+    if (onViewportLayout)
+      paragraphHost?.addEventListener(TAB_GEOMETRY_COMMITTED_EVENT, onTabGeometry)
     const onParagraphsSettled = () => {
       if (!waitingForParagraphs && !laidOutBeforeParagraphsSettled) return
       const finalTypography = editor ? typographyOf(editor.state) : undefined
@@ -6429,11 +6521,15 @@ export function App({
         first = cjk === null ? justify : justify === null ? cjk : Math.min(cjk, justify)
       }
       if (!waitingForParagraphs && first === null) {
-        if (timer === null) activity.update({ pending: false })
+        if (timer === null) {
+          activity.update({ pending: false })
+          publishViewportIfSettled()
+        }
         return
       }
       // Typography can change wrapping without changing the document. Include
       // it in an already queued pass, or resume the pass that waited for it.
+      invalidateViewport()
       measureMountedTail = true
       fastEdits = null
       if (first !== null && dirtyFrom !== null) {
@@ -6518,6 +6614,7 @@ export function App({
     return () => {
       disposed = true
       flowRead?.reader.dispose()
+      invalidateViewport()
       activity.dispose()
       disposeOwnedDiagnostic(
         (window as unknown as Record<string, Record<string, unknown>>).__pageDebug,
@@ -6532,6 +6629,7 @@ export function App({
       publishScrolledPage.current = undefined
       streamResize.disconnect()
       document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, onContentSettled)
+      paragraphHost?.removeEventListener(TAB_GEOMETRY_COMMITTED_EVENT, onTabGeometry)
       paragraphHost?.removeEventListener(PARAGRAPH_MEASUREMENTS_SETTLED_EVENT, onParagraphsSettled)
       editor?.off('update', onDocUpdate)
       editor?.off('transaction', onShrinkTr)
@@ -6539,6 +6637,8 @@ export function App({
   }, [
     doc,
     docCss,
+    onViewportLayout,
+    onInitialViewport,
     multipageMode,
     publishPage,
     section,
@@ -8498,6 +8598,7 @@ export function App({
   )
   if (runtimeDocumentRef.current) runtimeDocumentRef.current.annotations = docsAnnotations
   fileCtxRef.current.beforeDocumentReplace = () => {
+    if (window.desktop) window.postMessage('docs:disconnect-layout', '*')
     docsCommands.releaseAll()
     docsAnnotations.reset()
     // The pane survives a document replacement. Reset its position together
@@ -8808,14 +8909,16 @@ export function App({
     onShowGrid: setShowGrid,
     onSplitView: setSplitView,
     onPagePreview: () => {
+      if (hasFailedPhasedContent()) return
       const generation = currentDocGeneration()
       const current = fileCtxRef.current.doc
       if (!isPhasedContentPending()) {
         setShowPagePreview(true)
         return
       }
-      void waitForFullContent().then(() => {
+      void waitForFullContent().then((complete) => {
         if (
+          complete &&
           current &&
           fileCtxRef.current.doc === current &&
           currentDocGeneration() === generation &&

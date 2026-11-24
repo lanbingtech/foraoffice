@@ -30,6 +30,7 @@ import {
 import { authorName } from '../author-name'
 import { charScaleEm, wordKerns } from '../line-metrics'
 import type { StoryLocation } from './story-revisions'
+import { SOURCE_DOCUMENT_REPLACED, sourceCompositionKey } from './source-composition'
 import {
   gridColTwips,
   tblPrRestoreAttrs,
@@ -1217,6 +1218,10 @@ export const TrackChangesExtension = Extension.create<object, TrackChangesStorag
           },
         },
         appendTransaction: (transactions, oldState, newState) => {
+          if (
+            transactions.some((tr) => tr.getMeta(sourceCompositionKey) === SOURCE_DOCUMENT_REPLACED)
+          )
+            pendingIme = null
           if (!storage.enabled) {
             pendingIme = null
             return null
@@ -1241,9 +1246,9 @@ export const TrackChangesExtension = Extension.create<object, TrackChangesStorag
           const tracked = transactions.filter(
             (t) => t.docChanged && !t.getMeta(TRACK_IGNORE) && !t.getMeta('history$'),
           )
-          let composing = false
+          let composing = sourceCompositionKey.getState(newState) != null
           try {
-            composing = Boolean(editor.view?.composing)
+            composing ||= Boolean(editor.view?.composing)
           } catch {
             /* headless editor */
           }

@@ -22,6 +22,28 @@ import type {
 import type { ProjectApi } from '@genoffice/project-store'
 import { installDropOpenBridge } from '@genoffice/electron-utils/drop-open'
 
+window.addEventListener('message', (event) => {
+  if (event.source !== window) return
+  if (event.data === 'docs:disconnect-layout') {
+    ipcRenderer.send('docs:disconnect-layout')
+    return
+  }
+  if (event.data?.type !== 'docs:connect-layout' || event.ports.length !== 1) return
+  const { width, height, expectedScale } = event.data
+  const deviceScaleFactor = window.devicePixelRatio
+  if (
+    typeof width !== 'number' ||
+    typeof height !== 'number' ||
+    expectedScale !== deviceScaleFactor
+  ) {
+    event.ports[0].close()
+    return
+  }
+  ipcRenderer.postMessage('docs:connect-layout', { width, height, deviceScaleFactor }, [
+    event.ports[0],
+  ])
+})
+
 const api: DesktopApi = {
   getLanguage: () => ipcRenderer.invoke('app:get-language'),
   getSystemLocale: () => ipcRenderer.invoke('docs:system-locale'),

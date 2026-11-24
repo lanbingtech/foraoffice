@@ -5,6 +5,7 @@ import type { Fragment, Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { isInTable } from '@tiptap/pm/tables'
 import { getLang, t } from '../i18n/locale'
 import { type TabStop } from '@genoffice/docx-engine'
+import { markPresentationPlugin, presentationPlugin } from './authored-document'
 
 /**
  * Custom schema mirroring the docx-engine Block model 1:1.
@@ -211,6 +212,7 @@ export const tabStopPluginKey = new PluginKey<DecorationSet>('tabStops')
 /** transaction meta: the lowest doc position whose paragraph changed height
  *  after a tab decoration landed; the paginator resumes a pass from there */
 export const tabReflowMeta = 'tabReflow'
+export const TAB_GEOMETRY_COMMITTED_EVENT = 'genoffice:tab-geometry-committed'
 
 /** first paragraph whose height moved since the heights were taken, if any */
 export function tabReflowStart(
@@ -632,6 +634,7 @@ class TabLayoutView {
       return
     }
     this.signalReflow()
+    view.dom.dispatchEvent(new Event(TAB_GEOMETRY_COMMITTED_EVENT))
     this.measure(this.dispatchScope)
   }
 
@@ -773,7 +776,12 @@ class TabLayoutView {
     const decos: Decoration[] = []
     for (const r of paraRanges)
       decos.push(
-        Decoration.node(r.from, r.to, { class: 'has-tab-stops' }, { class: 'has-tab-stops' }),
+        Decoration.node(
+          r.from,
+          r.to,
+          { class: 'has-tab-stops' },
+          { class: 'has-tab-stops', paintInViewport: true },
+        ),
       )
     for (const t of tabs) {
       // the wrap's forced break and a glyph leader share ::before; the blank
@@ -789,7 +797,13 @@ class TabLayoutView {
         class: `doc-tab${leader}${underline}${collapse}${glue}${box}${wrap}`,
         style: fixed ? `width:${t.fixed}px` : `tab-size:${t.cssSize}px`,
       }
-      decos.push(Decoration.inline(t.pos, t.pos + 1, attrs, { ...attrs, wrap: t.wrap }))
+      decos.push(
+        Decoration.inline(t.pos, t.pos + 1, attrs, {
+          ...attrs,
+          wrap: t.wrap,
+          paintInViewport: 'inline',
+        }),
+      )
     }
     const previous = roots
       ? tabDecorationsInRanges(old, edit && !retry ? [edit] : paraRanges)
@@ -892,6 +906,7 @@ class TabLayoutView {
       p.tail.style.setProperty('--doc-toc-gap', p.gap)
       this.tocGaps.set(p.tail, p.gap)
     }
+    view.dom.dispatchEvent(new Event(TAB_GEOMETRY_COMMITTED_EVENT))
     let from: number | null = null
     for (const c of changed) {
       if (Math.abs(c.el.getBoundingClientRect().height - c.before) <= 0.5) continue
@@ -1174,7 +1189,7 @@ export const TabStopExtension = Extension.create({
   addProseMirrorPlugins() {
     const storage = this.storage as TabStopStorage
     return [
-      new Plugin({
+      presentationPlugin({
         key: tabStopPluginKey,
         state: {
           init: () => DecorationSet.empty,
@@ -1264,7 +1279,7 @@ export const WsRunLineHeightExtension = Extension.create({
   name: 'wsRunLineHeight',
   addProseMirrorPlugins() {
     return [
-      new Plugin(
+      presentationPlugin(
         textDecorationState(wsRunPluginKey, (node, pos, decos) => {
           if (!node.text || !/^[ \t]+$/.test(node.text)) return
           // only runs with a font-size source can inflate the line
@@ -1356,35 +1371,37 @@ export const ParaBorderMergeExtension = Extension.create({
     const styles = () =>
       (this.editor.storage.listNumbering as ListNumberingStorage | undefined)?.styles
     return [
-      blockDecorationPlugin({
-        key: paraBorderMergePluginKey,
-        build(doc) {
-          return bodyBorderDecorationChanges(doc.content, styleBorderLookup(styles())).add
-        },
-        append(tr, tail, old) {
-          const { add, remove } = bodyBorderDecorationChanges(
-            tail.content,
-            styleBorderLookup(styles()),
-            tail.from,
-            tr.before,
-          )
-          return old.remove(remove).add(tr.doc, add)
-        },
-        // a bordered block can join or leave a group; a border-less one only
-        // matters when it was grouped before (then it carried a decoration)
-        needsRecompute: (node) =>
-          node.isTextblock &&
-          affectsBorderGroup(node.attrs as ParaBorderAttrs, styleBorderLookup(styles())),
-        // a text edit inside a style-bordered paragraph keeps its group key: no rebuild
-        changed: (before, after) => {
-          const lookup = styleBorderLookup(styles())
-          const key = (n: ProseMirrorNode) =>
-            n.isTextblock ? borderGroupKey(n.attrs as ParaBorderAttrs, lookup) : ''
-          return key(before) !== key(after)
-        },
-        // a reloaded style table changes which styles carry borders
-        signature: () => styleBorderSignature(styles()),
-      }),
+      markPresentationPlugin(
+        blockDecorationPlugin({
+          key: paraBorderMergePluginKey,
+          build(doc) {
+            return bodyBorderDecorationChanges(doc.content, styleBorderLookup(styles())).add
+          },
+          append(tr, tail, old) {
+            const { add, remove } = bodyBorderDecorationChanges(
+              tail.content,
+              styleBorderLookup(styles()),
+              tail.from,
+              tr.before,
+            )
+            return old.remove(remove).add(tr.doc, add)
+          },
+          // a bordered block can join or leave a group; a border-less one only
+          // matters when it was grouped before (then it carried a decoration)
+          needsRecompute: (node) =>
+            node.isTextblock &&
+            affectsBorderGroup(node.attrs as ParaBorderAttrs, styleBorderLookup(styles())),
+          // a text edit inside a style-bordered paragraph keeps its group key: no rebuild
+          changed: (before, after) => {
+            const lookup = styleBorderLookup(styles())
+            const key = (n: ProseMirrorNode) =>
+              n.isTextblock ? borderGroupKey(n.attrs as ParaBorderAttrs, lookup) : ''
+            return key(before) !== key(after)
+          },
+          // a reloaded style table changes which styles carry borders
+          signature: () => styleBorderSignature(styles()),
+        }),
+      ),
     ]
   },
 })

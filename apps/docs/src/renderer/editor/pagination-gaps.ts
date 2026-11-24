@@ -1,5 +1,6 @@
 import { Extension } from '@tiptap/core'
-import { Plugin, PluginKey, type EditorState, type Transaction } from '@tiptap/pm/state'
+import { PluginKey, type EditorState, type Transaction } from '@tiptap/pm/state'
+import { presentationPlugin } from './authored-document'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import type { EditorView } from '@tiptap/pm/view'
 import type { LineAnchor } from '../pagination'
@@ -73,7 +74,7 @@ export const PaginationGapsExtension = Extension.create({
 
   addProseMirrorPlugins() {
     return [
-      new Plugin<DecorationSet>({
+      presentationPlugin<DecorationSet>({
         key,
         state: {
           init: () => DecorationSet.empty,
@@ -110,6 +111,7 @@ interface GapWidgetSpec {
   inlineDOM?: () => HTMLElement
   contents?: GapWidgetContents
   shellKey?: string
+  cols?: number
 }
 
 let nextGapInstance = 0
@@ -161,6 +163,7 @@ function keptGaps(
           key: `${spec.key}-joined`,
           gapKind: 'inline',
           toDOM: spec.inlineDOM,
+          contents: spec.contents,
         }
         widget = Decoration.widget(p, joined.toDOM, joined)
       }
@@ -184,7 +187,7 @@ export const RowFillsExtension = Extension.create({
   name: 'paginationRowFills',
   addProseMirrorPlugins() {
     return [
-      new Plugin<DecorationSet>({
+      presentationPlugin<DecorationSet>({
         key: rowFillKey,
         state: {
           init: () => DecorationSet.empty,
@@ -255,6 +258,7 @@ export function setRowFills(
           Decoration.node($inside.before(d), $inside.after(d), attrs, {
             key: `row-fill-${attrs.style}-${attrs['data-split-extra'] ?? ''}`,
             geometry: `${attrs.style}:${Math.round(Number(attrs['data-split-extra'] ?? 0))}`,
+            paintInViewport: true,
           }),
         )
         break
@@ -338,7 +342,7 @@ export const FloatVShiftsExtension = Extension.create({
   name: 'paginationFloatVShifts',
   addProseMirrorPlugins() {
     return [
-      new Plugin<DecorationSet>({
+      presentationPlugin<DecorationSet>({
         key: floatVKey,
         state: {
           init: () => DecorationSet.empty,
@@ -568,6 +572,18 @@ export const GAP_BAND = 28
 
 export type GapKind = 'block' | 'inline' | 'table' | 'cut' | 'cell'
 
+export interface ViewportFlowGap {
+  kind: Exclude<GapKind, 'block'>
+  metrics: GapMetrics
+  pullUp?: number
+  cols?: number
+}
+
+export function viewportFlowGap(spec: GapWidgetSpec): ViewportFlowGap | undefined {
+  if (!spec.contents || spec.gapKind === 'block') return
+  return spec.contents.viewportGap(spec.gapKind, spec.cols)
+}
+
 /**
  * The one meaning of "page turn" on the canvas: a page-gap widget that opens a
  * page (top-level, mid-paragraph, in-cell and in-table gaps, the latter also
@@ -779,6 +795,10 @@ class GapWidgetContents {
     return el
   }
 
+  viewportGap(kind: ViewportFlowGap['kind'], cols?: number): ViewportFlowGap {
+    return { kind, cols, metrics: { ...this.metrics }, pullUp: this.pullUp }
+  }
+
   update(gap: PageGapSpec): void {
     this.page = gap.page
     this.metrics = gap.metrics
@@ -924,6 +944,7 @@ export function setPageGaps(
         gapKind: kind,
         toDOM,
         contents,
+        cols,
         inlineDOM: kind === 'block' ? () => contents.build('inline') : undefined,
       }
       decos.push(Decoration.widget(pos, toDOM, spec))

@@ -1,6 +1,7 @@
 import { Extension } from '@tiptap/core'
 import { isEastAsianChar, isEastAsianLangTag, isHangulChar } from '@genoffice/docx-engine'
-import { Plugin, PluginKey, type EditorState } from '@tiptap/pm/state'
+import { PluginKey, type EditorState } from '@tiptap/pm/state'
+import { presentationPlugin } from './authored-document'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import {
@@ -755,13 +756,14 @@ class CjkPunctShrinkView {
         s.from,
         s.from + 1,
         { class: 'doc-cjkshrink', style },
-        { hang: s.hang === true, style },
+        { hang: s.hang === true, style, paintInViewport: 'inline' },
       )
     })
     const previous = old ?? DecorationSet.empty
     const rendered = scope ? previous.find(scope.from + 1, scope.to - 1) : previous.find()
+    // DecorationSet.remove consumes its argument. Keep the rendered spans for comparison.
     const next = scope
-      ? previous.remove(rendered).add(view.state.doc, decos)
+      ? previous.remove([...rendered]).add(view.state.doc, decos)
       : DecorationSet.create(view.state.doc, decos)
     const proposed = scope ? next.find(scope.from + 1, scope.to - 1) : next.find()
     if (
@@ -1108,7 +1110,7 @@ export const CjkPunctShrinkExtension = Extension.create({
   addProseMirrorPlugins() {
     const storage = this.storage as CjkPunctShrinkStorage
     return [
-      new Plugin({
+      presentationPlugin({
         key: cjkPunctShrinkPluginKey,
         state: {
           init: () => DecorationSet.empty,

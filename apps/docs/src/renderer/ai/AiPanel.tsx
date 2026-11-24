@@ -1177,13 +1177,13 @@ export function AiPanel({
       })
       // a phased open still streaming its tail: the context must describe the whole document
       .then(async (images) => {
-        await Promise.all([waitForFullContent(), refreshKbFiles()])
+        const [complete] = await Promise.all([waitForFullContent(), refreshKbFiles()])
         // a newer send (after New chat) owns the panel now: leave its state alone
         if (pendingSendRef.current !== pending) return
         pendingSendRef.current = null
         // the wait ended because another document replaced this one, or the
         // user stopped / reset the chat meanwhile: nothing to run
-        if (pending.aborted || currentDocGeneration() !== generation) {
+        if (!complete || pending.aborted || currentDocGeneration() !== generation) {
           setChat((prev) =>
             prev.filter(
               (m, i) => !(i === prev.length - 1 && m.role === 'assistant' && m.streaming),

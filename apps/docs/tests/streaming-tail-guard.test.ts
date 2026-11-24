@@ -1,18 +1,26 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { commentEndpoints } from '../src/renderer/editor/comment-endpoints'
 import {
   PHASED_APPEND,
   appendedStreamedTail,
+  streamedAppendApplied,
   touchesStreamingTail,
 } from '../src/renderer/editor/streaming-tail-guard'
-import { appendStreamedNodes } from '../src/renderer/file-actions'
+import {
+  appendStreamedNodes,
+  buildDocBytes,
+  canOutputDocument,
+  printDoc,
+  type FileActionContext,
+} from '../src/renderer/file-actions'
 import {
   PHASED_MIN_BLOCKS,
   cancelPhasedContent,
   isPhasedContentPending,
   setContentPhased,
+  waitForFullContent,
   type PhasedContentHost,
 } from '../src/renderer/phased-content'
 
@@ -58,6 +66,17 @@ describe('appendedStreamedTail', () => {
     })
     appendStreamedNodes(editor, [para('next'), para('last')] as never)
     expect(tail).toEqual({ from: end, content: editor.state.doc.content.cut(end) })
+  })
+
+  it('does not confirm a fitted transaction that changes the staged source', () => {
+    const editor = createEditor()
+    const before = editor.state.doc
+    const attempt = {}
+    expect(() =>
+      appendStreamedNodes(editor, [{ type: 'text', text: 'invalid top-level node' }], attempt),
+    ).toThrow()
+    expect(streamedAppendApplied(editor.state, attempt)).toBe(false)
+    expect(editor.state.doc).toBe(before)
   })
 
   it('retains the trailing anchor widget and builds streamed table decorations at the same positions as a full load', () => {
@@ -181,14 +200,12 @@ describe('editing while a phased open streams', () => {
           .setMeta(PHASED_APPEND, true)
           .setContent(doc as never)
           .run(),
-      appendNodes: (nodes) => appendStreamedNodes(editor, nodes as never),
+      appendNodes: (nodes, attempt) => appendStreamedNodes(editor, nodes, attempt),
+      appliedAppend: (attempt) => streamedAppendApplied(editor.state, attempt),
       isDestroyed: () => editor.isDestroyed,
       resetHistory: () => resets++,
       setLoading: () => {},
       getDirty: () => dirty,
-      setDirty: (d) => {
-        dirty = d
-      },
     }
     const blocks = Array.from({ length: PHASED_MIN_BLOCKS + 10 }, (_, i) => para(`block ${i}`))
     setContentPhased(host, { type: 'doc', content: blocks } as never, (cb) => chunks.push(cb))
@@ -219,7 +236,38 @@ describe('editing while a phased open streams', () => {
 })
 
 describe('a refused chunk during a phased open', () => {
-  it('falls back to the full mount through the guard', () => {
+  it('blocks save and print after a terminally truncated load', async () => {
+    const editor = createEditor()
+    const chunks: Array<() => void> = []
+    const setShowPrintDialog = vi.fn()
+    const ctx = { editor, doc: {}, setShowPrintDialog } as unknown as FileActionContext
+    const blocks = Array.from({ length: PHASED_MIN_BLOCKS + 1 }, (_, i) => para(`block ${i}`))
+    setContentPhased(
+      {
+        owner: editor,
+        setContent: (doc) => editor.commands.setContent(doc),
+        appendNodes: () => {
+          throw new Error('refused')
+        },
+        appliedAppend: (attempt) => streamedAppendApplied(editor.state, attempt),
+        isDestroyed: () => editor.isDestroyed,
+        resetHistory: () => {},
+        setLoading: () => {},
+        getDirty: () => false,
+      },
+      { type: 'doc', content: blocks },
+      (cb) => chunks.push(cb),
+    )
+    printDoc(ctx)
+    while (chunks.length) chunks.shift()!()
+    expect(editor.state.doc.childCount).toBeLessThan(blocks.length)
+    await expect(waitForFullContent()).resolves.toBe(false)
+    await expect(buildDocBytes(ctx)).resolves.toBeNull()
+    expect(canOutputDocument(ctx)).toBe(false)
+    expect(setShowPrintDialog).not.toHaveBeenCalled()
+  })
+
+  it('preserves undo and redo for foreground typing when recovery appends the missing suffix', () => {
     const editor = createEditor()
     const chunks: Array<() => void> = []
     let appends = 0
@@ -232,27 +280,32 @@ describe('a refused chunk during a phased open', () => {
           .setMeta(PHASED_APPEND, true)
           .setContent(doc as never)
           .run(),
-      appendNodes: () => {
-        appends++
-        throw new Error('refused')
+      appendNodes: (nodes, attempt) => {
+        if (++appends === 1) throw new Error('refused')
+        appendStreamedNodes(editor, nodes, attempt)
       },
+      appliedAppend: (attempt) => streamedAppendApplied(editor.state, attempt),
       isDestroyed: () => editor.isDestroyed,
       resetHistory: () => resets++,
       setLoading: () => {},
       getDirty: () => true,
-      setDirty: () => {},
     }
     const blocks = Array.from({ length: PHASED_MIN_BLOCKS + 10 }, (_, i) => para(`block ${i}`))
     setContentPhased(host, { type: 'doc', content: blocks } as never, (cb) => chunks.push(cb))
     editor.view.dispatch(editor.state.tr.insertText('!', inside(editor, 0, 2)))
     while (chunks.length) chunks.shift()!()
-    expect(appends).toBe(1)
+    expect(appends).toBe(2)
     expect(isPhasedContentPending()).toBe(false)
     // the whole document landed even though the guard was armed at the time
     expect(editor.state.doc.childCount).toBe(blocks.length)
+    expect(editor.state.doc.child(0).textContent).toBe('b!lock 0')
     expect(editor.state.doc.child(blocks.length - 1).textContent).toBe(`block ${blocks.length - 1}`)
-    // the remount discarded the mid-stream edit, so the history goes with it:
-    // an undo must not bring the truncated document back
-    expect(resets).toBe(1)
+    expect(resets).toBe(0)
+    expect(editor.commands.undo()).toBe(true)
+    expect(editor.state.doc.child(0).textContent).toBe('block 0')
+    expect(editor.state.doc.childCount).toBe(blocks.length)
+    expect(editor.commands.redo()).toBe(true)
+    expect(editor.state.doc.child(0).textContent).toBe('b!lock 0')
+    expect(editor.state.doc.childCount).toBe(blocks.length)
   })
 })

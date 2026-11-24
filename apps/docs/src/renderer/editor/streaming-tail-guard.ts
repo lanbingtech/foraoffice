@@ -1,11 +1,20 @@
 import { Extension } from '@tiptap/core'
-import { Plugin, type Transaction } from '@tiptap/pm/state'
+import { Plugin, PluginKey, type EditorState, type Transaction } from '@tiptap/pm/state'
 import { ReplaceStep } from '@tiptap/pm/transform'
 import type { EditorView } from '@tiptap/pm/view'
-import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
+import {
+  PHASED_CONTENT_FAILED_EVENT,
+  PHASED_CONTENT_SETTLED_EVENT,
+  isPhasedContentPending,
+} from '../phased-content'
 
 /** set on the transactions that append a streamed chunk */
 export const PHASED_APPEND = 'phasedAppend'
+export const streamedAppendKey = new PluginKey<object | null>('streamedAppend')
+
+export function streamedAppendApplied(state: EditorState, attempt: object): boolean {
+  return streamedAppendKey.getState(state) === attempt
+}
 
 /** Only a complete-block append preserves every already mounted position. */
 export function appendedStreamedTail(transaction: Transaction) {
@@ -60,9 +69,8 @@ interface HeldText {
 }
 
 /**
- * True when a step replaces the whole document — a remount after a refused
- * chunk, or a different file. Typed text cannot survive one of those, and
- * replaying it would paste it into whatever document took its place. An
+ * True when a step replaces the whole document. Replaying typed text would
+ * paste it into whatever document took its place. An
  * insert at the document start also has from = 0, so the step must reach the
  * end of the document it was applied to.
  */
@@ -93,7 +101,13 @@ export const StreamingTailGuardExtension = Extension.create({
       view.dispatch(view.state.tr.insertText(pending.text, at))
     }
     return [
-      new Plugin({
+      new Plugin<object | null>({
+        key: streamedAppendKey,
+        state: {
+          init: () => null,
+          apply: (tr, installed) =>
+            (tr.getMeta(streamedAppendKey) as object | undefined) ?? installed,
+        },
         filterTransaction: (tr) => !isPhasedContentPending() || !touchesStreamingTail(tr),
         appendTransaction: (trs) => {
           if (!held) return null
@@ -130,9 +144,16 @@ export const StreamingTailGuardExtension = Extension.create({
         },
         view: (view) => {
           const onSettled = (): void => insertHeld(view)
+          const onFailed = (event: Event): void => {
+            if ((event as CustomEvent).detail === this.editor) insertHeld(view)
+          }
           document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, onSettled)
+          document.addEventListener(PHASED_CONTENT_FAILED_EVENT, onFailed)
           return {
-            destroy: () => document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, onSettled),
+            destroy: () => {
+              document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, onSettled)
+              document.removeEventListener(PHASED_CONTENT_FAILED_EVENT, onFailed)
+            },
           }
         },
       }),

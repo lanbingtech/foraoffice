@@ -28,6 +28,7 @@ export function columnDecoration(
     {
       key: `col-${attrs.class}-${attrs.style}`,
       frame: attrs,
+      paintInViewport: true,
       ...(continuation
         ? { paragraphLayout: { attrs, continuation } satisfies ParagraphLayout }
         : {}),

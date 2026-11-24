@@ -19,6 +19,7 @@ import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { DOC_CSS_COMMITTED_EVENT } from '../src/renderer/editor/cjk-punct-shrink'
 import { WRAP_WIDTHS_COMMITTED_EVENT } from '../src/renderer/editor/column-layout'
+import { streamedAppendApplied } from '../src/renderer/editor/streaming-tail-guard'
 import { appendStreamedNodes } from '../src/renderer/file-actions'
 import {
   cancelPhasedContent,
@@ -781,10 +782,11 @@ it('leaves settlement free of geometry reads and measures across browser frames'
       {
         owner: editor,
         setContent: (doc) => editor.commands.setContent(doc),
-        appendNodes: (nodes) => {
-          appendStreamedNodes(editor, nodes)
+        appendNodes: (nodes, attempt) => {
+          appendStreamedNodes(editor, nodes, attempt)
           expect(width).not.toHaveBeenCalled()
         },
+        appliedAppend: (attempt) => streamedAppendApplied(editor.state, attempt),
         isDestroyed: () => false,
         resetHistory: () => {
           // Reconfiguring editor plugins recreates the measurement views.
@@ -793,7 +795,6 @@ it('leaves settlement free of geometry reads and measures across browser frames'
         },
         setLoading: () => {},
         getDirty: () => false,
-        setDirty: () => {},
       },
       { type: 'doc', content },
       (task) => tasks.push(task),

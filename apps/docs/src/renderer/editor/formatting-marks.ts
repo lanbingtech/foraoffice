@@ -1,7 +1,8 @@
 import { Extension } from '@tiptap/core'
 import type { SectionInfo } from '@genoffice/docx-engine'
 import type { Node as PmNode } from '@tiptap/pm/model'
-import { Plugin, PluginKey } from '@tiptap/pm/state'
+import { PluginKey } from '@tiptap/pm/state'
+import { presentationPlugin } from './authored-document'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { t } from '../i18n/locale'
 import { containsNode, localEditBlocks, touchedNeedsRecompute } from './local-edit'
@@ -145,7 +146,7 @@ export const FormattingMarksExtension = Extension.create({
   name: 'formattingMarks',
   addProseMirrorPlugins() {
     return [
-      new Plugin<FormattingMarksState>({
+      presentationPlugin<FormattingMarksState>({
         key: formattingMarksPluginKey,
         state: {
           init: () => ({ meta: OFF, decos: DecorationSet.empty }),
