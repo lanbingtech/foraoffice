@@ -106,6 +106,23 @@ function runLayout(
       applyEdits()
       return
     }
+    if (data?.type === 'reveal') {
+      const result =
+        opened && data.revision === revision && data.publication === publication
+          ? layout?.reveal(data.position, data.height)
+          : undefined
+      const stamp = {
+        sequence: data.sequence,
+        revision: data.revision,
+        publication: data.publication,
+      }
+      port.postMessage(
+        result
+          ? { type: 'viewport', ...stamp, ...result }
+          : { type: 'reveal-unavailable', ...stamp, position: data.position },
+      )
+      return
+    }
     if (
       data?.type !== 'viewport' ||
       !Number.isFinite(data.bounds?.top) ||

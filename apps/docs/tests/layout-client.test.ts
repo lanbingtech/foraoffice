@@ -27,7 +27,12 @@ class TestPort extends EventTarget {
 
 function client(resolution?: MediaQueryList) {
   const port = new TestPort()
-  const events = { layout: vi.fn(), viewport: vi.fn(), failure: vi.fn() }
+  const events = {
+    layout: vi.fn(),
+    viewport: vi.fn(),
+    revealUnavailable: vi.fn(),
+    failure: vi.fn(),
+  }
   const layout = new LayoutClient(port as unknown as MessagePort, events, resolution)
   return { port, events, layout }
 }
@@ -66,6 +71,51 @@ describe('the authoritative layout connection', () => {
     port.receive({ type: 'layout', pages: [], publication: 1, revision: 0 })
     layout.request({ top: 80, bottom: 90 })
     expect(port.sent).toHaveLength(2)
+  })
+
+  it('uses the measured owner position and discards a reveal superseded by scrolling', () => {
+    const { layout, port, events } = client()
+    const content = { canvas: { left: 0, top: 0, width: 80, height: 500 }, blocks: [] }
+    expect(layout.requestReveal(20, 80, 0)).toBe(false)
+    port.receive({ type: 'layout', pages: [], publication: 1, revision: 0 })
+    expect(layout.requestReveal(-1, 80, 0)).toBe(false)
+    expect(layout.requestReveal(20, 80, 1)).toBe(false)
+    expect(layout.requestReveal(20, 80, 0)).toBe(true)
+    expect(port.sent.at(-1)).toEqual({
+      type: 'reveal',
+      sequence: 1,
+      publication: 1,
+      revision: 0,
+      position: 20,
+      height: 80,
+    })
+    const reply = {
+      type: 'viewport' as const,
+      revision: 0,
+      publication: 1,
+      sequence: 1,
+      reveal: { position: 20, top: 200 },
+      content,
+    }
+    layout.request({ top: 30, bottom: 110 })
+    port.receive(reply)
+    expect(events.viewport).not.toHaveBeenCalled()
+    expect(layout.requestReveal(20, 80, 0)).toBe(true)
+    port.receive({ ...reply, sequence: 3 })
+    expect(events.viewport).toHaveBeenCalledExactlyOnceWith({ ...reply, sequence: 3 })
+
+    expect(layout.requestReveal(600, 80, 0)).toBe(true)
+    const unavailable = {
+      type: 'reveal-unavailable' as const,
+      revision: 0,
+      sequence: 4,
+      publication: 1,
+      position: 600,
+    }
+    port.receive({ ...unavailable, publication: 0 })
+    expect(events.revealUnavailable).not.toHaveBeenCalled()
+    port.receive(unavailable)
+    expect(events.revealUnavailable).toHaveBeenCalledExactlyOnceWith(600)
   })
 
   it('waits for layouts of the most recent authoritative input revision', () => {

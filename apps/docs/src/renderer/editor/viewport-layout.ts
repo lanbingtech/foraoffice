@@ -53,6 +53,12 @@ export interface ViewportContent {
   }
 }
 
+/** A source position and the visible range's origin in canvas coordinates. */
+export interface ViewportReveal {
+  position: number
+  top: number
+}
+
 /** A view-local handle. Only the DOM-free results cross the renderer boundary. */
 export interface ViewportLayout {
   document: PmNode
@@ -60,6 +66,11 @@ export interface ViewportLayout {
   pageStarts(): Array<number | null> | undefined
   geometry(): ViewportGeometry | undefined
   read(viewport: ViewportBounds): ViewportContent | undefined
+  /** Locate a point. The owner chooses the appropriate position for its selection type. */
+  reveal(
+    position: number,
+    height: number,
+  ): { content: ViewportContent; reveal: ViewportReveal } | undefined
 }
 
 /** A hidden model atom can sit between visible blocks but have no ink in the
@@ -201,6 +212,31 @@ export function viewportLayout(view: EditorView, layout: PageLayout): ViewportLa
     read(viewport) {
       if (!live()) return
       return viewportContent((geometry ??= measure()), viewport, document)
+    },
+    reveal(position, height) {
+      if (
+        !live() ||
+        !Number.isSafeInteger(position) ||
+        position < 0 ||
+        position > document.content.size ||
+        !Number.isFinite(height) ||
+        height <= 0
+      )
+        return
+      const measured = (geometry ??= measure())
+      let caretTop: number
+      try {
+        const root = view.dom.getBoundingClientRect()
+        caretTop = (view.coordsAtPos(position).top - root.top) / (view.dom.currentCSSZoom || 1)
+      } catch {
+        return
+      }
+      if (!Number.isFinite(caretTop) || caretTop < 0 || caretTop > measured.canvas.height) return
+      const maxTop = Math.max(0, measured.canvas.height - height)
+      const top = Math.min(maxTop, Math.max(0, caretTop - height * 0.3))
+      const content = viewportContent(measured, { top, bottom: top + height }, document)
+      if (!content.model || position < content.model.from || position > content.model.to) return
+      return { content, reveal: { position, top } }
     },
   }
 }

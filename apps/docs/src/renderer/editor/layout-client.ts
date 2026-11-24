@@ -3,7 +3,12 @@ import type { Transaction } from '@tiptap/pm/state'
 import type { OpenFileResult } from '../../shared/ipc'
 import type { PageCut } from '../pagination-cuts'
 import type { ViewportBounds } from './viewport-fragments'
-import { viewportContent, type ViewportContent, type ViewportGeometry } from './viewport-layout'
+import {
+  viewportContent,
+  type ViewportContent,
+  type ViewportGeometry,
+  type ViewportReveal,
+} from './viewport-layout'
 
 export type LayoutMessage =
   | {
@@ -14,6 +19,7 @@ export type LayoutMessage =
       height: number
     }
   | { type: 'viewport'; sequence: number; publication: number; bounds: ViewportBounds }
+  | (ViewportRequestStamp & { type: 'reveal'; position: number; height: number })
   | { type: 'edit'; fromRevision: number; toRevision: number; steps: unknown[] }
 
 type LayoutPublication = {
@@ -26,12 +32,16 @@ type LayoutPublication = {
   initial?: ViewportContent
 }
 
-type ViewportPublication = {
-  type: 'viewport'
+interface ViewportRequestStamp {
   publication: number
   revision: number
   sequence: number
+}
+
+type ViewportPublication = ViewportRequestStamp & {
+  type: 'viewport'
   content: ViewportContent | null
+  reveal?: ViewportReveal
 }
 
 export type LayoutReply =
@@ -39,11 +49,13 @@ export type LayoutReply =
   | { type: 'invalidated'; publication: number }
   | { type: 'applied'; revision: number }
   | ViewportPublication
+  | (ViewportRequestStamp & { type: 'reveal-unavailable'; position: number })
   | { type: 'failure'; reason: string }
 
 interface LayoutClientEvents {
   layout(layout: LayoutPublication | null, publication: number): void
   viewport(reply: ViewportPublication & { content: ViewportContent }): void
+  revealUnavailable(position: number): void
   failure(reason: string): void
 }
 
@@ -86,6 +98,29 @@ export class LayoutClient {
       sequence,
       bounds,
     })
+  }
+
+  /** Reveal a position from the same source revision as the current layout. */
+  requestReveal(position: number, height: number, revision: number): boolean {
+    if (
+      !this.displayIsCurrent() ||
+      !this.active ||
+      revision !== this.revision ||
+      !Number.isSafeInteger(position) ||
+      position < 0 ||
+      !Number.isFinite(height) ||
+      height <= 0
+    )
+      return false
+    this.send({
+      type: 'reveal',
+      publication: this.active.publication,
+      revision,
+      sequence: ++this.sequence,
+      position,
+      height,
+    })
+    return true
   }
 
   apply(transactions: readonly Transaction[]): void {
@@ -138,6 +173,14 @@ export class LayoutClient {
     return false
   }
 
+  private isCurrentViewportReply(data: ViewportRequestStamp): boolean {
+    return (
+      data.revision === this.revision &&
+      data.publication === this.active?.publication &&
+      data.sequence === this.sequence
+    )
+  }
+
   private receive = ({ data }: MessageEvent<LayoutReply>): void => {
     if (!this.displayIsCurrent()) return
     switch (data.type) {
@@ -153,13 +196,11 @@ export class LayoutClient {
         this.clear()
         return
       case 'viewport':
-        if (
-          data.content &&
-          data.revision === this.revision &&
-          data.publication === this.active?.publication &&
-          data.sequence === this.sequence
-        )
+        if (data.content && this.isCurrentViewportReply(data))
           this.events.viewport({ ...data, content: data.content })
+        return
+      case 'reveal-unavailable':
+        if (this.isCurrentViewportReply(data)) this.events.revealUnavailable(data.position)
         return
       case 'failure':
         this.dispose()

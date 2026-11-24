@@ -8,10 +8,16 @@ type Reply = {
   type: string
   publication: number
   revision?: number
+  sequence?: number
+  position?: number
   pages?: unknown[]
   starts?: Array<number | null>
   initial?: { model?: { document: unknown } }
-  content?: { blocks: Array<{ from: number; to: number }> }
+  content?: {
+    blocks: Array<{ from: number; to: number }>
+    model?: { from: number; to: number; document: unknown }
+  } | null
+  reveal?: { position: number; top: number }
 }
 
 type LayoutTestWindow = Window & {
@@ -143,6 +149,49 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
     )
     expect(identity.find((win) => win.layout)?.visible).toBe(false)
     expect(new Set(identity.map((win) => win.pid)).size).toBe(2)
+    const position = await page.evaluate(() => {
+      const owner = window as unknown as LayoutTestWindow
+      const layout = owner.layoutReplies.filter((reply) => reply.type === 'layout').at(-1)!
+      const start = layout.starts?.[2]
+      if (start == null || layout.revision == null)
+        throw new Error('The last page has no versioned source position')
+      const position = start + 2
+      owner.layoutPort.postMessage({
+        type: 'reveal',
+        publication: layout.publication,
+        revision: layout.revision,
+        sequence: 10,
+        position,
+        height: 400,
+      })
+      owner.layoutPort.postMessage({
+        type: 'reveal',
+        publication: 0,
+        revision: layout.revision,
+        sequence: 11,
+        position,
+        height: 400,
+      })
+      return position
+    })
+    await page.waitForFunction(() =>
+      (window as unknown as LayoutTestWindow).layoutReplies.some(
+        (reply) => reply.type === 'reveal-unavailable' && reply.sequence === 11,
+      ),
+    )
+    const target = await page.evaluate(() => {
+      const replies = (window as unknown as LayoutTestWindow).layoutReplies
+      return {
+        result: replies.find((reply) => reply.sequence === 10),
+        stale: replies.find((reply) => reply.sequence === 11),
+      }
+    })
+    expect(target.result?.reveal?.position).toBe(position)
+    expect(target.result?.reveal?.top).toBeGreaterThan(1000)
+    expect(target.result?.content?.model?.from).toBeLessThanOrEqual(position)
+    expect(target.result?.content?.model?.to).toBeGreaterThan(position)
+    expect(JSON.stringify(target.result?.content?.model?.document)).toContain('Page 3')
+    expect(target.stale).toMatchObject({ type: 'reveal-unavailable', publication: 0, position })
     await page.evaluate(() => {
       const owner = window as unknown as LayoutTestWindow
       owner.layoutPort.postMessage({
