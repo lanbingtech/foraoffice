@@ -32,12 +32,29 @@ function client(resolution?: MediaQueryList) {
     viewport: vi.fn(),
     revealUnavailable: vi.fn(),
     failure: vi.fn(),
+    source: vi.fn(),
   }
   const layout = new LayoutClient(port as unknown as MessagePort, events, resolution)
   return { port, events, layout }
 }
 
 describe('the authoritative layout connection', () => {
+  it('delivers the imported source with the lifetime of its connection', () => {
+    const { layout, port, events } = client()
+    const reply = {
+      type: 'source' as const,
+      revision: 0 as const,
+      root: { type: 'doc' },
+      blocks: new ReadableStream<never>(),
+    }
+    port.receive(reply)
+    expect(events.source).toHaveBeenCalledExactlyOnceWith(reply, expect.any(AbortSignal))
+    const signal: AbortSignal = events.source.mock.calls[0][1]
+    expect(signal.aborted).toBe(false)
+    layout.dispose()
+    expect(signal.aborted).toBe(true)
+  })
+
   it('retires published geometry at a display scale change before handling pending messages', () => {
     const resolution = Object.assign(new EventTarget(), { matches: true })
     const { layout, port, events } = client(resolution as unknown as MediaQueryList)

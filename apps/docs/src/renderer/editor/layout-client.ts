@@ -2,6 +2,7 @@ import type { Lang } from '@genoffice/i18n'
 import type { Transaction } from '@tiptap/pm/state'
 import type { OpenFileResult } from '../../shared/ipc'
 import type { PageCut } from '../pagination-cuts'
+import type { PmNode } from './convert'
 import type { ViewportBounds } from './viewport-fragments'
 import {
   viewportContent,
@@ -17,6 +18,7 @@ export type LayoutMessage =
       language: Lang
       width: number
       height: number
+      includeSource?: boolean
     }
   | { type: 'viewport'; sequence: number; publication: number; bounds: ViewportBounds }
   | (ViewportRequestStamp & { type: 'reveal'; position: number; height: number })
@@ -44,8 +46,16 @@ type ViewportPublication = ViewportRequestStamp & {
   reveal?: ViewportReveal
 }
 
+type ImportedSource = {
+  type: 'source'
+  revision: 0
+  root: Omit<PmNode, 'content'>
+  blocks: ReadableStream<PmNode[]>
+}
+
 export type LayoutReply =
   | LayoutPublication
+  | ImportedSource
   | { type: 'invalidated'; publication: number }
   | { type: 'applied'; revision: number }
   | ViewportPublication
@@ -53,6 +63,8 @@ export type LayoutReply =
   | { type: 'failure'; reason: string }
 
 interface LayoutClientEvents {
+  /** Bind reads to this signal, for example with `blocks.pipeTo(writable, { signal })`. */
+  source?(source: ImportedSource, signal: AbortSignal): void
   layout(layout: LayoutPublication | null, publication: number): void
   viewport(reply: ViewportPublication & { content: ViewportContent }): void
   revealUnavailable(position: number): void
@@ -65,6 +77,7 @@ export class LayoutClient {
   private latestPublication = 0
   private active?: LayoutPublication
   private closed = false
+  private readonly lifetime = new AbortController()
 
   constructor(
     private readonly port: MessagePort,
@@ -137,6 +150,7 @@ export class LayoutClient {
   dispose(): void {
     if (this.closed) return
     this.closed = true
+    this.lifetime.abort()
     this.port.removeEventListener('message', this.receive)
     this.port.removeEventListener('close', this.lost)
     this.resolution?.removeEventListener('change', this.displayChanged)
@@ -184,6 +198,10 @@ export class LayoutClient {
   private receive = ({ data }: MessageEvent<LayoutReply>): void => {
     if (!this.displayIsCurrent()) return
     switch (data.type) {
+      case 'source':
+        if (this.events.source) this.events.source(data, this.lifetime.signal)
+        else void data.blocks.cancel().catch(() => {})
+        return
       case 'layout':
         if (data.revision !== this.revision || data.publication <= this.latestPublication) return
         this.latestPublication = data.publication
@@ -221,7 +239,7 @@ export function connectDesktopLayout(
   const client = new LayoutClient(port1, events, resolution)
   try {
     // Clone the owned input before asking the preload to create a worker.
-    port1.postMessage(open, [open.file.data])
+    port1.postMessage({ ...open, includeSource: !!events.source }, [open.file.data])
     window.postMessage(
       {
         type: 'docs:connect-layout',

@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { _electron as electron, expect, test, type Page } from '@playwright/test'
+import type { PmNode } from '../apps/docs/src/renderer/editor/convert'
 import type { DesktopApi } from '../apps/docs/src/shared/ipc'
 import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
 
@@ -12,6 +13,8 @@ type Reply = {
   position?: number
   pages?: unknown[]
   starts?: Array<number | null>
+  root?: Omit<PmNode, 'content'>
+  blocks?: ReadableStream<PmNode[]>
   initial?: { model?: { document: unknown } }
   content?: {
     blocks: Array<{ from: number; to: number }>
@@ -24,6 +27,7 @@ type LayoutTestWindow = Window & {
   desktop: DesktopApi
   layoutPort: MessagePort
   layoutReplies: Reply[]
+  layoutSource: { root?: Omit<PmNode, 'content'>; chunks: PmNode[][]; complete?: boolean }
   layoutClosed: boolean
 }
 
@@ -35,10 +39,13 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
     fixture,
     await buildDocx({
       bodyXml: [1, 2, 3]
-        .map(
-          (n) =>
-            `<w:p>${n > 1 ? '<w:pPr><w:pageBreakBefore/></w:pPr>' : ''}<w:r><w:t>Page ${n}</w:t></w:r></w:p>`,
-        )
+        .flatMap((n) => [
+          `<w:p>${n > 1 ? '<w:pPr><w:pageBreakBefore/></w:pPr>' : ''}<w:r><w:t>Page ${n}</w:t></w:r></w:p>`,
+          ...Array.from(
+            { length: 19 },
+            (_, i) => `<w:p><w:r><w:t>Page ${n}, paragraph ${i + 1}</w:t></w:r></w:p>`,
+          ),
+        ])
         .join(''),
     }),
   )
@@ -63,9 +70,26 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
           const ports = new MessageChannel()
           owner.layoutPort = ports.port1
           owner.layoutReplies = []
+          owner.layoutSource = { chunks: [] }
           owner.layoutClosed = false
           ports.port1.addEventListener('close', () => (owner.layoutClosed = true), { once: true })
           ports.port1.onmessage = ({ data }: MessageEvent<Reply>) => {
+            if (data.type === 'source' && data.blocks) {
+              const { blocks, ...snapshot } = data
+              owner.layoutReplies.push(snapshot)
+              const imported = owner.layoutSource
+              imported.root = snapshot.root
+              void blocks
+                .pipeTo(
+                  new WritableStream({
+                    write(chunk) {
+                      imported.chunks.push(chunk)
+                    },
+                  }),
+                )
+                .then(() => (imported.complete = true))
+              return
+            }
             owner.layoutReplies.push(data)
             if (data.type !== 'layout') return
             ports.port1.postMessage({
@@ -96,6 +120,7 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
               width: innerWidth,
               height: innerHeight,
               language: 'en',
+              includeSource: true,
               file: { path: '', dataUrl: '', name: file.name, hash: file.hash, data: bytes },
             },
             [bytes],
@@ -126,6 +151,30 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
       return { pages: layout?.pages?.length, starts: layout?.starts?.length }
     })
     expect(visible).toEqual({ pages: 3, starts: 3 })
+    await page.waitForFunction(() => (window as unknown as LayoutTestWindow).layoutSource.complete)
+    const source = await page.evaluate(() => {
+      const { layoutReplies, layoutSource } = window as unknown as LayoutTestWindow
+      const messages = layoutReplies.map((reply) => reply.type)
+      return {
+        revision: layoutReplies.find((reply) => reply.type === 'source')?.revision,
+        beforeLayout: messages.indexOf('source') < messages.indexOf('layout'),
+        rootType: layoutSource.root?.type,
+        chunks: layoutSource.chunks.map((chunk) => chunk.length),
+        lines: layoutSource.chunks
+          .flat()
+          .map((node) => node.content?.map((run) => run.text).join('')),
+      }
+    })
+    expect(source).toEqual({
+      revision: 0,
+      beforeLayout: true,
+      rootType: 'doc',
+      chunks: [50, 10],
+      lines: [1, 2, 3].flatMap((n) => [
+        `Page ${n}`,
+        ...Array.from({ length: 19 }, (_, i) => `Page ${n}, paragraph ${i + 1}`),
+      ]),
+    })
     const worker = app.windows().find((window) => window.url().includes('/layout.html'))!
     const measurePaper = (target: Page) =>
       target.evaluate(() => {
@@ -252,7 +301,7 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
     expect(
       await page.evaluate(() =>
         (window as unknown as LayoutTestWindow).layoutReplies.some(
-          (reply) => reply.type === 'layout',
+          (reply) => reply.type === 'layout' || reply.type === 'source',
         ),
       ),
     ).toBe(false)

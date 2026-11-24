@@ -4,7 +4,8 @@ import type { Editor } from '@tiptap/core'
 import { Step } from '@tiptap/pm/transform'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
-import type { LayoutMessage } from './editor/layout-client'
+import type { PmNode } from './editor/convert'
+import type { LayoutMessage, LayoutReply } from './editor/layout-client'
 import type { ViewportLayout } from './editor/viewport-layout'
 import { createExternalDocsHost, installDocsHost, type DocsEditorServices } from './host/docs-host'
 import { LocaleProvider, setModuleLang } from './i18n/locale'
@@ -12,10 +13,11 @@ import { waitForFullContent } from './phased-content'
 import { TRACK_IGNORE } from './editor/revisions'
 
 const noopSubscription = () => () => {}
+const SOURCE_BLOCKS_PER_CHUNK = 50
 
 function runLayout(
   port: MessagePort,
-  { file, language, width, height }: Extract<LayoutMessage, { type: 'open' }>,
+  { file, language, width, height, includeSource }: Extract<LayoutMessage, { type: 'open' }>,
 ) {
   const { docsLayoutResources } = window as unknown as {
     docsLayoutResources: Pick<DocsEditorServices, 'fontMetrics' | 'getSystemLocale'>
@@ -59,13 +61,45 @@ function runLayout(
   let failed = false
   let receivedRevision = 0
   let revision = 0
+  let stopSource: ((reason: Error) => void) | undefined
   const edits: Array<Extract<LayoutMessage, { type: 'edit' }>> = []
   const fail = (reason: string) => {
     if (failed) return
     failed = true
     layout = null
     edits.length = 0
+    stopSource?.(new Error(reason))
     port.postMessage({ type: 'failure', reason })
+  }
+  const publishSource = ({ content = [], ...sourceRoot }: PmNode) => {
+    if (failed) return
+    let offset = 0
+    const blocks = new ReadableStream<PmNode[]>({
+      start(controller) {
+        stopSource = (reason) => {
+          stopSource = undefined
+          controller.error(reason)
+        }
+      },
+      pull(controller) {
+        if (offset < content.length) {
+          const nextOffset = offset + SOURCE_BLOCKS_PER_CHUNK
+          controller.enqueue(content.slice(offset, nextOffset))
+          offset = nextOffset
+        }
+        if (offset >= content.length) {
+          controller.close()
+          stopSource = undefined
+        }
+      },
+      cancel() {
+        stopSource = undefined
+      },
+    })
+    port.postMessage(
+      { type: 'source', revision: 0, root: sourceRoot, blocks } satisfies LayoutReply,
+      [blocks],
+    )
   }
   const applyEdits = () => {
     if (!editor || failed || edits.length === 0) return
@@ -182,10 +216,15 @@ function runLayout(
   }
   root.render(
     <LocaleProvider initial={language}>
-      <App onViewportLayout={publish} onViewportOpen={reportOpen} />
+      <App
+        onViewportLayout={publish}
+        onViewportOpen={reportOpen}
+        onOpenedSource={includeSource ? publishSource : undefined}
+      />
     </LocaleProvider>,
   )
   return () => {
+    stopSource?.(new Error('The background layout connection closed'))
     try {
       root.unmount()
     } finally {

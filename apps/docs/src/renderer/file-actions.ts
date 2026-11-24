@@ -148,6 +148,8 @@ export type PendingPdfExport = {
 /** The App state the file actions need; built fresh per call. */
 export interface FileActionContext {
   beforeDocumentReplace?(): void
+  /** The imported body, in source order and before any layout-derived changes. */
+  onOpenedSource?(document: PmNode): void
   /** Publish a replacement or saved baseline and its authored stores before lifecycle completion. */
   commitDocumentState?(operation: () => void): void
   editor: Editor | null
@@ -654,15 +656,14 @@ export async function loadFile(
     if (!currentOpen()) return 'superseded'
     ctx.beforeDocumentReplace?.()
     if (!currentOpen()) return 'superseded'
+    let source: PmNode | undefined
     commitDocumentState(ctx, () => {
       ctx.editor!.storage.listNumbering.styles = parsed.styles
       ctx.editor!.storage.listNumbering.docDefaults = parsed.docDefaults
       ctx.editor!.storage.listNumbering.defs = parsed.numbering
       applyDocLayoutSettings(ctx.editor!, parsed)
-      setContentPhased(
-        phasedHostFor(ctx),
-        blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)),
-      )
+      source = blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed))
+      setContentPhased(phasedHostFor(ctx), source)
       commentEndpoints(ctx.editor!.view, parsed.blocks)
       resetEditorHistory(ctx.editor!)
       if (tier !== 'readOnly') focusOpenedEditor(ctx.editor!)
@@ -771,6 +772,7 @@ export async function loadFile(
         ctx.setStatus(t('appOpenedFile', { name: result.name }))
       }
     })
+    if (source && currentOpen()) ctx.onOpenedSource?.(source)
     void getDocsHost().getRecentFiles().then(ctx.setRecent)
     return 'ok'
   } catch (err) {
