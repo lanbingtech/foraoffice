@@ -1,3 +1,4 @@
+import { getTextBetween, getTextSerializersFromSchema } from '@tiptap/core'
 import { AllSelection, EditorState, type Selection, type Transaction } from '@tiptap/pm/state'
 import { Mapping, StepMap } from '@tiptap/pm/transform'
 import { Decoration, DecorationSet, EditorView, type EditorProps } from '@tiptap/pm/view'
@@ -31,6 +32,7 @@ export interface ViewportRangeRequest {
 
 export interface ViewportSurfaceOptions {
   readSource(): SourceState
+  editable?(source: EditorState): boolean
   /** Dispatch into the owner. readSource observes the resulting state before this returns. */
   dispatch(transaction: Transaction): void
   requestRange(request: ViewportRangeRequest): void
@@ -156,6 +158,7 @@ function pictureBorders(view: EditorView, content: ViewportContent): BorderOffse
 }
 
 function localSelection(selection: Selection, editing: EditingViewport): Selection | undefined {
+  if (selection instanceof AllSelection) return new AllSelection(editing.doc)
   const anchor = editing.toLocal(selection.anchor)
   const head = editing.toLocal(selection.head)
   if (anchor === undefined || head === undefined) return
@@ -165,8 +168,6 @@ function localSelection(selection: Selection, editing: EditingViewport): Selecti
         editing.toLocal($from.pos) === undefined || editing.toLocal($to.pos) === undefined,
     )
   )
-    return
-  if (selection instanceof AllSelection && (anchor !== 0 || head !== editing.doc.content.size))
     return
   const result = selection.map(
     editing.doc,
@@ -280,6 +281,8 @@ export function createViewportSurface(
   const retired = (packet: Pick<ViewportPacket, 'revision' | 'publication'>) =>
     invalidated?.revision === packet.revision && packet.publication <= invalidated.publication
 
+  const editable = () => options.editable?.(options.readSource().state) ?? true
+
   const attributes = () => {
     const { content, parked } = current!
     const { width, height } = content.canvas
@@ -311,19 +314,32 @@ export function createViewportSurface(
     const mounted = current
     if (!mounted || !view) return
     const source = options.readSource()
+    if (transaction.docChanged && !editable()) return
     if (retired(mounted.stamp) && !view.composing && transaction.getMeta('composition') == null) {
       return request('layout', source)
     }
     if (source.state.doc !== mounted.editing.source) return request('source', source, transaction)
     if (mounted.parked && (transaction.docChanged || !transaction.selectionSet))
       return request('selection', source, transaction)
-    const projected = projectViewportTransaction(mounted.editing, source.state, transaction)
+    const projected = projectViewportTransaction(
+      mounted.editing,
+      source.state,
+      transaction,
+      view.state.selection,
+    )
     if (!projected) return request('transaction', source, transaction)
 
     options.dispatch(projected)
     if (current !== mounted || !view) return
     const confirmed = options.readSource()
     if (!confirmed.state.doc.eq(projected.doc)) return request('source', confirmed, transaction)
+    if (
+      transaction.docChanged &&
+      source.state.selection instanceof AllSelection &&
+      mounted.editing.sourceRange.to - mounted.editing.sourceRange.from !==
+        source.state.doc.content.size
+    )
+      return request('geometry', confirmed)
 
     // Reflect only confirmed changes from the owner in this view.
     const editing = confirmedEditing(mounted.editing, transaction, confirmed.state.doc)
@@ -352,6 +368,96 @@ export function createViewportSurface(
       storedMarks: selection && !view.composing ? confirmed.state.storedMarks : null,
     })
     view.updateState(local)
+  }
+
+  const selectAll = (_view: EditorView, event: KeyboardEvent): boolean => {
+    if (
+      (!event.ctrlKey && !event.metaKey) ||
+      event.shiftKey ||
+      event.altKey ||
+      event.key.toLowerCase() !== 'a'
+    )
+      return false
+    const mounted = current
+    if (!view || !mounted) return false
+    const source = options.readSource()
+    options.dispatch(source.state.tr.setSelection(new AllSelection(source.state.doc)))
+    if (current !== mounted || !view) return true
+    const confirmed = options.readSource()
+    if (
+      confirmed.state.doc === mounted.editing.source &&
+      confirmed.state.selection instanceof AllSelection
+    ) {
+      current = { ...mounted, parked: false, source: confirmed.state }
+      view.updateState(
+        view.state.apply(view.state.tr.setSelection(new AllSelection(view.state.doc))),
+      )
+    } else request('source', confirmed)
+    return true
+  }
+
+  const deleteDocumentSelection = (
+    editor: EditorView,
+    source: SourceState,
+    mounted: typeof current,
+    cut = false,
+  ) => {
+    if (
+      !editor.editable ||
+      !mounted ||
+      current !== mounted ||
+      mounted.editing.source !== source.state.doc ||
+      !(editor.state.selection instanceof AllSelection) ||
+      options.readSource().state !== source.state ||
+      !editable()
+    )
+      return
+    // The owner's full selection is independent of page geometry.
+    const transaction = source.state.tr.deleteSelection()
+    if (cut) transaction.setMeta('uiEvent', 'cut')
+    options.dispatch(transaction)
+    const updated = options.readSource()
+    if (updated.state.doc !== source.state.doc) request('geometry', updated)
+  }
+
+  const handleKeyDown = (editor: EditorView, event: KeyboardEvent): boolean => {
+    if (event.isComposing || editor.composing) return false
+    if (selectAll(editor, event)) return true
+    if (event.key !== 'Backspace' && event.key !== 'Delete') return false
+    const source = options.readSource()
+    const selectedAll = source.state.selection instanceof AllSelection
+    const locallySelectedAll = editor.state.selection instanceof AllSelection
+    if (!selectedAll && !locallySelectedAll) return false
+    if (selectedAll !== locallySelectedAll) request('selection', source)
+    else deleteDocumentSelection(editor, source, current)
+    return true
+  }
+
+  const copySelection = (editor: EditorView, event: ClipboardEvent): boolean => {
+    const source = options.readSource()
+    const selectedAll = source.state.selection instanceof AllSelection
+    const locallySelectedAll = editor.state.selection instanceof AllSelection
+    if (!selectedAll && !locallySelectedAll) return false
+    event.preventDefault()
+    const mounted = current
+    if (selectedAll !== locallySelectedAll || mounted?.editing.source !== source.state.doc) {
+      request('selection', source)
+      return true
+    }
+    if (!event.clipboardData) return true
+    try {
+      const { doc, selection, schema } = source.state
+      const { dom } = editor.serializeForClipboard(selection.content())
+      const text = getTextBetween(doc, selection, {
+        textSerializers: getTextSerializersFromSchema(schema),
+      })
+      event.clipboardData.setData('text/html', dom.innerHTML)
+      event.clipboardData.setData('text/plain', text)
+    } catch {
+      return true
+    }
+    if (event.type === 'cut') deleteDocumentSelection(editor, source, mounted, true)
+    return true
   }
 
   const finishComposition = () => {
@@ -402,6 +508,7 @@ export function createViewportSurface(
     const stamp = { revision: packet.revision, publication: packet.publication }
     if (
       current?.source === source.state &&
+      view?.editable === (options.editable?.(source.state) ?? true) &&
       !content.model &&
       samePlacements(current.content, content)
     ) {
@@ -451,9 +558,15 @@ export function createViewportSurface(
     const props = {
       state,
       attributes,
+      editable,
       decorations,
       nodeViews: options.nodeViews?.(source.state),
-      handleDOMEvents: { compositionend: finishComposition },
+      handleKeyDown,
+      handleDOMEvents: {
+        compositionend: finishComposition,
+        copy: copySelection,
+        cut: copySelection,
+      },
       dispatchTransaction,
     }
     if (view) view.update(props)

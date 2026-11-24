@@ -1,5 +1,5 @@
 import type { Node as PmNode } from '@tiptap/pm/model'
-import { AllSelection, type EditorState, type Transaction } from '@tiptap/pm/state'
+import { AllSelection, type EditorState, type Selection, type Transaction } from '@tiptap/pm/state'
 import {
   AddMarkStep,
   AddNodeMarkStep,
@@ -137,9 +137,32 @@ export function projectViewportTransaction(
   viewport: EditingViewport,
   authoritative: EditorState,
   local: Transaction,
+  initialSelection?: Selection,
 ): Transaction | undefined {
   if (authoritative.doc !== viewport.source || local.before !== viewport.doc) return
   if (!local.docChanged && !local.selectionSet && !local.storedMarksSet) return
+
+  const selectedAll = authoritative.selection instanceof AllSelection
+  const locallySelectedAll = initialSelection instanceof AllSelection
+  if (local.docChanged && selectedAll !== locallySelectedAll) return
+  if (local.docChanged && selectedAll) {
+    const step = local.steps[0]
+    // The visible AllSelection represents the owner's entire document. A
+    // whole-window replacement must use the same scope, even off screen.
+    if (
+      local.steps.length !== 1 ||
+      !(step instanceof ReplaceStep) ||
+      step.toJSON().structure === true ||
+      step.from !== 0 ||
+      step.to !== local.before.content.size
+    )
+      return
+    const result = authoritative.tr.setTime(local.time)
+    const replacing = new ReplaceStep(0, authoritative.doc.content.size, step.slice)
+    if (result.maybeStep(replacing).failed || !result.doc.eq(local.doc)) return
+    result.setSelection(local.selection.map(result.doc, new Mapping()))
+    return finishViewportTransaction(result, local)
+  }
 
   const localStart = viewport.localRange.from
   const clippedEnd = viewport.doc.content.size - viewport.localRange.to
@@ -192,6 +215,10 @@ export function projectViewportTransaction(
   )
     return
   result.setSelection(mappedSelection)
+  return finishViewportTransaction(result, local)
+}
+
+function finishViewportTransaction(result: Transaction, local: Transaction): Transaction {
   if (local.storedMarksSet) result.setStoredMarks(local.storedMarks)
   const addToHistory = local.getMeta('addToHistory')
   if (typeof addToHistory === 'boolean') result.setMeta('addToHistory', addToHistory)

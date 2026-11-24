@@ -1,5 +1,5 @@
 import { Schema } from '@tiptap/pm/model'
-import { EditorState, TextSelection, type Transaction } from '@tiptap/pm/state'
+import { AllSelection, EditorState, TextSelection, type Transaction } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, EditorView } from '@tiptap/pm/view'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { columnSplitDecoration, patchSplitNodeViews } from '../src/renderer/editor/column-layout'
@@ -21,7 +21,7 @@ const schema = new Schema({
       content: 'inline*',
       toDOM: () => ['p', 0],
     },
-    docAnchor: { group: 'block', atom: true, toDOM: () => ['div'] },
+    docAnchor: { group: 'block', atom: true, toDOM: () => ['div'], toText: () => 'source atom' },
     docInlineImage: {
       inline: true,
       group: 'inline',
@@ -44,7 +44,7 @@ afterEach(() => {
   document.body.replaceChildren()
 })
 
-function fixture() {
+function fixture(isEditable = true) {
   const doc = schema.node('doc', null, [
     paragraph('abc'),
     paragraph('DEF'),
@@ -62,6 +62,7 @@ function fixture() {
   document.body.appendChild(mount)
   const surface = createViewportSurface(mount, {
     readSource: () => ({ state, revision }),
+    editable: () => isEditable,
     dispatch,
     requestRange,
     decorations: (_source, editing) => [
@@ -80,7 +81,13 @@ function fixture() {
     }),
   })
   mounted.push(surface)
-  return { surface, requestRange, dispatch, read: () => ({ state, revision }) }
+  return {
+    surface,
+    requestRange,
+    dispatch,
+    read: () => ({ state, revision }),
+    setEditable: (value: boolean) => (isEditable = value),
+  }
 }
 
 function placed(blocks: ViewportContent['blocks']): ViewportContent {
@@ -88,6 +95,153 @@ function placed(blocks: ViewportContent['blocks']): ViewportContent {
 }
 
 describe('viewport surface', () => {
+  it('refreshes native editability when the owner republishes the same placements', () => {
+    const { surface, setEditable } = fixture()
+    const content = placed([{ from: 5, to: 10, box: box(30, 400) }])
+    surface.publish({ revision: 0, publication: 1, sequence: 1, content })
+    const view = surface.view!
+    expect(view.dom.getAttribute('contenteditable')).toBe('true')
+
+    setEditable(false)
+    surface.publish({ revision: 0, publication: 1, sequence: 2, content })
+    expect(view.dom.getAttribute('contenteditable')).toBe('false')
+
+    setEditable(true)
+    surface.publish({ revision: 0, publication: 1, sequence: 3, content })
+    expect(view.dom.getAttribute('contenteditable')).toBe('true')
+  })
+
+  it.each(['Backspace', 'Delete'])('routes %s after Select All to the whole source', (key) => {
+    const { surface, read, dispatch } = fixture()
+    const before = read().state
+    dispatch(before.tr.setSelection(new AllSelection(before.doc)))
+    surface.publish({
+      revision: 0,
+      publication: 1,
+      sequence: 1,
+      content: placed([{ from: 5, to: 10, box: box(30, 400) }]),
+    })
+    const view = surface.view!
+    view.focus()
+    surface.invalidate(1)
+    view.dom.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+    expect(read().state.doc.childCount).toBe(1)
+    expect(read().state.doc.textContent).toBe('')
+  })
+
+  it.each([
+    { isEditable: true, canWrite: false, expectedDelete: false },
+    { isEditable: false, canWrite: true, expectedDelete: false },
+    { isEditable: true, canWrite: true, expectedDelete: true },
+  ])(
+    'copies the full selection before cutting ($isEditable, $canWrite)',
+    ({ isEditable, canWrite, expectedDelete }) => {
+      const { surface, read, dispatch } = fixture(isEditable)
+      const before = read().state
+      dispatch(before.tr.setSelection(new AllSelection(before.doc)))
+      surface.publish({
+        revision: 0,
+        publication: 1,
+        sequence: 1,
+        content: placed([{ from: 5, to: 10, box: box(30, 400) }]),
+      })
+      const event = new Event('cut', { bubbles: true, cancelable: true })
+      const setData = vi.fn()
+      if (canWrite) Object.defineProperty(event, 'clipboardData', { value: { setData } })
+      surface.view!.dom.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(true)
+      expect(read().state.doc.textContent).toBe(expectedDelete ? '' : 'abcDEFxyz')
+      if (canWrite)
+        expect(setData).toHaveBeenCalledWith('text/plain', expect.stringContaining('xyz'))
+    },
+  )
+
+  it('uses Tiptap text serializers for selected source atoms outside the viewport', () => {
+    const first = paragraph('abc')
+    const doc = schema.node('doc', null, [first, schema.nodes.docAnchor.create()])
+    const state = EditorState.create({ doc, selection: new AllSelection(doc) })
+    const surface = createViewportSurface(
+      document.body.appendChild(document.createElement('div')),
+      {
+        readSource: () => ({ state, revision: 0 }),
+        dispatch: vi.fn(),
+        requestRange: vi.fn(),
+      },
+    )
+    mounted.push(surface)
+    surface.publish({
+      revision: 0,
+      publication: 1,
+      sequence: 1,
+      content: placed([{ from: 0, to: first.nodeSize, box: box(30, 400) }]),
+    })
+    const event = new Event('copy', { bubbles: true, cancelable: true })
+    const setData = vi.fn()
+    Object.defineProperty(event, 'clipboardData', { value: { setData } })
+    surface.view!.dom.dispatchEvent(event)
+    expect(setData).toHaveBeenCalledWith('text/plain', 'abc\n\nsource atom')
+  })
+
+  it('selects and copies the whole document while painting only its visible range', () => {
+    const { surface, read, requestRange } = fixture()
+    const content = placed([{ from: 5, to: 10, box: box(33, 318) }])
+    surface.publish({ publication: 1, revision: 0, sequence: 1, content })
+    const view = surface.view!
+    view.focus()
+    view.dom.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'a',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    expect(read().state.selection).toBeInstanceOf(AllSelection)
+    expect(read().state.selection.to).toBe(read().state.doc.content.size)
+    expect(view.state.selection).toBeInstanceOf(AllSelection)
+    expect(view.state.doc.textContent).toBe('DEF')
+
+    const copy = new Event('copy', { bubbles: true, cancelable: true })
+    const setData = vi.fn()
+    Object.defineProperty(copy, 'clipboardData', { value: { setData } })
+    view.dom.dispatchEvent(copy)
+    expect(copy.defaultPrevented).toBe(true)
+    expect(setData).toHaveBeenCalledWith(
+      'text/plain',
+      expect.stringMatching(/abc[\s\S]*DEF[\s\S]*xyz/),
+    )
+
+    view.dispatch(view.state.tr.insertText('new body'))
+    expect(read().state.doc.textContent).toBe('new body')
+    expect(requestRange).toHaveBeenLastCalledWith(expect.objectContaining({ reason: 'geometry' }))
+  })
+
+  it('preserves the source when a displayed Select All has already been cleared by the owner', () => {
+    const { surface, read, dispatch, requestRange } = fixture()
+    const { doc } = read().state
+    dispatch(read().state.tr.setSelection(new AllSelection(doc)))
+    const blocks: ViewportContent['blocks'][number][] = []
+    doc.forEach((node, from) => blocks.push({ from, to: from + node.nodeSize, box: box(30, 400) }))
+    surface.publish({ revision: 0, publication: 1, sequence: 1, content: placed(blocks) })
+    dispatch(read().state.tr.setSelection(TextSelection.create(doc, 2)))
+
+    const view = surface.view!
+    const event = new Event('cut', { bubbles: true, cancelable: true })
+    const setData = vi.fn()
+    Object.defineProperty(event, 'clipboardData', { value: { setData } })
+    view.dom.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(true)
+    expect(setData).not.toHaveBeenCalled()
+    expect(requestRange).toHaveBeenLastCalledWith(expect.objectContaining({ reason: 'selection' }))
+
+    view.dispatch(view.state.tr.insertText('replacement'))
+    expect(read().state.doc).toBe(doc)
+    expect(read().state.selection.from).toBe(2)
+    expect(requestRange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ reason: 'transaction' }),
+    )
+  })
+
   it('keeps a split float inside the last atomic block and clears it with the next layout', () => {
     const first = paragraph('abc')
     const doc = schema.node('doc', null, [first, schema.nodes.docAnchor.create()])
