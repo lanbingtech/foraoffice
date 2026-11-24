@@ -255,6 +255,7 @@ export function setRowFills(
           Decoration.node($inside.before(d), $inside.after(d), attrs, {
             key: `row-fill-${attrs.style}-${attrs['data-split-extra'] ?? ''}`,
             geometry: `${attrs.style}:${Math.round(Number(attrs['data-split-extra'] ?? 0))}`,
+            paintInViewport: true,
           }),
         )
         break

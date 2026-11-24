@@ -5,6 +5,11 @@ import type { PmNode as DocumentJson } from './convert'
 import type { PageLayout } from './goto'
 import { pagePositions } from './goto'
 import { topLevelDomRanges } from './top-level-pos'
+import {
+  readViewportDecorations,
+  viewDecorationWindow,
+  type ViewportDecorations,
+} from './viewport-decorations'
 import { createViewportEditing } from './viewport-editing'
 import {
   boxInCanvas,
@@ -33,11 +38,13 @@ export interface ViewportGeometry {
   canvas: LayoutBox
   blocks: MeasuredBlock[]
   empty?: Record<number, PositionedBlock>
+  decorations?: ViewportDecorations
 }
 
 export interface ViewportContent {
   canvas: LayoutBox
   blocks: PositionedBlock[]
+  decorations?: ViewportDecorations
   model?: {
     document: DocumentJson
     from: number
@@ -110,9 +117,14 @@ export function viewportContent(
   visible.sort((a, b) => a.from - b.from)
   const blocks = includeEmptyBlocks(geometry, visible)
   const editing = document && createViewportEditing(document, blocks)
+  const decorations =
+    geometry.decorations && blocks.length > 0
+      ? viewDecorationWindow(geometry.decorations, blocks[0].from, blocks[blocks.length - 1].to)
+      : undefined
   return {
     canvas: geometry.canvas,
     blocks,
+    ...(decorations?.length ? { decorations } : {}),
     ...(editing
       ? {
           model: {
@@ -157,7 +169,12 @@ export function viewportLayout(view: EditorView, layout: PageLayout): ViewportLa
     blocks.sort((a, b) => (a.ink ?? a.placement.box).top - (b.ink ?? b.placement.box).top)
     for (let i = 1; i < blocks.length; i++)
       blocks[i].through = Math.max(blocks[i].through, blocks[i - 1].through)
-    return { canvas: boxInCanvas(root, root, scale), blocks, empty }
+    return {
+      canvas: boxInCanvas(root, root, scale),
+      blocks,
+      empty,
+      decorations: readViewportDecorations(view),
+    }
   }
 
   return {

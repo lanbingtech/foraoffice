@@ -1,7 +1,12 @@
 import { Schema } from '@tiptap/pm/model'
 import { EditorState, TextSelection, type Transaction } from '@tiptap/pm/state'
-import { Decoration } from '@tiptap/pm/view'
+import { Decoration, DecorationSet, EditorView } from '@tiptap/pm/view'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { columnSplitDecoration, patchSplitNodeViews } from '../src/renderer/editor/column-layout'
+import {
+  readViewportDecorations,
+  viewDecorationWindow,
+} from '../src/renderer/editor/viewport-decorations'
 import {
   createViewportSurface,
   type ViewportSurface,
@@ -10,11 +15,13 @@ import type { ViewportContent } from '../src/renderer/editor/viewport-layout'
 
 const schema = new Schema({
   nodes: {
-    doc: { content: 'docParagraph+' },
+    doc: { content: 'block+' },
     docParagraph: {
+      group: 'block',
       content: 'inline*',
       toDOM: () => ['p', 0],
     },
+    docAnchor: { group: 'block', atom: true, toDOM: () => ['div'] },
     docInlineImage: {
       inline: true,
       group: 'inline',
@@ -81,6 +88,116 @@ function placed(blocks: ViewportContent['blocks']): ViewportContent {
 }
 
 describe('viewport surface', () => {
+  it('keeps a split float inside the last atomic block and clears it with the next layout', () => {
+    const first = paragraph('abc')
+    const doc = schema.node('doc', null, [first, schema.nodes.docAnchor.create()])
+    const state = EditorState.create({ doc })
+    const surface = createViewportSurface(
+      document.body.appendChild(document.createElement('div')),
+      {
+        readSource: () => ({ state, revision: 0 }),
+        dispatch: vi.fn(),
+        requestRange: vi.fn(),
+      },
+    )
+    mounted.push(surface)
+    const authority = new EditorView(document.body, {
+      state,
+      decorations: () =>
+        DecorationSet.create(doc, [
+          columnSplitDecoration(doc.content.size, 'float:left;width:40px'),
+        ]),
+    })
+    try {
+      const from = first.nodeSize
+      const to = doc.content.size
+      const content = placed([{ from, to, box: box(33, 318) }])
+      patchSplitNodeViews(
+        authority,
+        new Map([[authority.nodeDOM(from) as HTMLElement, 'float:left;width:40px']]),
+      )
+      const decorations = viewDecorationWindow(readViewportDecorations(authority), from, to)
+      surface.publish({
+        publication: 1,
+        revision: 0,
+        sequence: 1,
+        content: { ...content, decorations },
+      })
+      const block = surface.view!.nodeDOM(0) as HTMLElement
+      expect(block.querySelector<HTMLElement>('.doc-col-split-float')?.style.width).toBe('40px')
+      expect(surface.view!.dom.querySelectorAll('.doc-col-split-float')).toHaveLength(1)
+      surface.publish({ publication: 2, revision: 0, sequence: 2, content })
+      expect(
+        (surface.view!.nodeDOM(0) as HTMLElement).querySelector('.doc-col-split-float'),
+      ).toBeNull()
+    } finally {
+      authority.destroy()
+    }
+  })
+
+  it('maps only measured owner styles to the visible document range', () => {
+    const { surface, read } = fixture()
+    const state = read().state
+    const authority = new EditorView(document.body, {
+      state,
+      decorations: () =>
+        DecorationSet.create(state.doc, [
+          Decoration.node(
+            5,
+            10,
+            {},
+            {
+              paintInViewport: true,
+              frame: { class: 'layout-frame', style: '--doc-grid-pitch:26px' },
+            },
+          ),
+          columnSplitDecoration(6, 'float:left;width:40px'),
+          Decoration.node(5, 10, { class: 'owner-selection' }),
+        ]),
+    })
+    try {
+      const content = {
+        ...placed([{ from: 5, to: 10, box: box(33, 318) }]),
+        decorations: readViewportDecorations(authority),
+      }
+      expect(surface.publish({ publication: 1, revision: 0, sequence: 1, content })).toBe('applied')
+      const el = surface.view!.nodeDOM(0) as HTMLElement
+      expect(el.classList.contains('layout-frame')).toBe(true)
+      expect(el.classList.contains('owner-selection')).toBe(false)
+      expect(el.style.getPropertyValue('--doc-grid-pitch')).toBe('26px')
+      expect(el.querySelector<HTMLElement>('.doc-col-split-float')?.style.width).toBe('40px')
+    } finally {
+      authority.destroy()
+    }
+  })
+
+  it('keeps the overlapping DOM when the window advances past several blocks', () => {
+    const nodes = Array.from({ length: 24 }, (_, index) => paragraph(`Block ${index}`))
+    const doc = schema.node('doc', null, nodes)
+    const state = EditorState.create({ doc })
+    const mount = document.body.appendChild(document.createElement('div'))
+    const surface = createViewportSurface(mount, {
+      readSource: () => ({ state, revision: 0 }),
+      dispatch: vi.fn(),
+      requestRange: vi.fn(),
+    })
+    mounted.push(surface)
+    const blocks: ViewportContent['blocks'] = []
+    doc.forEach((node, from, index) => {
+      blocks.push({ from, to: from + node.nodeSize, box: box(20, index * 48) })
+    })
+    surface.publish({
+      publication: 1,
+      revision: 0,
+      sequence: 1,
+      content: placed(blocks.slice(0, 16)),
+    })
+    const view = surface.view!
+    const overlap = view.nodeDOM(blocks[8].from)
+    surface.publish({ publication: 1, revision: 0, sequence: 2, content: placed(blocks.slice(8)) })
+    expect(view.nodeDOM(0)).toBe(overlap)
+  })
+
   it('keeps the same editor state while scrolling within identical placements', () => {
     const { surface } = fixture()
     const middle = { from: 5, to: 10, box: box(33, 318) }
@@ -150,18 +267,22 @@ describe('viewport surface', () => {
         publication: 2,
         revision: 0,
         sequence: 1,
-        content: placed([
-          {
-            from: 10,
-            to: 15,
-            box: box(31, 500, 220, 700),
-            pictures: [{ from: 12, to: 13, box: box(61, 810, 80, 120) }],
-          },
-        ]),
+        content: {
+          ...placed([
+            {
+              from: 10,
+              to: 15,
+              box: box(31, 500, 220, 700),
+              pictures: [{ from: 12, to: 13, box: box(61, 810, 80, 120) }],
+            },
+          ]),
+          decorations: [{ from: 10, to: 15, attrs: { class: 'picture-frame' }, through: 15 }],
+        },
       }),
     ).toBe('applied')
     const view = surface.view!
     expect(view.dom.querySelectorAll('img[data-view=image]')).toHaveLength(1)
+    expect((view.nodeDOM(0) as HTMLElement).classList.contains('picture-frame')).toBe(true)
     const image = view.nodeDOM(1) as HTMLImageElement
     expect(image.alt).toBe('two')
     expect(image.dataset.view).toBe('image')

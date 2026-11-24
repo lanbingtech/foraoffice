@@ -1,6 +1,7 @@
 import { AllSelection, EditorState, type Selection, type Transaction } from '@tiptap/pm/state'
 import { Mapping, StepMap } from '@tiptap/pm/transform'
 import { Decoration, DecorationSet, EditorView, type EditorProps } from '@tiptap/pm/view'
+import { positionViewportColumnSplits, projectViewportDecorations } from './viewport-decorations'
 import {
   createViewportEditing,
   projectViewportTransaction,
@@ -76,7 +77,7 @@ function placementDecorations(
   editing: EditingViewport,
   borders?: BorderOffsets,
 ): DecorationSet {
-  const decorations: Decoration[] = []
+  const decorations = projectViewportDecorations(content.decorations ?? [], editing, content.blocks)
   editing.doc.forEach((node, position, index) => {
     const block = content.blocks[index]
     decorations.push(
@@ -219,6 +220,9 @@ function validBox(box: LayoutBox): boolean {
 function samePlacements(previous: ViewportContent, next: ViewportContent): boolean {
   return (
     previous.canvas === next.canvas &&
+    previous.decorations?.length === next.decorations?.length &&
+    (previous.decorations?.every((decoration, index) => decoration === next.decorations?.[index]) ??
+      true) &&
     previous.blocks.length === next.blocks.length &&
     previous.blocks.every((block, index) => {
       const other = next.blocks[index]
@@ -234,6 +238,9 @@ function samePlacements(previous: ViewportContent, next: ViewportContent): boole
     })
   )
 }
+
+// ProseMirror's ViewTreeUpdater looks ahead five siblings for an exact match.
+const VIEW_REUSE_LOOKAHEAD = 5
 
 export function createViewportSurface(
   mount: HTMLElement,
@@ -361,6 +368,34 @@ export function createViewportSurface(
     return false
   }
 
+  const discardDepartedPrefix = (next: EditingViewport, source: SourceState) => {
+    const mounted = current
+    if (!mounted || !view || mounted.editing.source !== next.source) return
+    const start = next.sourceRange.from
+    const index = mounted.content.blocks.findIndex((block) => block.from === start)
+    if (index < VIEW_REUSE_LOOKAHEAD || next.sourceRange.to <= mounted.editing.sourceRange.to)
+      return
+    const from = mounted.editing.toLocal(start)
+    if (from === undefined || view.state.doc.resolve(from).depth !== 0) return
+
+    const content = { ...mounted.content, blocks: mounted.content.blocks.slice(index) }
+    const tail = createViewportEditing(next.source, content.blocks)
+    const trim = view.state.tr.delete(0, from)
+    if (!tail || !tail.doc.eq(trim.doc)) return
+
+    // Keep the overlap as the suffix of the old view before adding new nodes.
+    // The local trim never dispatches to the owner or changes the document.
+    current = {
+      ...mounted,
+      content,
+      editing: { ...tail, doc: trim.doc },
+      geometry: mounted.geometry.map(trim.mapping, trim.doc),
+      parked: !localSelection(source.state.selection, tail),
+      source: source.state,
+    }
+    view.updateState(view.state.apply(trim))
+  }
+
   const paint = (packet: ViewportPacket): 'applied' | 'needs-range' => {
     const { content } = packet
     const source = options.readSource()
@@ -404,6 +439,7 @@ export function createViewportSurface(
       selection,
       storedMarks: selection ? source.state.storedMarks : null,
     })
+    discardDepartedPrefix(editing, source)
     current = {
       content,
       editing,
@@ -427,6 +463,7 @@ export function createViewportSurface(
       current.geometry = placementDecorations(content, editing, borders)
       view.updateState(state)
     }
+    positionViewportColumnSplits(view, content.decorations ?? [], editing)
     options.onPublished?.(packet)
     return 'applied'
   }
