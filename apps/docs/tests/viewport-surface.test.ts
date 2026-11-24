@@ -1,8 +1,11 @@
+import { Editor } from '@tiptap/core'
 import { Schema } from '@tiptap/pm/model'
 import { AllSelection, EditorState, TextSelection, type Transaction } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, EditorView } from '@tiptap/pm/view'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { columnSplitDecoration, patchSplitNodeViews } from '../src/renderer/editor/column-layout'
+import { editorExtensions } from '../src/renderer/editor/extensions'
+import { setPageGaps } from '../src/renderer/editor/pagination-gaps'
 import {
   readViewportDecorations,
   viewDecorationWindow,
@@ -395,6 +398,63 @@ describe('viewport surface', () => {
     }
   })
 
+  it('keeps a page break inside the same body paragraph after projecting the viewport', () => {
+    const owner = new Editor({
+      element: document.body.appendChild(document.createElement('div')),
+      extensions: editorExtensions,
+      content: {
+        type: 'doc',
+        content: [
+          { type: 'docParagraph', content: [{ type: 'text', text: 'Earlier' }] },
+          { type: 'docParagraph', content: [{ type: 'text', text: 'first line second line' }] },
+        ],
+      },
+    })
+    const original = owner.state.doc
+    const from = original.firstChild!.nodeSize
+    const to = original.content.size
+    const position = from + 11
+    const metrics = { marginTop: 30, marginBottom: 20, marginLeft: 40, marginRight: 45 }
+    const surface = createViewportSurface(
+      document.body.appendChild(document.createElement('div')),
+      {
+        readSource: () => ({ state: owner.state, revision: 0 }),
+        dispatch: vi.fn(),
+        requestRange: vi.fn(),
+      },
+    )
+    mounted.push(surface)
+    try {
+      const publish = (sequence: number) =>
+        surface.publish({
+          publication: sequence,
+          revision: 0,
+          sequence,
+          content: {
+            ...placed([{ from, to, box: box(40, 88, 390, 120) }]),
+            decorations: viewDecorationWindow(readViewportDecorations(owner.view), from, to),
+          },
+        })
+
+      setPageGaps(owner.view, [{ pos: position, kind: 'inline', metrics }])
+      expect(publish(1)).toBe('applied')
+      const view = surface.view!
+      const firstGap = view.dom.querySelector<HTMLElement>('.page-gap-inline')!
+      expect(firstGap.style.height).toBe('78px')
+      expect(view.posAtDOM(firstGap, 0)).toBe(position - from)
+      expect(view.state.doc.textContent).toBe('first line second line')
+
+      setPageGaps(owner.view, [
+        { pos: position, kind: 'inline', metrics: { ...metrics, marginTop: 43 } },
+      ])
+      expect(publish(2)).toBe('applied')
+      expect(view.dom.querySelector<HTMLElement>('.page-gap-inline')?.style.height).toBe('91px')
+      expect(owner.state.doc).toBe(original)
+    } finally {
+      owner.destroy()
+    }
+  })
+
   it('keeps the overlapping DOM when the window advances past several blocks', () => {
     const nodes = Array.from({ length: 24 }, (_, index) => paragraph(`Block ${index}`))
     const doc = schema.node('doc', null, nodes)
@@ -502,12 +562,22 @@ describe('viewport surface', () => {
           ]),
           decorations: [
             { from: 10, to: 15, attrs: { class: 'picture-frame' }, inline: false, through: 15 },
+            {
+              from: 12,
+              to: 12,
+              through: 15,
+              flowGap: {
+                kind: 'inline',
+                metrics: { marginTop: 90, marginBottom: 95, marginLeft: 60, marginRight: 65 },
+              },
+            },
           ],
         },
       }),
     ).toBe('applied')
     const view = surface.view!
     expect(view.dom.querySelectorAll('img[data-view=image]')).toHaveLength(1)
+    expect(view.dom.querySelector('.page-gap-inline')).toBeNull()
     expect((view.nodeDOM(0) as HTMLElement).classList.contains('picture-frame')).toBe(true)
     const image = view.nodeDOM(1) as HTMLImageElement
     expect(image.alt).toBe('two')

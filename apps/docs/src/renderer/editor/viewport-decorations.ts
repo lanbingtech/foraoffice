@@ -1,12 +1,17 @@
 import { Decoration, type EditorView } from '@tiptap/pm/view'
 import { columnSplitDecoration, patchSplitNodeViews } from './column-layout'
+import { makeGapEl, viewportFlowGap, type ViewportFlowGap } from './pagination-gaps'
 import type { EditingViewport, ViewportModelBlock } from './viewport-editing'
 
 type DecorationSpan = {
   from: number
   to: number
   through: number
-} & ({ attrs: Record<string, string>; inline: boolean } | { columnSplit: string; direct: boolean })
+} & (
+  | { attrs: Record<string, string>; inline: boolean }
+  | { columnSplit: string; direct: boolean }
+  | { flowGap: ViewportFlowGap }
+)
 
 export type ViewportDecorations = readonly DecorationSpan[]
 
@@ -25,10 +30,16 @@ export function readViewportDecorations(view: EditorView): ViewportDecorations {
         (spec) =>
           spec.paintInViewport === true ||
           spec.paintInViewport === 'inline' ||
+          (spec.gapKind !== undefined && spec.gapKind !== 'block') ||
           typeof spec.viewportColumnSplit === 'string',
       )
       for (const raw of picked) {
         const { from, to, type, spec } = raw as DecoratedRange
+        if (spec.gapKind !== undefined) {
+          const flowGap = viewportFlowGap(spec)
+          if (flowGap) spans.push({ from, to, flowGap, through: to })
+          continue
+        }
         if (typeof spec.viewportColumnSplit === 'string') {
           // Index the leading float by its owning block, including a leaf
           // whose widget position is the end of the visible range.
@@ -96,6 +107,24 @@ export function projectViewportDecorations(
   })
   for (const span of decorations) {
     const from = editing.toLocal(span.from)
+    if ('flowGap' in span) {
+      if (from === undefined || from <= 0 || from >= editing.doc.content.size) continue
+      // Absolutely positioned picture fragments already include page breaks
+      // in their placements. Their paragraph has no text flow to carry a gap.
+      const pictureParagraph = blocks.find(
+        (block) => block.pictures && block.from < span.from && span.from < block.to,
+      )
+      if (!pictureParagraph) {
+        const { kind, metrics, cols, pullUp } = span.flowGap
+        result.push(
+          Decoration.widget(from, () => makeGapEl(metrics, kind, cols, pullUp), {
+            side: -1,
+            key: `viewport-flow-gap-${span.from}-${JSON.stringify(span.flowGap)}`,
+          }),
+        )
+      }
+      continue
+    }
     if ('columnSplit' in span) {
       if (from !== undefined && !span.direct)
         result.push(columnSplitDecoration(from + 1, span.columnSplit))

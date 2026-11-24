@@ -110,6 +110,7 @@ interface GapWidgetSpec {
   inlineDOM?: () => HTMLElement
   contents?: GapWidgetContents
   shellKey?: string
+  cols?: number
 }
 
 let nextGapInstance = 0
@@ -161,6 +162,7 @@ function keptGaps(
           key: `${spec.key}-joined`,
           gapKind: 'inline',
           toDOM: spec.inlineDOM,
+          contents: spec.contents,
         }
         widget = Decoration.widget(p, joined.toDOM, joined)
       }
@@ -569,6 +571,18 @@ export const GAP_BAND = 28
 
 export type GapKind = 'block' | 'inline' | 'table' | 'cut' | 'cell'
 
+export interface ViewportFlowGap {
+  kind: Exclude<GapKind, 'block'>
+  metrics: GapMetrics
+  pullUp?: number
+  cols?: number
+}
+
+export function viewportFlowGap(spec: GapWidgetSpec): ViewportFlowGap | undefined {
+  if (!spec.contents || spec.gapKind === 'block') return
+  return spec.contents.viewportGap(spec.gapKind, spec.cols)
+}
+
 /**
  * The one meaning of "page turn" on the canvas: a page-gap widget that opens a
  * page (top-level, mid-paragraph, in-cell and in-table gaps, the latter also
@@ -780,6 +794,10 @@ class GapWidgetContents {
     return el
   }
 
+  viewportGap(kind: ViewportFlowGap['kind'], cols?: number): ViewportFlowGap {
+    return { kind, cols, metrics: { ...this.metrics }, pullUp: this.pullUp }
+  }
+
   update(gap: PageGapSpec): void {
     this.page = gap.page
     this.metrics = gap.metrics
@@ -925,6 +943,7 @@ export function setPageGaps(
         gapKind: kind,
         toDOM,
         contents,
+        cols,
         inlineDOM: kind === 'block' ? () => contents.build('inline') : undefined,
       }
       decos.push(Decoration.widget(pos, toDOM, spec))
