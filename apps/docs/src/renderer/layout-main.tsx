@@ -4,6 +4,7 @@ import type { Editor } from '@tiptap/core'
 import { Step } from '@tiptap/pm/transform'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
+import { LAYOUT_REPLAY } from './editor/authored-document'
 import type { PmNode } from './editor/convert'
 import type { LayoutMessage, LayoutReply } from './editor/layout-client'
 import type { ViewportLayout } from './editor/viewport-layout'
@@ -55,6 +56,7 @@ function runLayout(
     onUncaughtError: (reason) => fail(String(reason)),
   })
   let layout: ViewportLayout | null = null
+  let initialViewportPublished = false
   let publication = 0
   let opened = false
   let editor: Editor | null = null
@@ -106,7 +108,10 @@ function runLayout(
   }
   const applyEdits = () => {
     if (!editor || failed || edits.length === 0) return
-    const transaction = editor.state.tr.setMeta('addToHistory', false).setMeta(TRACK_IGNORE, true)
+    const transaction = editor.state.tr
+      .setMeta(LAYOUT_REPLAY, true)
+      .setMeta('addToHistory', false)
+      .setMeta(TRACK_IGNORE, true)
     try {
       for (const edit of edits) {
         for (const raw of edit.steps) transaction.step(Step.fromJSON(editor.schema, raw))
@@ -195,6 +200,22 @@ function runLayout(
       initial: layout.read({ top: 0, bottom: height }),
     })
   }
+  const publishInitialViewport = (next: ViewportLayout, modelEnd: number, paperEnd: number) => {
+    if (initialViewportPublished || opened || failed || receivedRevision !== 0) return
+    // Loading can still extend the last measured page. Keep its geometry and
+    // its source positions outside the opening range.
+    if (paperEnd < height) return
+    const content = next.read({ top: 0, bottom: height })
+    const trailingPosition = next.pageStarts()?.at(-1)
+    if (
+      !content?.model ||
+      trailingPosition == null ||
+      content.model.to > Math.min(modelEnd, trailingPosition)
+    )
+      return
+    initialViewportPublished = true
+    port.postMessage({ type: 'initial-viewport', revision: 0, content } satisfies LayoutReply)
+  }
   const reportOpen = (openedEditor: Editor | null) => {
     if (!openedEditor) {
       fail('The document could not be opened for layout')
@@ -221,6 +242,7 @@ function runLayout(
     <LocaleProvider initial={language}>
       <App
         onViewportLayout={publish}
+        onInitialViewport={includeSource ? publishInitialViewport : undefined}
         onViewportOpen={reportOpen}
         sourceImport={includeSource ? { publish: publishSource, canMountTail } : undefined}
       />

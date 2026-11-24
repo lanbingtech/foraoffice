@@ -1,6 +1,7 @@
 import { Extension } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
-import { Plugin, PluginKey } from '@tiptap/pm/state'
+import { PluginKey } from '@tiptap/pm/state'
+import { presentationPlugin } from './authored-document'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import type { EditorView } from '@tiptap/pm/view'
 import { splitFloatStyle } from '../pagination-lines'
@@ -42,7 +43,7 @@ export const ColumnLayoutExtension = Extension.create({
 
   addProseMirrorPlugins() {
     return [
-      new Plugin<DecorationSet>({
+      presentationPlugin<DecorationSet>({
         key,
         state: {
           init: () => DecorationSet.empty,

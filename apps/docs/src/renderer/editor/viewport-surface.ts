@@ -495,7 +495,7 @@ export function createViewportSurface(
     session = compositionSession,
   ): Transaction | undefined => {
     if (compositionSession === session) compositionSession = undefined
-    if (session && sourceCompositionKey.getState(source.state) === session)
+    if (session && sourceCompositionKey.getState(source.state)?.token === session)
       return source.state.tr.setMeta(sourceCompositionKey, null)
   }
 

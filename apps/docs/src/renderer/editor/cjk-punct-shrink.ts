@@ -1,6 +1,7 @@
 import { Extension } from '@tiptap/core'
 import { isEastAsianChar, isEastAsianLangTag, isHangulChar } from '@genoffice/docx-engine'
-import { Plugin, PluginKey, type EditorState } from '@tiptap/pm/state'
+import { PluginKey, type EditorState } from '@tiptap/pm/state'
+import { presentationPlugin } from './authored-document'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import {
@@ -1109,7 +1110,7 @@ export const CjkPunctShrinkExtension = Extension.create({
   addProseMirrorPlugins() {
     const storage = this.storage as CjkPunctShrinkStorage
     return [
-      new Plugin({
+      presentationPlugin({
         key: cjkPunctShrinkPluginKey,
         state: {
           init: () => DecorationSet.empty,

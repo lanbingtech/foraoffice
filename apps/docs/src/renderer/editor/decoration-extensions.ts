@@ -5,6 +5,7 @@ import type { Fragment, Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { isInTable } from '@tiptap/pm/tables'
 import { getLang, t } from '../i18n/locale'
 import { type TabStop } from '@genoffice/docx-engine'
+import { markPresentationPlugin, presentationPlugin } from './authored-document'
 
 /**
  * Custom schema mirroring the docx-engine Block model 1:1.
@@ -1188,7 +1189,7 @@ export const TabStopExtension = Extension.create({
   addProseMirrorPlugins() {
     const storage = this.storage as TabStopStorage
     return [
-      new Plugin({
+      presentationPlugin({
         key: tabStopPluginKey,
         state: {
           init: () => DecorationSet.empty,
@@ -1278,7 +1279,7 @@ export const WsRunLineHeightExtension = Extension.create({
   name: 'wsRunLineHeight',
   addProseMirrorPlugins() {
     return [
-      new Plugin(
+      presentationPlugin(
         textDecorationState(wsRunPluginKey, (node, pos, decos) => {
           if (!node.text || !/^[ \t]+$/.test(node.text)) return
           // only runs with a font-size source can inflate the line
@@ -1370,35 +1371,37 @@ export const ParaBorderMergeExtension = Extension.create({
     const styles = () =>
       (this.editor.storage.listNumbering as ListNumberingStorage | undefined)?.styles
     return [
-      blockDecorationPlugin({
-        key: paraBorderMergePluginKey,
-        build(doc) {
-          return bodyBorderDecorationChanges(doc.content, styleBorderLookup(styles())).add
-        },
-        append(tr, tail, old) {
-          const { add, remove } = bodyBorderDecorationChanges(
-            tail.content,
-            styleBorderLookup(styles()),
-            tail.from,
-            tr.before,
-          )
-          return old.remove(remove).add(tr.doc, add)
-        },
-        // a bordered block can join or leave a group; a border-less one only
-        // matters when it was grouped before (then it carried a decoration)
-        needsRecompute: (node) =>
-          node.isTextblock &&
-          affectsBorderGroup(node.attrs as ParaBorderAttrs, styleBorderLookup(styles())),
-        // a text edit inside a style-bordered paragraph keeps its group key: no rebuild
-        changed: (before, after) => {
-          const lookup = styleBorderLookup(styles())
-          const key = (n: ProseMirrorNode) =>
-            n.isTextblock ? borderGroupKey(n.attrs as ParaBorderAttrs, lookup) : ''
-          return key(before) !== key(after)
-        },
-        // a reloaded style table changes which styles carry borders
-        signature: () => styleBorderSignature(styles()),
-      }),
+      markPresentationPlugin(
+        blockDecorationPlugin({
+          key: paraBorderMergePluginKey,
+          build(doc) {
+            return bodyBorderDecorationChanges(doc.content, styleBorderLookup(styles())).add
+          },
+          append(tr, tail, old) {
+            const { add, remove } = bodyBorderDecorationChanges(
+              tail.content,
+              styleBorderLookup(styles()),
+              tail.from,
+              tr.before,
+            )
+            return old.remove(remove).add(tr.doc, add)
+          },
+          // a bordered block can join or leave a group; a border-less one only
+          // matters when it was grouped before (then it carried a decoration)
+          needsRecompute: (node) =>
+            node.isTextblock &&
+            affectsBorderGroup(node.attrs as ParaBorderAttrs, styleBorderLookup(styles())),
+          // a text edit inside a style-bordered paragraph keeps its group key: no rebuild
+          changed: (before, after) => {
+            const lookup = styleBorderLookup(styles())
+            const key = (n: ProseMirrorNode) =>
+              n.isTextblock ? borderGroupKey(n.attrs as ParaBorderAttrs, lookup) : ''
+            return key(before) !== key(after)
+          },
+          // a reloaded style table changes which styles carry borders
+          signature: () => styleBorderSignature(styles()),
+        }),
+      ),
     ]
   },
 })

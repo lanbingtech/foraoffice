@@ -360,6 +360,7 @@ import {
 } from './editor/track-changes-options'
 import { pagePositions, type PageLayout } from './editor/goto'
 import { viewportLayout, type ViewportLayout } from './editor/viewport-layout'
+import { layoutReplicaPlugins } from './editor/authored-document'
 import { PagedViewProbe, pagedViewProbe } from './editor/paged-view-probe'
 import { Ribbon, type ConvertFormat } from './components/Ribbon'
 import {
@@ -843,6 +844,7 @@ export interface DocsAppRuntime {
 export function App({
   onRuntime,
   onViewportLayout,
+  onInitialViewport,
   onViewportOpen,
   sourceImport,
   agentUi,
@@ -850,6 +852,7 @@ export function App({
 }: {
   onRuntime?: (value: DocsAppRuntime | null) => void
   onViewportLayout?: (value: ViewportLayout | null) => void
+  onInitialViewport?: (value: ViewportLayout, modelEnd: number, paperEnd: number) => void
   onViewportOpen?: (editor: Editor | null) => void
   sourceImport?: FileActionContext['sourceImport']
   agentUi?: DocsAgentUi
@@ -1459,6 +1462,12 @@ export function App({
   const editor = useEditor({
     extensions: editorExtensions,
     content: { type: 'doc', content: [{ type: 'docParagraph' }] },
+    onMount: ({ editor: mounted }) => {
+      if (onViewportLayout)
+        mounted.view.updateState(
+          mounted.state.reconfigure({ plugins: layoutReplicaPlugins(mounted.state.plugins) }),
+        )
+    },
     editorProps: {
       // Word checks spelling as you type by default; user toggle in Review → Spelling.
       // useEditor re-applies these options on every render, so the value must
@@ -4343,6 +4352,7 @@ export function App({
     let timer: number | null = null
     let viewportAppendOnly = false
     let viewportMeasuredDocument: Editor['state']['doc'] | undefined
+    let independentlyMeasuredPrefix = false
     let waitingForParagraphs = false
     let editedWhileMeasuring = false
     let laidOutBeforeParagraphsSettled = false
@@ -4698,21 +4708,37 @@ export function App({
         viewportPublished ||
         !layout ||
         !editor ||
-        viewportMeasuredDocument !== editor.state.doc ||
-        timer !== null
+        viewportMeasuredDocument !== editor.state.doc
       )
         return
       const state = paginationActivity.snapshot()
       if (
-        state.pending ||
         state.active ||
-        state.contentPending ||
         state.fontProbes ||
         hasFailedPhasedContent() ||
         hasPendingParagraphMeasurements(editor.view) ||
         document.fonts.status !== 'loaded'
       )
         return
+      if (state.contentPending) {
+        if (
+          !onInitialViewport ||
+          layout.cuts.length < 2 ||
+          (timer !== null && !independentlyMeasuredPrefix)
+        )
+          return
+        // Only existing independent feedback may reserve a prefix. Unknown
+        // or non-local dependencies set dirtyFrom to null.
+        const model = editor.state.doc
+        const unchanged = timer === null ? model.childCount : dirtyFrom
+        if (unchanged === null || unchanged === 0) return
+        let measuredThrough = 0
+        for (let i = 0; i < Math.min(unchanged, model.childCount); i++)
+          measuredThrough += model.child(i).nodeSize
+        onInitialViewport(viewportLayout(editor.view, layout), measuredThrough, completePaperEnd)
+        return
+      }
+      if (state.pending || timer !== null) return
       viewportPublished = true
       onViewportLayout(viewportLayout(editor.view, layout))
     }
@@ -4794,6 +4820,7 @@ export function App({
       fastEdits = new Set()
       const dirty = full ? null : dirtyFrom
       dirtyFrom = Infinity
+      independentlyMeasuredPrefix = false
       try {
         const swapZoom = zoomEl !== null && Math.abs(liveZoom - 1) > 0.0001
         const scrollTop = scroller.scrollTop
@@ -6160,6 +6187,7 @@ export function App({
           !blocks.some(
             (block) => block.floated || block.floatTable || block.floatBottom !== undefined,
           )
+        independentlyMeasuredPrefix = independentFeedback
         const docIndexAt = (position: number | null) =>
           independentFeedback && position !== null
             ? editor.state.doc.resolve(position).index(0)
@@ -6610,6 +6638,7 @@ export function App({
     doc,
     docCss,
     onViewportLayout,
+    onInitialViewport,
     multipageMode,
     publishPage,
     section,

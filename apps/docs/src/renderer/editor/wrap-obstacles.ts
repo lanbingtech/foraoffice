@@ -1,5 +1,6 @@
 import { Extension } from '@tiptap/core'
-import { Plugin, PluginKey } from '@tiptap/pm/state'
+import { PluginKey } from '@tiptap/pm/state'
+import { presentationPlugin } from './authored-document'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import type { EditorView } from '@tiptap/pm/view'
 import { insideFloatTable, isPageTurn } from './pagination-gaps'
@@ -23,7 +24,7 @@ export const WrapObstaclesExtension = Extension.create({
   name: 'wrapObstacles',
   addProseMirrorPlugins() {
     return [
-      new Plugin<DecorationSet>({
+      presentationPlugin<DecorationSet>({
         key,
         state: {
           init: () => DecorationSet.empty,

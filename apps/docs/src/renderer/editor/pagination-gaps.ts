@@ -1,5 +1,6 @@
 import { Extension } from '@tiptap/core'
-import { Plugin, PluginKey, type EditorState, type Transaction } from '@tiptap/pm/state'
+import { PluginKey, type EditorState, type Transaction } from '@tiptap/pm/state'
+import { presentationPlugin } from './authored-document'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import type { EditorView } from '@tiptap/pm/view'
 import type { LineAnchor } from '../pagination'
@@ -73,7 +74,7 @@ export const PaginationGapsExtension = Extension.create({
 
   addProseMirrorPlugins() {
     return [
-      new Plugin<DecorationSet>({
+      presentationPlugin<DecorationSet>({
         key,
         state: {
           init: () => DecorationSet.empty,
@@ -186,7 +187,7 @@ export const RowFillsExtension = Extension.create({
   name: 'paginationRowFills',
   addProseMirrorPlugins() {
     return [
-      new Plugin<DecorationSet>({
+      presentationPlugin<DecorationSet>({
         key: rowFillKey,
         state: {
           init: () => DecorationSet.empty,
@@ -341,7 +342,7 @@ export const FloatVShiftsExtension = Extension.create({
   name: 'paginationFloatVShifts',
   addProseMirrorPlugins() {
     return [
-      new Plugin<DecorationSet>({
+      presentationPlugin<DecorationSet>({
         key: floatVKey,
         state: {
           init: () => DecorationSet.empty,

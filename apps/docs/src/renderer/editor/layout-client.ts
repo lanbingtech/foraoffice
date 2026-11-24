@@ -1,7 +1,9 @@
 import type { Lang } from '@genoffice/i18n'
+import { Editor, type Extensions } from '@tiptap/core'
 import type { Transaction } from '@tiptap/pm/state'
 import type { OpenFileResult } from '../../shared/ipc'
 import type { PageCut } from '../pagination-cuts'
+import { AuthoredDocument, readImportedBody } from './authored-document'
 import type { PmNode } from './convert'
 import type { ViewportBounds } from './viewport-fragments'
 import {
@@ -53,9 +55,16 @@ type ImportedSource = {
   blocks: ReadableStream<PmNode[]>
 }
 
+type InitialViewport = {
+  type: 'initial-viewport'
+  revision: 0
+  content: ViewportContent
+}
+
 export type LayoutReply =
   | LayoutPublication
   | ImportedSource
+  | InitialViewport
   | { type: 'invalidated'; publication: number }
   | { type: 'applied'; revision: number }
   | ViewportPublication
@@ -63,9 +72,13 @@ export type LayoutReply =
   | { type: 'failure'; reason: string }
 
 interface LayoutClientEvents {
-  /** Consume the source or cancel it without an error to continue to layout.
-   * Bind reads to the connection signal with `blocks.pipeTo(writable, { signal })`. */
-  source?(source: ImportedSource, signal: AbortSignal): void
+  source?: {
+    extensions: Extensions
+    configure?(editor: Editor): void
+    opened(document: AuthoredDocument): void
+  }
+  /** The measured opening range expires on edit, replacement, or complete layout. */
+  initialViewport?(viewport: InitialViewport | null): void
   layout(layout: LayoutPublication | null, publication: number): void
   viewport(reply: ViewportPublication & { content: ViewportContent }): void
   revealUnavailable(position: number): void
@@ -77,6 +90,8 @@ export class LayoutClient {
   private sequence = 0
   private latestPublication = 0
   private active?: LayoutPublication
+  private sourceReceived = false
+  private hasInitialViewport = false
   private closed = false
   private readonly lifetime = new AbortController()
 
@@ -145,6 +160,7 @@ export class LayoutClient {
     if (steps.length === 0) return
     const fromRevision = this.revision++
     this.send({ type: 'edit', fromRevision, toRevision: this.revision, steps })
+    this.clearInitialViewport()
     this.clear()
   }
 
@@ -156,6 +172,7 @@ export class LayoutClient {
     this.port.removeEventListener('close', this.lost)
     this.resolution?.removeEventListener('change', this.displayChanged)
     this.port.close()
+    this.clearInitialViewport()
     this.clear()
   }
 
@@ -167,6 +184,12 @@ export class LayoutClient {
     if (!this.active) return
     this.active = undefined
     this.events.layout(null, this.latestPublication)
+  }
+
+  private clearInitialViewport(): void {
+    if (!this.hasInitialViewport) return
+    this.hasInitialViewport = false
+    this.events.initialViewport?.(null)
   }
 
   private lost = (): void => {
@@ -196,22 +219,65 @@ export class LayoutClient {
     )
   }
 
+  private receiveSource(data: ImportedSource): void {
+    const source = this.events.source
+    if (!source || this.sourceReceived) {
+      void data.blocks.cancel().catch(() => {})
+      return
+    }
+    this.sourceReceived = true
+    void this.openSource(data, source)
+  }
+
+  private async openSource(
+    data: ImportedSource,
+    source: NonNullable<LayoutClientEvents['source']>,
+  ): Promise<void> {
+    let owner: Editor | undefined
+    try {
+      owner = new Editor({ element: null, extensions: source.extensions })
+      source.configure?.(owner)
+      const doc = await readImportedBody(data.root, data.blocks, owner.schema, this.lifetime.signal)
+      if (!this.displayIsCurrent() || this.revision !== data.revision) return
+      source.opened(new AuthoredDocument(owner, doc, (chain) => this.apply(chain)))
+      owner = undefined
+    } catch (reason) {
+      if (this.closed) return
+      this.dispose()
+      this.events.failure(String(reason))
+    } finally {
+      owner?.destroy()
+    }
+  }
+
   private receive = ({ data }: MessageEvent<LayoutReply>): void => {
     if (!this.displayIsCurrent()) return
     switch (data.type) {
       case 'source':
-        if (this.events.source) this.events.source(data, this.lifetime.signal)
-        else void data.blocks.cancel().catch(() => {})
+        this.receiveSource(data)
+        return
+      case 'initial-viewport':
+        if (
+          data.revision === this.revision &&
+          this.latestPublication === 0 &&
+          !this.hasInitialViewport &&
+          this.events.initialViewport
+        ) {
+          this.hasInitialViewport = true
+          this.events.initialViewport?.(data)
+        }
         return
       case 'layout':
         if (data.revision !== this.revision || data.publication <= this.latestPublication) return
         this.latestPublication = data.publication
         this.active = data
         this.events.layout(data, data.publication)
+        this.clearInitialViewport()
         return
       case 'invalidated':
         if (data.publication <= this.latestPublication) return
         this.latestPublication = data.publication
+        this.clearInitialViewport()
         this.clear()
         return
       case 'viewport':

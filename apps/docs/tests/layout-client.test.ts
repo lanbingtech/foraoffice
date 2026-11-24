@@ -1,6 +1,9 @@
+import { Extension, Node } from '@tiptap/core'
 import { Schema } from '@tiptap/pm/model'
-import { EditorState } from '@tiptap/pm/state'
+import { EditorState, Plugin } from '@tiptap/pm/state'
 import { describe, expect, it, vi } from 'vitest'
+import { presentationPlugin, type AuthoredDocument } from '../src/renderer/editor/authored-document'
+import type { PmNode } from '../src/renderer/editor/convert'
 import {
   LayoutClient,
   type LayoutMessage,
@@ -25,34 +28,110 @@ class TestPort extends EventTarget {
   }
 }
 
-function client(resolution?: MediaQueryList) {
+function client(resolution?: MediaQueryList, plugins: readonly Plugin[] = []) {
   const port = new TestPort()
   const events = {
     layout: vi.fn(),
     viewport: vi.fn(),
     revealUnavailable: vi.fn(),
     failure: vi.fn(),
-    source: vi.fn(),
+    source: {
+      extensions: [
+        Node.create({ name: 'doc', topNode: true, content: 'paragraph' }),
+        Node.create({ name: 'paragraph', content: 'text*' }),
+        Node.create({ name: 'text' }),
+        Extension.create({ name: 'testPlugins', addProseMirrorPlugins: () => [...plugins] }),
+      ],
+      opened: vi.fn<(document: AuthoredDocument) => void>(),
+    },
+    initialViewport: vi.fn(),
   }
   const layout = new LayoutClient(port as unknown as MessagePort, events, resolution)
   return { port, events, layout }
 }
 
 describe('the authoritative layout connection', () => {
-  it('delivers the imported source with the lifetime of its connection', () => {
-    const { layout, port, events } = client()
-    const reply = {
-      type: 'source' as const,
-      revision: 0 as const,
+  it('opens model-only state and sends the entire accepted source transaction chain', async () => {
+    const init = vi.fn()
+    const presentation = presentationPlugin({ state: { init, apply: () => undefined } })
+    const authored = new Plugin({
+      appendTransaction: (chain, _old, state) =>
+        chain.some((transaction) => transaction.getMeta('complete'))
+          ? state.tr.insertText('!', state.doc.content.size - 1)
+          : null,
+    })
+    const { layout, port, events } = client(undefined, [presentation, authored])
+    port.receive({
+      type: 'source',
+      revision: 0,
       root: { type: 'doc' },
-      blocks: new ReadableStream<never>(),
-    }
-    port.receive(reply)
-    expect(events.source).toHaveBeenCalledExactlyOnceWith(reply, expect.any(AbortSignal))
-    const signal: AbortSignal = events.source.mock.calls[0][1]
-    expect(signal.aborted).toBe(false)
+      blocks: new ReadableStream({
+        start(controller) {
+          controller.enqueue([{ type: 'paragraph', content: [{ type: 'text', text: 'body' }] }])
+          controller.close()
+        },
+      }),
+    })
+    await vi.waitFor(() => expect(events.source.opened).toHaveBeenCalledTimes(1))
+    expect(init).not.toHaveBeenCalled()
+    const owner = events.source.opened.mock.calls[0][0]
+    expect(owner.read().state.doc.textContent).toBe('body')
+    expect(owner.read().revision).toBe(0)
+    expect(owner.read().state.plugins).toContain(authored)
+    expect(owner.read().state.plugins).not.toContain(presentation)
+    const accepted = owner.dispatch(
+      owner.read().state.tr.insertText('test ', 1).setMeta('complete', true),
+    )
+    expect(owner.read().state.doc.textContent).toBe('test body!')
+    expect(owner.read().revision).toBe(1)
+    expect(accepted).toHaveLength(2)
+    expect(port.sent).toEqual([
+      {
+        type: 'edit',
+        fromRevision: 0,
+        toRevision: 1,
+        steps: accepted.flatMap((transaction) => transaction.steps.map((step) => step.toJSON())),
+      },
+    ])
+    owner.destroy()
     layout.dispose()
-    expect(signal.aborted).toBe(true)
+  })
+
+  it('aborts the source reader when the connection retires', async () => {
+    const { layout, port, events } = client()
+    const cancel = vi.fn()
+    port.receive({
+      type: 'source',
+      revision: 0,
+      root: { type: 'doc' },
+      blocks: new ReadableStream<PmNode[]>({ cancel }),
+    })
+    layout.dispose()
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(1))
+    expect(events.source.opened).not.toHaveBeenCalled()
+    expect(events.failure).not.toHaveBeenCalled()
+  })
+
+  it('delivers the initial viewport before a complete publication or any edit', () => {
+    const { layout, port, events } = client()
+    const content = { canvas: { left: 0, top: 0, width: 80, height: 100 }, blocks: [] }
+    const initial = { type: 'initial-viewport' as const, content, revision: 0 as const }
+    port.receive(initial)
+    port.receive(initial)
+    port.receive({ type: 'layout', pages: [], publication: 1, revision: 0 })
+    port.receive(initial)
+    expect(events.initialViewport.mock.calls).toEqual([[initial], [null]])
+
+    const edited = client()
+    const schema = new Schema({
+      nodes: { doc: { content: 'paragraph' }, paragraph: { content: 'text*' }, text: {} },
+    })
+    edited.port.receive(initial)
+    edited.layout.apply([EditorState.create({ schema }).tr.insertText('text', 1)])
+    edited.port.receive(initial)
+    expect(edited.events.initialViewport.mock.calls).toEqual([[initial], [null]])
+    layout.dispose()
+    edited.layout.dispose()
   })
 
   it('retires published geometry at a display scale change before handling pending messages', () => {
