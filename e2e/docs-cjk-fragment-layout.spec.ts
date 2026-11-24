@@ -30,7 +30,7 @@ test('CJK fragment reads preserve published shrink, glyph and caret geometry', a
             } } })];
           },
         });
-        window.measureLocalCjkEdit = (text, { coupled, replaceUnchanged, editPunctuation }) => {
+        window.measureLocalCjkEdit = (text, { coupled, replaceUnchanged, editPunctuation, sameWidthEdit }) => {
           const root = document.createElement('article');
           root.style.width = '169px';
           document.body.append(root);
@@ -67,7 +67,9 @@ test('CJK fragment reads preserve published shrink, glyph and caret geometry', a
               return width.get.call(this);
             } });
             try {
-              const revision = editor.state.tr.insertText('試', 3);
+              const revision = sameWidthEdit
+                ? editor.state.tr.insertText('試', 1, 2)
+                : editor.state.tr.insertText('試', 3);
               if (replaceUnchanged) {
                 const start = revision.doc.firstChild.nodeSize + 1;
                 revision.insertText(text, start, start + text.length);
@@ -175,7 +177,12 @@ test('CJK fragment reads preserve published shrink, glyph and caret geometry', a
     const { measureLocalCjkEdit } = window as unknown as {
       measureLocalCjkEdit: (
         text: string,
-        options: { coupled?: boolean; replaceUnchanged?: boolean; editPunctuation?: boolean },
+        options: {
+          coupled?: boolean
+          replaceUnchanged?: boolean
+          editPunctuation?: boolean
+          sameWidthEdit?: boolean
+        },
       ) => {
         untouchedReads: number
         previous: unknown[]
@@ -192,6 +199,8 @@ test('CJK fragment reads preserve published shrink, glyph and caret geometry', a
       measureLocalCjkEdit(input, { replaceUnchanged: true }),
       measureLocalCjkEdit(input, { editPunctuation: true }),
       measureLocalCjkEdit(input, { editPunctuation: true, coupled: true }),
+      measureLocalCjkEdit(input, { editPunctuation: true, sameWidthEdit: true }),
+      measureLocalCjkEdit(input, { editPunctuation: true, sameWidthEdit: true, coupled: true }),
     ]
   }, text)
   expect(edits[0]!.previous.length).toBeGreaterThan(0)
@@ -205,6 +214,11 @@ test('CJK fragment reads preserve published shrink, glyph and caret geometry', a
   expect(edits[3]!.leadingAfter).not.toEqual(edits[3]!.mappedBefore)
   expect(edits[3]!.leadingAfter).toEqual(edits[4]!.leadingAfter)
   expect(edits[3]!.caret).toEqual(edits[4]!.caret)
+  expect(edits[5]!.mappedBefore.length).toBeGreaterThan(0)
+  expect(edits[5]!.leadingAfter).toEqual(edits[6]!.leadingAfter)
+  expect(edits[5]!.caret).toEqual(edits[6]!.caret)
+  expect(edits[5]!.untouchedReads).toBe(0)
+  expect(edits[5]!.text).toBe('試' + text.slice(1))
   const scenarios = [
     { text, css: 'width:163px', compress: true, float: false },
     {

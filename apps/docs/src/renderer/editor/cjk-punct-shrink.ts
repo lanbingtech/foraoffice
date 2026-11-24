@@ -760,8 +760,9 @@ class CjkPunctShrinkView {
     })
     const previous = old ?? DecorationSet.empty
     const rendered = scope ? previous.find(scope.from + 1, scope.to - 1) : previous.find()
+    // DecorationSet.remove consumes its argument. Keep the rendered spans for comparison.
     const next = scope
-      ? previous.remove(rendered).add(view.state.doc, decos)
+      ? previous.remove([...rendered]).add(view.state.doc, decos)
       : DecorationSet.create(view.state.doc, decos)
     const proposed = scope ? next.find(scope.from + 1, scope.to - 1) : next.find()
     if (
