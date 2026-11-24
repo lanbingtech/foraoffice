@@ -1,27 +1,15 @@
 import './editor-styles'
-import { htmlDir, htmlLang, type Lang } from '@genoffice/i18n'
+import { htmlDir, htmlLang } from '@genoffice/i18n'
 import type { Editor } from '@tiptap/core'
 import { Step } from '@tiptap/pm/transform'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
-import type { OpenFileResult } from '../shared/ipc'
-import type { ViewportBounds } from './editor/viewport-fragments'
+import type { LayoutMessage } from './editor/layout-client'
 import type { ViewportLayout } from './editor/viewport-layout'
 import { createExternalDocsHost, installDocsHost, type DocsEditorServices } from './host/docs-host'
 import { LocaleProvider, setModuleLang } from './i18n/locale'
 import { waitForFullContent } from './phased-content'
 import { TRACK_IGNORE } from './editor/revisions'
-
-type LayoutMessage =
-  | {
-      type: 'open'
-      file: OpenFileResult & { data: ArrayBuffer }
-      language: Lang
-      width: number
-      height: number
-    }
-  | { type: 'viewport'; sequence: number; publication: number; bounds: ViewportBounds }
-  | { type: 'edit'; fromRevision: number; toRevision: number; steps: unknown[] }
 
 const noopSubscription = () => () => {}
 
@@ -149,6 +137,7 @@ function runLayout(
       revision,
       pages: next.pages,
       starts: next.pageStarts(),
+      geometry: next.geometry(),
       initial: next.read({ top: 0, bottom: height }),
     })
   }

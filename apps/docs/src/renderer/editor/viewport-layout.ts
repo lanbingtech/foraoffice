@@ -20,12 +20,19 @@ interface PositionedBlock {
   to: number
   box: LayoutBox
   pictures?: PictureFragment[]
+  hidden?: boolean
 }
 
 interface MeasuredBlock {
   placement: PositionedBlock
-  node?: PmNode
   through: number
+  ink?: LayoutBox
+}
+
+export interface ViewportGeometry {
+  canvas: LayoutBox
+  blocks: MeasuredBlock[]
+  empty?: Record<number, PositionedBlock>
 }
 
 export interface ViewportContent {
@@ -43,85 +50,128 @@ export interface ViewportLayout {
   document: PmNode
   pages: readonly PageCut[]
   pageStarts(): Array<number | null> | undefined
+  geometry(): ViewportGeometry | undefined
   read(viewport: ViewportBounds): ViewportContent | undefined
+}
+
+/** A hidden model atom can sit between visible blocks but have no ink in the
+ * window. Its document positions still belong to the editable range. */
+function includeEmptyBlocks(
+  geometry: ViewportGeometry,
+  visible: PositionedBlock[],
+): PositionedBlock[] {
+  if (!geometry.empty) return visible
+  let result: PositionedBlock[] | undefined
+  for (let i = 1; i < visible.length; i++) {
+    let from = visible[i - 1].to
+    const next = visible[i]
+    if (from === next.from) {
+      result?.push(next)
+      continue
+    }
+    result ??= visible.slice(0, i)
+    while (from < next.from) {
+      const gap = geometry.empty[from]
+      if (!gap || gap.to <= from || gap.to > next.from) break
+      result.push({ ...gap, hidden: true })
+      from = gap.to
+    }
+    result.push(next)
+  }
+  return result ?? visible
+}
+
+/** Input to the scroll path is immutable, already in canvas coordinates, and
+ * small enough to keep in the foreground. No DOM reads or renderer round trip. */
+export function viewportContent(
+  geometry: ViewportGeometry,
+  viewport: ViewportBounds,
+  document?: PmNode,
+): ViewportContent {
+  const visible: PositionedBlock[] = []
+  let low = 0
+  let high = geometry.blocks.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if (geometry.blocks[middle].through > viewport.top) high = middle
+    else low = middle + 1
+  }
+  for (let i = low; i < geometry.blocks.length; i++) {
+    const { placement, ink = placement.box } = geometry.blocks[i]
+    if (ink.top >= viewport.bottom) break
+    if (!intersectsViewport(ink, viewport)) continue
+    const pictures = placement.pictures?.filter((fragment) =>
+      intersectsViewport(fragment.box, viewport),
+    )
+    // A visible page gap contains no editable picture.
+    if (pictures?.length === 0) continue
+    visible.push(pictures ? { ...placement, pictures } : placement)
+  }
+  visible.sort((a, b) => a.from - b.from)
+  const blocks = includeEmptyBlocks(geometry, visible)
+  const editing = document && createViewportEditing(document, blocks)
+  return {
+    canvas: geometry.canvas,
+    blocks,
+    ...(editing
+      ? {
+          model: {
+            document: editing.doc.toJSON() as DocumentJson,
+            from: editing.sourceRange.from,
+            to: editing.sourceRange.to,
+          },
+        }
+      : {}),
+  }
 }
 
 export function viewportLayout(view: EditorView, layout: PageLayout): ViewportLayout {
   const document = view.state.doc
   const live = () => !view.isDestroyed && view.state.doc === document
-  let geometry: ReturnType<typeof measure> | undefined
+  let geometry: ViewportGeometry | undefined
   let starts: Array<number | null> | undefined
-  const measure = () => {
+  const measure = (): ViewportGeometry => {
     const root = view.dom.getBoundingClientRect()
     const scale = view.dom.currentCSSZoom || 1
     const blocks: MeasuredBlock[] = []
+    const empty: Record<number, PositionedBlock> = {}
     for (const { dom, node, from, to } of topLevelDomRanges(view)) {
       if (!(dom instanceof HTMLElement) || dom.parentElement !== view.dom) continue
       const box = boxInCanvas(dom.getBoundingClientRect(), root, scale)
-      blocks.push({ placement: { from, to, box }, node, through: box.top + box.height })
+      const pictures = node && measurePictureFragments(view, node, from, root, scale)
+      // Out-of-flow figures can paint across pages from a zero-height wrapper.
+      // Keep its placement at the anchor but index the painted descendants.
+      let ink: LayoutBox | undefined
+      if (box.height === 0 && dom.firstChild) {
+        const range = dom.ownerDocument.createRange()
+        range.selectNodeContents(dom)
+        const bounds = range.getBoundingClientRect()
+        if (bounds.height > 0 && bounds.width > 0) ink = boxInCanvas(bounds, root, scale)
+      }
+      const hidden = box.height === 0 && !ink
+      const placement: PositionedBlock = { from, to, box, pictures, hidden }
+      const coverage = ink ?? box
+      blocks.push({ placement, through: coverage.top + coverage.height, ink })
+      if (hidden) empty[from] = placement
     }
-    blocks.sort((a, b) => a.placement.box.top - b.placement.box.top)
+    blocks.sort((a, b) => (a.ink ?? a.placement.box).top - (b.ink ?? b.placement.box).top)
     for (let i = 1; i < blocks.length; i++)
       blocks[i].through = Math.max(blocks[i].through, blocks[i - 1].through)
-    return { canvas: boxInCanvas(root, root, scale), blocks, scale }
+    return { canvas: boxInCanvas(root, root, scale), blocks, empty }
   }
 
-  const pictures = new Map<number, PictureFragment[] | undefined>()
   return {
     document,
     pages: layout.cuts,
     pageStarts() {
       if (live()) return (starts ??= pagePositions(view, layout))
     },
+    geometry() {
+      if (live()) return (geometry ??= measure())
+    },
     read(viewport) {
       if (!live()) return
-      const measured = (geometry ??= measure())
-      const blocks: PositionedBlock[] = []
-      let root: DOMRect | undefined
-      let low = 0
-      let high = measured.blocks.length
-      while (low < high) {
-        const middle = (low + high) >>> 1
-        if (measured.blocks[middle].through > viewport.top) high = middle
-        else low = middle + 1
-      }
-      for (let i = low; i < measured.blocks.length; i++) {
-        const { placement, node } = measured.blocks[i]
-        if (placement.box.top >= viewport.bottom) break
-        if (!intersectsViewport(placement.box, viewport)) continue
-        if (!pictures.has(placement.from)) {
-          root ??= view.dom.getBoundingClientRect()
-          pictures.set(
-            placement.from,
-            node && measurePictureFragments(view, node, placement.from, root, measured.scale),
-          )
-        }
-        const fragments = pictures
-          .get(placement.from)
-          ?.filter((fragment) => intersectsViewport(fragment.box, viewport))
-        // The canvas still spans this page gap. A picture-only block has no
-        // editable content here until one of its placed pictures is in view.
-        if (fragments?.length === 0) continue
-        blocks.push({
-          ...placement,
-          ...(fragments ? { pictures: fragments } : {}),
-        })
-      }
-      blocks.sort((a, b) => a.from - b.from)
-      const editing = createViewportEditing(document, blocks)
-      return {
-        canvas: measured.canvas,
-        blocks,
-        ...(editing
-          ? {
-              model: {
-                document: editing.doc.toJSON() as DocumentJson,
-                from: editing.sourceRange.from,
-                to: editing.sourceRange.to,
-              },
-            }
-          : {}),
-      }
+      return viewportContent((geometry ??= measure()), viewport, document)
     },
   }
 }
