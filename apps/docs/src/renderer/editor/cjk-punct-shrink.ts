@@ -6,6 +6,7 @@ import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import {
   PhasedParagraphMeasurement,
   SettledParagraphCache,
+  independentParagraphEdit,
   noteFloatTransaction,
   paragraphDecorationsChanged,
   type ReuseNoOpWhile,
@@ -15,6 +16,7 @@ import { rangeSlot } from '../dom-range'
 import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
 import { WRAP_WIDTHS_COMMITTED_EVENT, type WrapWidthChanges } from './column-layout'
 import { paragraphEditMeasurement, type ParagraphEditMeasurement } from './paged-view-probe'
+import { appliedInlineEditIndex, recordInlineEdit } from './pagination-fast-path'
 
 /**
  * Word's CJK line breaking (settings characterSpacingControl =
@@ -518,6 +520,8 @@ class CjkPunctShrinkView {
   private retryRaf = 0
   private retries = 0
   private pendingSettlement = false
+  private completeMeasurement = false
+  private localEditScope?: ParagraphEditMeasurement
   private phasedDoc?: ProseMirrorNode
   private measurement: PhasedParagraphMeasurement
   private resizeObserver?: ResizeObserver
@@ -535,6 +539,7 @@ class CjkPunctShrinkView {
   }
   private onWrapWidths = (event: Event) => {
     this.measurement.cancel()
+    this.completeMeasurement = false
     const { detail } = event as CustomEvent<WrapWidthChanges>
     if (detail) {
       this.results.invalidateBlocks(this.view, detail)
@@ -579,6 +584,7 @@ class CjkPunctShrinkView {
   private invalidate() {
     this.measurement.cancel()
     this.results.clear()
+    this.completeMeasurement = false
     this.restartConvergence()
   }
 
@@ -599,6 +605,23 @@ class CjkPunctShrinkView {
       this.phasedDoc = undefined
       // untouched paragraphs keep their settled results (keyed on node identity)
       this.restartConvergence()
+      const index = appliedInlineEditIndex(prevState, view.state)
+      const scope =
+        index !== null &&
+        this.completeMeasurement &&
+        !this.pendingSettlement &&
+        !this.retryRaf &&
+        !this.measurement.pending
+          ? independentParagraphEdit(view, index)
+          : undefined
+      this.completeMeasurement = scope !== undefined
+      this.localEditScope = scope
+      try {
+        this.measurement.request()
+      } finally {
+        this.localEditScope = undefined
+      }
+      return
     } else if (
       cjkPunctShrinkPluginKey.getState(view.state) ===
         cjkPunctShrinkPluginKey.getState(prevState) &&
@@ -657,7 +680,7 @@ class CjkPunctShrinkView {
     }
     if (!view.dom.isConnected) return () => () => this.scheduleRetry()
 
-    const scope = paragraphEditMeasurement(view)
+    const scope = paragraphEditMeasurement(view) ?? this.localEditScope
     if (this.measuredFrom !== scope?.from) {
       this.restartConvergence()
       this.measuredFrom = scope?.from
@@ -700,10 +723,12 @@ class CjkPunctShrinkView {
       shrinks.push(...measured)
     }
     if (!measurable) {
+      this.completeMeasurement = false
       this.results.acceptMeasuredResults()
       this.scheduleRetry()
       return
     }
+    if (!scope) this.completeMeasurement = measuredParas.every((paragraph) => paragraph !== null)
     this.retries = 0
 
     const sig = JSON.stringify(
@@ -1087,8 +1112,9 @@ export const CjkPunctShrinkExtension = Extension.create({
         key: cjkPunctShrinkPluginKey,
         state: {
           init: () => DecorationSet.empty,
-          apply(tr, old) {
+          apply(tr, old, before, after) {
             noteFloatTransaction(tr)
+            recordInlineEdit(tr, before, after)
             const meta = tr.getMeta(cjkPunctShrinkPluginKey) as DecorationSet | undefined
             if (meta) return meta
             return old.map(tr.mapping, tr.doc)

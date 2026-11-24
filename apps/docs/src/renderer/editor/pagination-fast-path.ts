@@ -1,4 +1,4 @@
-import type { Transaction } from '@tiptap/pm/state'
+import type { EditorState, Transaction } from '@tiptap/pm/state'
 import { AddMarkStep, RemoveMarkStep, ReplaceStep } from '@tiptap/pm/transform'
 import type { BlockBox, PageSlice } from '../pagination-types'
 
@@ -53,6 +53,30 @@ export function singleInlineEditIndex(tr: Transaction): number | null {
   }
   if (index < 0) return null
   return FAST_BLOCK_TYPES.has(tr.doc.child(index).type.name) ? index : null
+}
+
+const inlineEdits = new WeakMap<
+  EditorState,
+  { before: WeakRef<EditorState>; root: WeakRef<Transaction>; index: number }
+>()
+
+/** Keep the applied step scope through the state that ProseMirror publishes. */
+export function recordInlineEdit(tr: Transaction, before: EditorState, after: EditorState): void {
+  // Even a replacement that leaves identical text can remove mapped decorations.
+  const index = singleInlineEditIndex(tr)
+  const root = tr.getMeta('appendedTransaction') as Transaction | undefined
+  if (root) {
+    const prior = inlineEdits.get(before)
+    if (prior?.root.deref() === root && (!tr.docChanged || index === prior.index))
+      inlineEdits.set(after, prior)
+  } else if (index !== null) {
+    inlineEdits.set(after, { before: new WeakRef(before), root: new WeakRef(tr), index })
+  }
+}
+
+export function appliedInlineEditIndex(before: EditorState, after: EditorState): number | null {
+  const edit = inlineEdits.get(after)
+  return edit?.before.deref() === before ? edit.index : null
 }
 
 export function textOnly(content: {

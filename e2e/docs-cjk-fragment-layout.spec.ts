@@ -30,6 +30,66 @@ test('CJK fragment reads preserve published shrink, glyph and caret geometry', a
             } } })];
           },
         });
+        window.measureLocalCjkEdit = (text, { coupled, replaceUnchanged, editPunctuation }) => {
+          const root = document.createElement('article');
+          root.style.width = '169px';
+          document.body.append(root);
+          const paragraph = { type: 'docParagraph', content: [{ type: 'text', text }] };
+          const editor = new Editor({
+            element: root,
+            extensions: [Doc, Text, Paragraph.extend({ name: 'docParagraph' }), CjkPunctShrinkExtension],
+            content: { type: 'doc', content: [
+              { type: 'docParagraph', content: [{ type: 'text', text: editPunctuation ? text : 'ABC 中文' }] },
+              paragraph,
+              paragraph,
+            ] },
+          });
+          try {
+            editor.storage.cjkPunctShrink.enabled = true;
+            editor.storage.cjkPunctShrink.legacyLayout = true;
+            const untouched = root.querySelector('p:nth-child(2)');
+            if (coupled) untouched.classList.add('has-drop-cap');
+            document.dispatchEvent(new Event(DOC_CSS_COMMITTED_EVENT));
+            const decorations = () => {
+              const leading = editor.state.doc.firstChild.nodeSize;
+              return cjkPunctShrinkPluginKey.getState(editor.state).find(leading + 1)
+                .map(({ from, to, spec }) => [from - leading, to - leading, spec.style, spec.hang]);
+            };
+            const previous = decorations();
+            const leadingDecorations = (set, doc) => set.find(1, doc.firstChild.nodeSize - 1)
+              .map(({ from, to, spec }) => [from, to, spec.style, spec.hang]);
+            let mappedBefore;
+            let untouchedReads = 0;
+            const width = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
+            Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { ...width, get() {
+              if (this.parentElement === editor.view.dom && this !== editor.view.dom.firstElementChild)
+                untouchedReads++;
+              return width.get.call(this);
+            } });
+            try {
+              const revision = editor.state.tr.insertText('試', 3);
+              if (replaceUnchanged) {
+                const start = revision.doc.firstChild.nodeSize + 1;
+                revision.insertText(text, start, start + text.length);
+              }
+              const mapped = cjkPunctShrinkPluginKey.getState(editor.state).map(revision.mapping, revision.doc);
+              mappedBefore = leadingDecorations(mapped, revision.doc);
+              editor.view.dispatch(revision);
+            } finally {
+              Object.defineProperty(HTMLElement.prototype, 'offsetWidth', width);
+            }
+            const origin = editor.view.dom.firstElementChild.getBoundingClientRect();
+            const caret = editor.view.coordsAtPos(editPunctuation ? 24 : 4);
+            return {
+              untouchedReads, previous, offscreen: decorations(), mappedBefore,
+              leadingAfter: leadingDecorations(cjkPunctShrinkPluginKey.getState(editor.state), editor.state.doc),
+              text: editor.state.doc.firstChild.textContent, caret: [caret.left - origin.left, caret.top - origin.top],
+            };
+          } finally {
+            editor.destroy();
+            root.remove();
+          }
+        };
         window.measureCjk = (scenario, reference) => {
           const root = document.createElement('article');
           root.style.cssText = scenario.css;
@@ -111,6 +171,40 @@ test('CJK fragment reads preserve published shrink, glyph and caret geometry', a
   await page.addScriptTag({ type: 'module', content: bundle.outputFiles[0].text })
   await page.waitForFunction(() => 'measureCjk' in window)
   const text = '文字標點，留意「文章」如何換行。（正文，標點。文字看下一行。'.repeat(3)
+  const edits = await page.evaluate((input) => {
+    const { measureLocalCjkEdit } = window as unknown as {
+      measureLocalCjkEdit: (
+        text: string,
+        options: { coupled?: boolean; replaceUnchanged?: boolean; editPunctuation?: boolean },
+      ) => {
+        untouchedReads: number
+        previous: unknown[]
+        offscreen: unknown[]
+        mappedBefore: unknown[]
+        leadingAfter: unknown[]
+        text: string
+        caret: number[]
+      }
+    }
+    return [
+      measureLocalCjkEdit(input, {}),
+      measureLocalCjkEdit(input, { coupled: true }),
+      measureLocalCjkEdit(input, { replaceUnchanged: true }),
+      measureLocalCjkEdit(input, { editPunctuation: true }),
+      measureLocalCjkEdit(input, { editPunctuation: true, coupled: true }),
+    ]
+  }, text)
+  expect(edits[0]!.previous.length).toBeGreaterThan(0)
+  expect(edits[0]!.untouchedReads).toBe(0)
+  expect(edits[0]!.offscreen).toEqual(edits[0]!.previous)
+  expect(edits[0]!.text).toBe('AB試C 中文')
+  expect(edits[1]!.untouchedReads).toBeGreaterThan(0)
+  expect(edits[2]!.untouchedReads).toBeGreaterThan(0)
+  expect(edits[2]!.offscreen).toEqual(edits[2]!.previous)
+  expect(edits[3]!.untouchedReads).toBe(0)
+  expect(edits[3]!.leadingAfter).not.toEqual(edits[3]!.mappedBefore)
+  expect(edits[3]!.leadingAfter).toEqual(edits[4]!.leadingAfter)
+  expect(edits[3]!.caret).toEqual(edits[4]!.caret)
   const scenarios = [
     { text, css: 'width:163px', compress: true, float: false },
     {
