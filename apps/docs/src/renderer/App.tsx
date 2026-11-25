@@ -37,7 +37,12 @@ import { flushSync } from 'react-dom'
 import { EditorContent, useEditor } from '@tiptap/react'
 import type { Editor } from '@tiptap/core'
 import { handleDocsControl, type ControlRequest } from './control'
-import { DOMParser as PmDOMParser, type Mark as PmMark, Slice as PmSlice } from '@tiptap/pm/model'
+import {
+  DOMParser as PmDOMParser,
+  type Mark as PmMark,
+  type Node as PmNode,
+  Slice as PmSlice,
+} from '@tiptap/pm/model'
 import { NodeSelection, TextSelection, type Command, type Transaction } from '@tiptap/pm/state'
 import {
   Dropdown,
@@ -575,7 +580,8 @@ import {
   singleInlineEditIndex,
   type FastPassBlock,
 } from './editor/pagination-fast-path'
-import { FollowUpChain, StreamingPageCoverage } from './pagination-loop'
+import { FollowUpChain, mapStreamingPagePrefix, StreamingPageCoverage } from './pagination-loop'
+import { effectiveParaFlags } from './editor/para-flags'
 import { tabLayoutDiag } from './editor/decoration-extensions'
 import { layoutHealth } from './editor/layout-health'
 
@@ -1092,6 +1098,18 @@ export function App({
   const [imageDragOver, setImageDragOver] = useState(false)
   // last pagination pass, read by the Go To tab (page / section / line targets)
   const pageLayoutRef = useRef<PageLayout | null>(null)
+  const pendingStreamedEdit = useRef<
+    | {
+        model: PmNode
+        generation: number
+        blocks: number
+        viewportTop: number
+        viewportHeight: number
+        paperWidth: number
+        zoom: number
+      }
+    | undefined
+  >(undefined)
   const annotationFirstPageRef = useRef<{ left: number; width: number } | undefined>(undefined)
   /** live section list of the last pass (header obstacles of the next pass) */
   const lastSecListRef = useRef<SectionInfo[] | null>(null)
@@ -4741,6 +4759,23 @@ export function App({
       }
       const full = stylesChanged || forceFull
       const keepPublishedRange = !measureMountedTail && !full && !synchronous
+      const queuedEdit = pendingStreamedEdit.current
+      pendingStreamedEdit.current = undefined
+      const localRange =
+        !full &&
+        !synchronous &&
+        queuedEdit &&
+        trackStreamingCoverage &&
+        linearFlow &&
+        isPhasedContentPending() &&
+        queuedEdit.generation === currentDocGeneration() &&
+        queuedEdit.model === editor.state.doc &&
+        queuedEdit.viewportTop === scroller.scrollTop &&
+        queuedEdit.viewportHeight >= scroller.clientHeight &&
+        queuedEdit.paperWidth === paperWPx &&
+        queuedEdit.zoom === liveZoom
+          ? queuedEdit.blocks
+          : undefined
       measureMountedTail = false
       const edited = full ? null : fastEdits
       fastEdits = new Set()
@@ -4760,7 +4795,7 @@ export function App({
           if (!fast) {
             if (!edited) fastReject = 'trigger'
             else if (edited.size === 0) fastReject = 'none'
-            remeasurePass(dirty, keepPublishedRange)
+            remeasurePass(dirty, keepPublishedRange, localRange)
           }
         } finally {
           if (swapZoom) {
@@ -4811,6 +4846,7 @@ export function App({
           }
         }
         locate(true)
+        if (localRange !== undefined && isPhasedContentPending()) requestVisibleStreamLayout()
         // A width commit can start another typography pass during this layout.
         if (editor && hasPendingParagraphMeasurements(editor.view)) {
           laidOutBeforeParagraphsSettled = true
@@ -4828,7 +4864,11 @@ export function App({
         restoreNaturalFlow = undefined
       }
     }
-    const remeasurePass = (dirty: number | null, keepPublishedRange: boolean) => {
+    const remeasurePass = (
+      dirty: number | null,
+      keepPublishedRange: boolean,
+      localRange: number | undefined,
+    ) => {
       const pm = pmEl()
       if (!pm) return
       const tocLines = pm.querySelectorAll<HTMLElement>('.doc-toc-line')
@@ -4839,27 +4879,48 @@ export function App({
       let measuredEndPos = model?.content.size ?? 0
       let end: number | undefined
       let inMeasuredRange: ((element: HTMLElement) => boolean) | undefined
+      const localEdit = localRange !== undefined && linearFlow && !hasNonLocalFlow(pm)
+      let prefix = localEdit ? localRange : keepPublishedRange ? lastPassChildCount : 0
       // Follow-up geometry belongs to the range that produced it. Background
       // appends do not enlarge that range while the viewport is covered.
       if (
         editor &&
         model &&
-        keepPublishedRange &&
         trackStreamingCoverage &&
         isPhasedContentPending() &&
-        lastPassChildCount > 0 &&
-        lastPassChildCount < measuredCount &&
-        !streamNeedsLayout()
+        prefix > 0 &&
+        prefix < measuredCount &&
+        (localEdit || !streamingCoverage.reachesUncovered(scroller.scrollTop + viewportHeight))
       ) {
         let pos = 0
-        for (let i = 0; i < lastPassChildCount; i++) pos += model.child(i).nodeSize
+        for (let i = 0; i < prefix - 1; i++) pos += model.child(i).nodeSize
+        if (localEdit) {
+          // A keep-with-next chain can extend past the previous range as new
+          // content mounts. Include its anchor before closing the range.
+          while (prefix < measuredCount) {
+            const node = model.child(prefix - 1)
+            const element = editor.view.nodeDOM(pos)
+            const index: unknown = node.attrs.docxIndex
+            const meta = typeof index === 'number' ? blockMetaOf(index) : undefined
+            if (
+              element instanceof HTMLElement &&
+              element.parentElement === pm &&
+              element.tagName === 'P' &&
+              !effectiveParaFlags(element, meta).keepNext
+            )
+              break
+            pos += node.nodeSize
+            prefix++
+          }
+        }
+        pos += model.child(prefix - 1).nodeSize
         let next = editor.view.nodeDOM(pos)
         while (next && next.parentNode !== pm) next = next.parentNode
         const children = Array.from(pm.children)
         const index = next instanceof Element ? children.indexOf(next) : -1
         if (index > 0) {
           end = index
-          measuredCount = lastPassChildCount
+          measuredCount = prefix
           measuredEndPos = pos
           const measuredChildren = new Set(children.slice(0, index))
           inMeasuredRange = (element) => {
@@ -6461,14 +6522,49 @@ export function App({
       const additionalEdit = appendedTransactions.some(
         (tr) => tr.docChanged && !appendedStreamedTail(tr),
       )
+      const pending = pendingStreamedEdit.current
       // Still-unmounted originals already participate in section resolution.
       // Mounting their break nodes is an append, so the existing page coverage
       // decides when the newly mounted range needs layout.
       if (appendedTail && !additionalEdit) {
+        if (pending?.model === transaction.before) pending.model = editor.state.doc
         onUpdate(null, transaction.before.childCount, 'append')
         return
       }
       editedWhileMeasuring = true
+      const viewportTop = scrollPosRef.current.top
+      const generation = currentDocGeneration()
+      const previousScope =
+        pending?.model === transaction.before &&
+        pending.generation === generation &&
+        pending.viewportTop === viewportTop &&
+        pending.viewportHeight >= viewportHeight &&
+        pending.paperWidth === paperWPx &&
+        pending.zoom === factor
+          ? pending
+          : undefined
+      const localRange =
+        !additionalEdit &&
+        trackStreamingCoverage &&
+        linearFlow &&
+        isPhasedContentPending() &&
+        (previousScope || !streamingCoverage.reachesUncovered(viewportTop + viewportHeight))
+          ? mapStreamingPagePrefix(previousScope?.blocks ?? lastPassChildCount, transaction)
+          : undefined
+      // The source range survives a font or header/footer effect restart. A
+      // different source revision, viewport or paper geometry retires it.
+      pendingStreamedEdit.current =
+        localRange === undefined
+          ? undefined
+          : {
+              model: editor.state.doc,
+              generation,
+              blocks: localRange,
+              viewportTop,
+              viewportHeight: previousScope?.viewportHeight ?? viewportHeight,
+              paperWidth: paperWPx,
+              zoom: factor,
+            }
       if (additionalEdit) onUpdate()
       else
         onUpdate(
@@ -8499,6 +8595,7 @@ export function App({
   )
   if (runtimeDocumentRef.current) runtimeDocumentRef.current.annotations = docsAnnotations
   fileCtxRef.current.beforeDocumentReplace = () => {
+    pendingStreamedEdit.current = undefined
     docsCommands.releaseAll()
     docsAnnotations.reset()
     // The pane survives a document replacement. Reset its position together
