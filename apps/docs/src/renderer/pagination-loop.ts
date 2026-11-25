@@ -12,6 +12,8 @@
  * budget: each side repeats.
  */
 
+import type { Transaction } from '@tiptap/pm/state'
+
 export const MAX_FOLLOW_UP_PASSES = 6
 /** the same cause may legitimately re-fire a few times as layout settles */
 const MAX_SAME_REASON = 3
@@ -37,6 +39,59 @@ export class StreamingPageCoverage {
   reachesUncovered(viewportBottom: number): boolean {
     return !this.published || viewportBottom >= this.published.paperEnd
   }
+}
+
+/** Carry a measured prefix through an edit while retaining its trailing lookahead. */
+export function mapStreamingPagePrefix(
+  measuredBlocks: number,
+  transaction: Transaction,
+): number | undefined {
+  const previous = transaction.before
+  if (measuredBlocks < 3 || measuredBlocks > previous.childCount) return
+  const lookahead = measuredBlocks - 2
+  let end = 0
+  for (let index = 0; index < measuredBlocks; index++) end += previous.child(index).nodeSize
+  let guard = end - previous.child(lookahead).nodeSize - previous.child(lookahead + 1).nodeSize
+  for (const [index, map] of transaction.mapping.maps.entries()) {
+    const before = transaction.docs[index]
+    const after = transaction.docs[index + 1] ?? transaction.doc
+    if (!before) return
+    let textEdit = false
+    let unsafe = false
+    map.forEach((from, to, newFrom, newTo) => {
+      const start = before.resolve(from)
+      const head = after.resolve(newFrom)
+      const tail = after.resolve(newTo)
+      if (
+        to >= guard ||
+        start.depth !== 1 ||
+        !start.parent.isTextblock ||
+        !start.sameParent(before.resolve(to)) ||
+        head.depth !== 1 ||
+        tail.depth !== 1 ||
+        !head.parent.isTextblock ||
+        !tail.parent.isTextblock ||
+        tail.index(0) - head.index(0) > 1
+      )
+        unsafe = true
+      else textEdit = true
+    })
+    // Empty maps can change attributes or marks at any source position.
+    if (unsafe || !textEdit) return
+    guard = map.map(guard)
+    end = map.map(end, -1)
+  }
+  const current = transaction.doc
+  const boundary = current.resolve(end)
+  const count = boundary.index(0)
+  if (
+    boundary.depth !== 0 ||
+    count < 3 ||
+    current.child(count - 2) !== previous.child(lookahead) ||
+    current.child(count - 1) !== previous.child(lookahead + 1)
+  )
+    return
+  return count
 }
 
 export class FollowUpChain {
