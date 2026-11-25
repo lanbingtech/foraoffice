@@ -26,6 +26,7 @@ import {
   type ViewportSurface,
 } from '../src/renderer/editor/viewport-surface'
 import { viewportLayout, type ViewportContent } from '../src/renderer/editor/viewport-layout'
+import { applyGapLedger, buildPageCuts } from '../src/renderer/pagination-cuts'
 
 const schema = new Schema({
   marks: { inserted: { toDOM: () => ['ins', 0] } },
@@ -622,6 +623,80 @@ describe('viewport surface', () => {
       expect(el.querySelector('.owner-highlight')).toBeNull()
     } finally {
       authority.destroy()
+    }
+  })
+
+  it('reads mixed paper, a blank page and a zero-height turn in canvas coordinates', () => {
+    const wrap = document.body.appendChild(document.createElement('div'))
+    wrap.className = 'page-wrap'
+    const doc = schema.node('doc', null, ['First page', 'Wide page', 'Next page'].map(paragraph))
+    const authority = new EditorView(wrap, { state: EditorState.create({ doc }) })
+    authority.dom.classList.add('doc-page')
+    authority.dom.style.paddingTop = '10px'
+    Object.defineProperty(authority.dom, 'currentCSSZoom', { value: 2 })
+    vi.spyOn(wrap, 'getBoundingClientRect').mockReturnValue(new DOMRect(100, 200, 1228, 1240))
+    vi.spyOn(authority.dom, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(128, 220, 1200, 1220),
+    )
+    const starts = [0, doc.child(0).nodeSize, doc.child(0).nodeSize + doc.child(1).nodeSize]
+    const blocks = starts.map((pos, index) => ({
+      top: [0, 40, 60][index],
+      height: 20,
+      el: authority.nodeDOM(pos) as HTMLElement,
+    }))
+    const slices = [
+      { start: 0, end: 40, section: 0 },
+      { start: 40, end: 40, section: 0 },
+      { start: 40, end: 60, section: 1 },
+      { start: 60, end: 84, section: 1 },
+      { start: 60, end: 92, section: 1 },
+    ]
+    const geoms = [
+      { contentHeight: 100, forceBreak: false },
+      { contentHeight: 80, forceBreak: true },
+    ]
+    const cuts = buildPageCuts(blocks, slices, geoms, [])
+    const band = {
+      kind: 'block' as const,
+      heightPx: 78,
+      marginBottomPx: 30,
+      marginTopPx: 20,
+      marginLeftPx: 0,
+      pullUpPx: 0,
+      repeatHeaderPx: 0,
+      flowTopPx: 40,
+    }
+    applyGapLedger(cuts, [
+      { ...band, page: 1 },
+      { ...band, page: 2, pageBox: { left: 0, width: 600 } },
+      {
+        ...band,
+        page: 3,
+        kind: 'cut',
+        heightPx: 0,
+        marginBottomPx: 0,
+        marginTopPx: 0,
+        flowTopPx: 60,
+      },
+    ])
+    try {
+      const layout = viewportLayout(
+        authority,
+        { blocks, sections: [], slices, cuts, geoms, hfHeights: [], rowSplits: [], carries: [] },
+        { left: 100, width: 400 },
+      )
+      const frames = [
+        { cutIndex: 0, sourceStart: starts[0] + 1, left: 100, top: -10, width: 400, height: 90 },
+        { cutIndex: 1, sourceStart: null, left: 100, top: 108, width: 400, height: 50 },
+        { cutIndex: 2, sourceStart: starts[1] + 1, left: 0, top: 186, width: 600, height: 40 },
+        { cutIndex: 3, sourceStart: starts[2] + 1, left: 0, top: 226, width: 600, height: 384 },
+      ]
+      expect(layout.pageFrames()).toEqual(frames)
+      authority.updateState(authority.state.apply(authority.state.tr.insertText('edit', 1)))
+      expect(layout.pageFrames()).toBeUndefined()
+    } finally {
+      authority.destroy()
+      wrap.remove()
     }
   })
 

@@ -13,6 +13,14 @@ type Reply = {
   position?: number
   pages?: unknown[]
   starts?: Array<number | null>
+  pageFrames?: Array<{
+    cutIndex: number
+    sourceStart: number | null
+    left: number
+    top: number
+    width: number
+    height: number
+  }>
   root?: Omit<PmNode, 'content'>
   blocks?: ReadableStream<PmNode[]>
   initial?: { model?: { document: unknown } }
@@ -173,9 +181,13 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
     const visible = await page.evaluate(() => {
       const replies = (window as unknown as LayoutTestWindow).layoutReplies
       const layout = replies.filter((reply) => reply.type === 'layout').at(-1)
-      return { pages: layout?.pages?.length, starts: layout?.starts?.length }
+      return { pages: layout?.pages?.length, starts: layout?.starts, frames: layout?.pageFrames }
     })
-    expect(visible).toEqual({ pages: 3, starts: 3 })
+    expect(visible.pages).toBe(3)
+    expect(visible.starts).toHaveLength(3)
+    expect(visible.frames?.map((frame) => frame.cutIndex)).toEqual([0, 1, 2])
+    expect(visible.frames?.map((frame) => frame.sourceStart)).toEqual(visible.starts)
+    expect(visible.frames?.every((frame) => frame.width > 0 && frame.height > 0)).toBe(true)
     await page.waitForFunction(() => (window as unknown as LayoutTestWindow).layoutSource.complete)
     const source = await page.evaluate(() => {
       const { layoutReplies, layoutSource } = window as unknown as LayoutTestWindow

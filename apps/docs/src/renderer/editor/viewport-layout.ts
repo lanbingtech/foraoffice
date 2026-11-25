@@ -1,9 +1,11 @@
 import type { Node as PmNode } from '@tiptap/pm/model'
 import type { EditorView } from '@tiptap/pm/view'
 import type { PageCut } from '../pagination-cuts'
+import { sliceStartsVisiblePage } from '../pagination-slices'
 import type { PmNode as DocumentJson } from './convert'
 import type { PageLayout } from './goto'
 import { pagePositions } from './goto'
+import { pageFramesFromGaps, type PageFrame } from './pagination-gaps'
 import { topLevelDomRanges } from './top-level-pos'
 import {
   readViewportDecorations,
@@ -59,11 +61,19 @@ export interface ViewportReveal {
   top: number
 }
 
+/** A physical page in canvas coordinates, linked to its opening pagination cut. */
+export interface ViewportPageFrame extends LayoutBox {
+  cutIndex: number
+  /** Blank pages can have no navigable source position. */
+  sourceStart: number | null
+}
+
 /** A view-local handle. Only the DOM-free results cross the renderer boundary. */
 export interface ViewportLayout {
   document: PmNode
   pages: readonly PageCut[]
   pageStarts(): Array<number | null> | undefined
+  pageFrames(): readonly ViewportPageFrame[] | undefined
   geometry(): ViewportGeometry | undefined
   read(viewport: ViewportBounds): ViewportContent | undefined
   /** Locate a point. The owner chooses the appropriate position for its selection type. */
@@ -149,11 +159,17 @@ export function viewportContent(
   }
 }
 
-export function viewportLayout(view: EditorView, layout: PageLayout): ViewportLayout {
+export function viewportLayout(
+  view: EditorView,
+  layout: PageLayout,
+  firstPage?: Pick<PageFrame, 'left' | 'width'>,
+): ViewportLayout {
   const document = view.state.doc
   const live = () => !view.isDestroyed && view.state.doc === document
   let geometry: ViewportGeometry | undefined
   let starts: Array<number | null> | undefined
+  let frames: ViewportPageFrame[] | undefined
+  const readStarts = () => (starts ??= pagePositions(view, layout))
   const measure = (): ViewportGeometry => {
     const root = view.dom.getBoundingClientRect()
     const scale = view.dom.currentCSSZoom || 1
@@ -204,7 +220,49 @@ export function viewportLayout(view: EditorView, layout: PageLayout): ViewportLa
     document,
     pages: layout.cuts,
     pageStarts() {
-      if (live()) return (starts ??= pagePositions(view, layout))
+      if (live()) return readStarts()
+    },
+    pageFrames() {
+      if (!live()) return
+      if (frames) return frames
+      const wrap = view.dom.closest<HTMLElement>('.page-wrap')
+      if (!wrap) return
+      const cutIndices = layout.slices.flatMap((slice, i) =>
+        sliceStartsVisiblePage(slice, layout.slices[i - 1]) ? [i] : [],
+      )
+      // A missing gap leaves no physical frame boundary even if pagination
+      // has a logical cut. Avoid assigning that frame to the next page.
+      if (cutIndices.length === 0 || cutIndices.some((i) => i > 0 && !layout.cuts[i]?.gap)) return
+      const scale = view.dom.currentCSSZoom || 1
+      const measured = pageFramesFromGaps(wrap, scale, firstPage, layout.cuts)
+      if (measured.length !== cutIndices.length) return
+      const origin = boxInCanvas(
+        wrap.getBoundingClientRect(),
+        view.dom.getBoundingClientRect(),
+        scale,
+      )
+      const positions = readStarts()
+      const next = measured.map(({ left, top, bottom, width }, index) => ({
+        cutIndex: cutIndices[index],
+        sourceStart: positions[index],
+        left: left + origin.left,
+        top: top + origin.top,
+        width,
+        height: bottom - top,
+      }))
+      if (
+        next.some(
+          ({ left, top, width, height }) =>
+            !Number.isFinite(left) ||
+            !Number.isFinite(top) ||
+            !Number.isFinite(width) ||
+            !Number.isFinite(height) ||
+            width <= 0 ||
+            height <= 0,
+        )
+      )
+        return
+      return (frames = next)
     },
     geometry() {
       if (live()) return (geometry ??= measure())

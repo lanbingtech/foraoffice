@@ -4758,7 +4758,7 @@ export function App({
       }
       if (state.pending || timer !== null) return
       viewportPublished = true
-      onViewportLayout(viewportLayout(editor.view, layout))
+      onViewportLayout(viewportLayout(editor.view, layout, annotationFirstPageRef.current))
     }
     const remeasure = (forceFull = false, synchronous = false) => {
       if (disposed) return

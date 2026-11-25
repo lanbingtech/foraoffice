@@ -1,15 +1,16 @@
 import type { Lang } from '@genoffice/i18n'
-import { Editor, type Extensions } from '@tiptap/core'
+import type { Editor, Extensions } from '@tiptap/core'
 import type { Transaction } from '@tiptap/pm/state'
 import type { OpenFileResult } from '../../shared/ipc'
 import type { PageCut } from '../pagination-cuts'
-import { AuthoredDocument, readImportedBody } from './authored-document'
+import { AuthoredDocument, AuthoredEditor, readImportedBody } from './authored-document'
 import type { PmNode } from './convert'
 import type { ViewportBounds } from './viewport-fragments'
 import {
   viewportContent,
   type ViewportContent,
   type ViewportGeometry,
+  type ViewportPageFrame,
   type ViewportReveal,
 } from './viewport-layout'
 
@@ -32,6 +33,7 @@ type LayoutPublication = {
   revision: number
   pages: readonly PageCut[]
   starts?: readonly (number | null)[]
+  pageFrames?: readonly ViewportPageFrame[]
   geometry?: ViewportGeometry
   initial?: ViewportContent
 }
@@ -233,9 +235,9 @@ export class LayoutClient {
     data: ImportedSource,
     source: NonNullable<LayoutClientEvents['source']>,
   ): Promise<void> {
-    let owner: Editor | undefined
+    let owner: AuthoredEditor | undefined
     try {
-      owner = new Editor({ element: null, extensions: source.extensions })
+      owner = new AuthoredEditor(source.extensions)
       source.configure?.(owner)
       const doc = await readImportedBody(data.root, data.blocks, owner.schema, this.lifetime.signal)
       if (!this.displayIsCurrent() || this.revision !== data.revision) return

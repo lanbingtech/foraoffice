@@ -196,9 +196,10 @@ function runLayout(
       revision,
       pages: layout.pages,
       starts: layout.pageStarts(),
+      pageFrames: layout.pageFrames(),
       geometry: layout.geometry(),
       initial: layout.read({ top: 0, bottom: height }),
-    })
+    } satisfies LayoutReply)
   }
   const publishInitialViewport = (next: ViewportLayout, modelEnd: number, paperEnd: number) => {
     if (initialViewportPublished || opened || failed || receivedRevision !== 0) return
