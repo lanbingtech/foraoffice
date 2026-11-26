@@ -24,6 +24,43 @@ const FLOAT_SELECTOR = [
   '.doc-textbox-side',
 ].join(', ')
 
+const UNBOUNDED_WRAP_SELECTOR = '.has-drop-cap, .doc-para-frame-box-float'
+const WRAP_INPUT_SELECTOR = `${UNBOUNDED_WRAP_SELECTOR}, ${FLOAT_SELECTOR}`
+const wrapInputsByRoot = new WeakMap<HTMLElement, { elements: Set<Element>; read: () => void }>()
+
+/** Index the small set of nodes that can couple paragraphs. The browser still
+ * resolves current column, float, and containment styles when they matter. */
+function wrapInputs(root: HTMLElement): Set<Element> {
+  let inputs = wrapInputsByRoot.get(root)
+  if (!inputs) {
+    const elements = new Set(root.querySelectorAll(WRAP_INPUT_SELECTOR))
+    const update = (changes: MutationRecord[]) => {
+      if (changes.length === 0) return
+      for (const change of changes) {
+        if (change.type === 'attributes') {
+          const element = change.target as Element
+          if (element !== root && root.contains(element) && element.matches(WRAP_INPUT_SELECTOR))
+            elements.add(element)
+          else elements.delete(element)
+        }
+        for (const node of change.addedNodes) {
+          if (node.nodeType !== Node.ELEMENT_NODE || !root.contains(node)) continue
+          const element = node as Element
+          if (element.matches(WRAP_INPUT_SELECTOR)) elements.add(element)
+          for (const child of element.querySelectorAll(WRAP_INPUT_SELECTOR)) elements.add(child)
+        }
+      }
+      for (const element of elements) if (!root.contains(element)) elements.delete(element)
+    }
+    const observer = new MutationObserver(update)
+    observer.observe(root, { childList: true, subtree: true, attributeFilter: ['class'] })
+    inputs = { elements, read: () => update(observer.takeRecords()) }
+    wrapInputsByRoot.set(root, inputs)
+  }
+  inputs.read()
+  return inputs.elements
+}
+
 function requiresFullWrapMeasure(
   view: Pick<EditorView, 'dom'>,
   multipleColumns?: boolean,
@@ -32,7 +69,7 @@ function requiresFullWrapMeasure(
   // width as its text wraps. Recheck the flow in both cases.
   return (
     (multipleColumns ?? Number(getComputedStyle(view.dom).columnCount) > 1) ||
-    view.dom.querySelector('.has-drop-cap, .doc-para-frame-box-float') !== null
+    Array.from(wrapInputs(view.dom)).some((element) => element.matches(UNBOUNDED_WRAP_SELECTOR))
   )
 }
 
@@ -42,7 +79,7 @@ export function hasCoupledWrapGeometry(
 ): boolean {
   return (
     requiresFullWrapMeasure(view, multipleColumns) ||
-    Array.from(view.dom.querySelectorAll(FLOAT_SELECTOR)).some(
+    Array.from(wrapInputs(view.dom)).some(
       (element) => !element.closest(LOCAL_FLOW) && isFloat(element),
     )
   )
