@@ -13,6 +13,7 @@ type Reply = {
   position?: number
   pages?: unknown[]
   starts?: Array<number | null>
+  tocPages?: Array<{ position: number; text: string }>
   pageFrames?: Array<{
     cutIndex: number
     sourceStart: number | null
@@ -40,6 +41,12 @@ type LayoutTestWindow = Window & {
 }
 
 const paragraphsPerPage = 70
+const tocEntry =
+  '<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:r><w:t>First target</w:t></w:r>' +
+  '<w:r><w:tab/></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+  '<w:r><w:instrText xml:space="preserve"> PAGEREF _First </w:instrText></w:r>' +
+  '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+  '<w:r><w:t>9</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
 
 test('the Docs layout port opens in isolation and never publishes a failed document', async () => {
   const folder = test.info().outputPath('background-layout')
@@ -51,10 +58,13 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
       bodyXml: [1, 2, 3]
         .flatMap((n) => [
           `<w:p>${n > 1 ? '<w:pPr><w:pageBreakBefore/></w:pPr>' : ''}<w:r><w:t>Page ${n}</w:t></w:r></w:p>`,
-          ...Array.from(
-            { length: paragraphsPerPage - 1 },
-            (_, i) => `<w:p><w:r><w:t>Page ${n}, paragraph ${i + 1}</w:t></w:r></w:p>`,
-          ),
+          ...Array.from({ length: paragraphsPerPage - 1 }, (_, i) => {
+            if (n === 1 && i === 0) return tocEntry
+            const bookmarkStart =
+              n === 1 && i === 1 ? '<w:bookmarkStart w:id="1" w:name="_First"/>' : ''
+            const bookmarkEnd = bookmarkStart ? '<w:bookmarkEnd w:id="1"/>' : ''
+            return `<w:p>${bookmarkStart}<w:r><w:t>Page ${n}, paragraph ${i + 1}</w:t></w:r>${bookmarkEnd}</w:p>`
+          }),
         ])
         .join(''),
       stylesXml:
@@ -209,7 +219,9 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
       chunks: [50, 50, 50, 50, 10],
       lines: [1, 2, 3].flatMap((n) => [
         `Page ${n}`,
-        ...Array.from({ length: paragraphsPerPage - 1 }, (_, i) => `Page ${n}, paragraph ${i + 1}`),
+        ...Array.from({ length: paragraphsPerPage - 1 }, (_, i) =>
+          n === 1 && i === 0 ? undefined : `Page ${n}, paragraph ${i + 1}`,
+        ),
       ]),
     })
     const worker = app.windows().find((window) => window.url().includes('/layout.html'))!
@@ -303,6 +315,18 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
       ),
     )
     await expect(page.locator('.ProseMirror').first()).not.toContainText('Revised Page 1')
+    await expect(worker.locator('.doc-toc-page')).toHaveText('1')
+    const revisedToc = await page.evaluate(() => {
+      const replies = (window as unknown as LayoutTestWindow).layoutReplies
+      const layout = replies.findLast((reply) => reply.type === 'layout' && reply.revision === 1)!
+      const model = layout.initial?.model?.document as PmNode | undefined
+      return {
+        cache: model?.content?.find((node) => node.type === 'docProtected')?.attrs?.fieldDisplay,
+        measured: layout.tocPages,
+      }
+    })
+    expect(revisedToc.cache).toMatchObject({ pageRefBookmark: '_First', right: '9' })
+    expect(revisedToc.measured).toEqual([{ position: 'Revised Page 1'.length + 2, text: '1' }])
     await page.evaluate(() => {
       const owner = window as unknown as LayoutTestWindow
       owner.layoutPort.postMessage({
@@ -328,6 +352,14 @@ test('the Docs layout port opens in isolation and never publishes a failed docum
           JSON.stringify(reply.initial?.model?.document ?? null).includes('Revised Page 1'),
       ),
     )
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as LayoutTestWindow).layoutReplies.findLast(
+            (reply) => reply.type === 'layout' && reply.revision === 2,
+          )?.tocPages,
+      ),
+    ).toEqual(revisedToc.measured)
 
     await connect('discard-source')
     await page.waitForFunction(() =>

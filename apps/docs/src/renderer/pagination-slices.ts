@@ -4,8 +4,11 @@ import { alignedOffset } from './editor/anchor-geometry'
 import { FOOTNOTE_SEPARATOR_H } from './line-metrics'
 import type {
   BlockBox,
+  PageColumn,
   PageSlice,
   RowCellBox,
+  RowSplitFragment,
+  RowSplitPatch,
   RowSplitRule,
   SectionGeom,
   SliceOutputs,
@@ -13,6 +16,26 @@ import type {
   ColumnLineSplit,
   LineBox,
 } from './pagination-types'
+
+type ColEntry = {
+  y: number
+  repeatHeader?: PageSlice['repeatHeader']
+  window?: PageSlice | PageColumn
+}
+type RowFragmentLines = Omit<RowSplitFragment, 'window'>
+type RowSplitPlan = {
+  lastFragment: number
+  target: number
+  rules: RowSplitRule[]
+  fragments: RowFragmentLines[]
+}
+
+const splitFragments = new WeakMap<RowSplitPatch, readonly RowSplitFragment[]>()
+
+/** Layout-local fragment ownership stays with the patch when a pass reuses its prefix. */
+export function rowSplitFragmentsOf(patch: RowSplitPatch): readonly RowSplitFragment[] | undefined {
+  return splitFragments.get(patch)
+}
 
 /**
  * Page owning a page-pinned float: the page its anchor lands on (anchorTop and
@@ -472,9 +495,14 @@ export function computeSectionedSlicesF2(
       ? 0
       : firstSection
 
-  type ColEntry = { y: number; repeatHeader?: PageSlice['repeatHeader'] }
   type Region = { top: number; height: number; section: number; cols: number; entries: ColEntry[] }
   const pages: Array<{ section: number; regions: Region[]; continued?: true }> = []
+  const splitColumns: Array<{
+    patch: RowSplitPatch
+    rowTop: number
+    fragments: RowFragmentLines[]
+    columns: ColEntry[]
+  }> = []
   // flow Y where a section began below the top of a page it does not own: its
   // later pages are not its "first page" (Word ties titlePg to the page a
   // section starts on, and that page keeps the host section's header/footer)
@@ -1396,7 +1424,18 @@ export function computeSectionedSlicesF2(
               })
           : undefined,
         out?.rowSplits
-          ? (row, rules) => out.rowSplits!.push({ blockTop: block.top, row, rules })
+          ? {
+              column: () => pages.at(-1)!.regions.at(-1)!.entries.at(-1)!,
+              publish(row, rowTop, plan, columns) {
+                const patch = {
+                  blockTop: block.top,
+                  row,
+                  rules: plan.rules.map((rule) => ({ ...rule, from: rule.from + rowTop })),
+                }
+                out.rowSplits!.push(patch)
+                splitColumns.push({ patch, rowTop, fragments: plan.fragments, columns })
+              },
+            }
           : undefined,
       )
       if (block.spaceAfterPx) place(block.spaceAfterPx) // space after the table (may overflow into the bottom margin)
@@ -1773,7 +1812,7 @@ export function computeSectionedSlicesF2(
     out.rowSplitOverflows = rowSplitOverflows
   }
 
-  return pages.map((p) => {
+  const slices = pages.map((p): PageSlice => {
     const entries = p.regions.flatMap((r) => r.entries)
     const first = entries[0]
     const multiCol = p.regions.length > 1 || p.regions.some((r) => r.cols > 1)
@@ -1782,7 +1821,7 @@ export function computeSectionedSlicesF2(
       last.height,
       Math.max(...last.entries.map((e) => endOf.get(e)! - e.y + (e.repeatHeader?.height ?? 0)), 0),
     )
-    return {
+    const slice: PageSlice = {
       start: first.y,
       end: endOf.get(entries[entries.length - 1])!,
       section: p.section,
@@ -1794,17 +1833,36 @@ export function computeSectionedSlicesF2(
               top: r.top,
               height: r.height,
               section: r.section,
-              columns: r.entries.map((e) => ({
-                start: e.y,
-                end: endOf.get(e)!,
-                ...(e.repeatHeader ? { repeatHeader: e.repeatHeader } : {}),
-              })),
+              columns: r.entries.map((e) => {
+                const column: PageColumn = {
+                  start: e.y,
+                  end: endOf.get(e)!,
+                  ...(e.repeatHeader ? { repeatHeader: e.repeatHeader } : {}),
+                }
+                e.window = column
+                return column
+              }),
             })),
             physHeight: last.top + lastExtent,
           }
         : {}),
     }
+    if (!multiCol) first.window = slice
+    return slice
   })
+  for (const { patch, rowTop, fragments, columns } of splitColumns) {
+    // Balancing skips table regions, so their column entries survive to this point.
+    splitFragments.set(
+      patch,
+      fragments.map(({ from, to, cells }, index) => ({
+        from: from + rowTop,
+        to: to + rowTop,
+        cells,
+        window: columns[index].window!,
+      })),
+    )
+  }
+  return slices
 }
 
 /**
@@ -1841,11 +1899,12 @@ export function planRowSplit(
   turn: (placed: number, y: number) => number,
   widow = true,
   forcedCuts: readonly number[] = row.forcedCuts ?? [],
-): { lastFragment: number; target: number; rules: RowSplitRule[] } | 'nofit' | null {
+): RowSplitPlan | 'nofit' | null {
   const cells = row.cells ?? []
   const next = cells.map(() => 0)
   const dy = cells.map(() => 0)
   const rules: RowSplitRule[] = []
+  const fragments: RowFragmentLines[] = []
   const lastBottom = (c: RowCellBox) => (c.lines.length ? c.lines[c.lines.length - 1][1] : 0)
   // clip-path insets are border-box relative: without measured boxes the ink
   // extents stand in (synthetic rows tile lines edge to edge)
@@ -1953,7 +2012,7 @@ export function planRowSplit(
     stalled = !progressed && held
     const allDone = cutIdx.every((f, k) => f >= cells[k].lines.length)
     // the whole row box fits (lines and bottom margin): no split at all
-    if (allDone && frag === 0) return { lastFragment: naturalH, target: naturalH, rules: [] }
+    if (allDone && frag === 0) return { lastFragment: naturalH, target: naturalH, rules, fragments }
     let target = 0
     if (allDone) {
       target = Math.max(0, ...cells.map((c, k) => lastBottom(c) + dy[k])) + padB
@@ -1972,6 +2031,11 @@ export function planRowSplit(
       )
       if (cutY > y) step = Math.min(avail, cutY - y)
     }
+    fragments.push({
+      from: y,
+      to: allDone ? target : y + step,
+      cells: next.map((start, cell) => [start, cutIdx[cell]]),
+    })
     // this fragment's lines sit at its top (top-aligned; a middle/bottom cell
     // landing whole is aligned within the fragment); lines shown on other pages
     // are clipped off the crossing children and later children are hidden
@@ -2017,7 +2081,7 @@ export function planRowSplit(
         rules.push({ from, cell: k, child: last, tail: true, hide: true })
       }
     })
-    if (allDone) return { lastFragment: target - y, target, rules }
+    if (allDone) return { lastFragment: target - y, target, rules, fragments }
     // a continuation opening at a paragraph keeps that paragraph's
     // space-before below the fragment top (Word probe 2026-10-20)
     cells.forEach((c, k) => {
@@ -2126,7 +2190,10 @@ function _placeTable(
   newPage: (y: number, section: number, headerH?: number, headerTop?: number) => void,
   curSection: number,
   onRowFill?: (row: number, targetPx: number, extraPx?: number) => void,
-  onRowSplit?: (row: number, rules: RowSplitRule[]) => void,
+  onRowSplit?: {
+    column: () => ColEntry
+    publish: (row: number, rowTop: number, plan: RowSplitPlan, columns: ColEntry[]) => void
+  },
 ): number {
   // find header rows (the first N consecutive isHeader rows); a header block
   // taller than a full page doesn't repeat (Word probe 2026-08-16: a block at
@@ -2295,11 +2362,13 @@ function _placeTable(
       const keepWhole = row.isHeader && ri < leadHeaderRows && row.height <= contentH + 0.01
       if (row.cells && !row.cantSplit && !keepWhole && onRowSplit) {
         let firstFragment = true
+        const columns = [onRowSplit.column()]
         const turn = (placed: number, y: number) => {
           // the notes ride the first fragment (the references sit in the row head)
           place(placed + (firstFragment ? notes : 0))
           firstFragment = false
           newPage(rowCursor + y, curSection, repeatH, block.top)
+          columns.push(onRowSplit.column())
           return remain()
         }
         let plan = planRowSplit(row, remain() - notes, contentH, turn, widow)
@@ -2309,6 +2378,7 @@ function _placeTable(
             continue
           }
           turnedForMinH = true
+          columns[0] = onRowSplit.column()
           plan = planRowSplit(row, remain() - notes, contentH, turn, widow)
         }
         if (plan === null) rowSplitOverflows++
@@ -2316,11 +2386,7 @@ function _placeTable(
           place(plan.lastFragment + (firstFragment ? notes : 0))
           const naturalH = row.height - (row.splitExtra ?? 0)
           if (plan.target > naturalH + 0.5) onRowFill?.(ri, plan.target, plan.target - naturalH)
-          if (plan.rules.length > 0)
-            onRowSplit(
-              ri,
-              plan.rules.map((r) => ({ ...r, from: r.from + rowCursor })),
-            )
+          if (plan.rules.length > 0) onRowSplit.publish(ri, rowCursor, plan, columns)
           rowCursor += row.height
           if (row.isHeader && ri < headerRows) placedHeader = true
           continue

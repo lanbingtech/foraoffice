@@ -1,10 +1,16 @@
 import type { FieldDisplay } from '@genoffice/docx-engine'
 import type { Node as PmNode } from '@tiptap/pm/model'
 import type { Transaction } from '@tiptap/pm/state'
+import type { EditorView } from '@tiptap/pm/view'
 
 import type { PageCut } from '../pagination-cuts'
 import type { BlockBox } from '../pagination-types'
 import type { HeadingRef } from './headings'
+
+export interface TocPageDisplay {
+  position: number
+  text: string
+}
 
 /** The imported bookmark model stores its paragraph but not its run position. */
 export function tocPageDisplayForBookmarkBlock(
@@ -49,15 +55,15 @@ export function tocPageDisplayForBookmarkBlock(
  * lines than headings).
  *
  * An imported PAGEREF keeps its cache when its exact target cannot be measured.
- * Returns true when `tr` gained at least one node update.
+ * Returns the display values for this exact source document. An unmeasured
+ * target keeps its saved value.
  */
-export function applyTocPageDisplays(
+export function collectTocPageDisplays(
   doc: PmNode,
-  tr: Transaction,
   headings: HeadingRef[],
   displays: Array<string | undefined>,
   pageTextOfBookmark?: (bookmark: string) => string | undefined,
-): boolean {
+): TocPageDisplay[] {
   const pagesOfTitle = new Map<string, Array<string | undefined>>()
   headings.forEach((h, i) => {
     const key = h.text.trim()
@@ -65,7 +71,7 @@ export function applyTocPageDisplays(
     if (list) list.push(displays[i])
     else pagesOfTitle.set(key, [displays[i]])
   })
-  let changed = false
+  const pages: TocPageDisplay[] = []
   const seen = new Map<string, number>()
   doc.forEach((node, offset) => {
     if (node.type.name !== 'docProtected') return
@@ -77,19 +83,63 @@ export function applyTocPageDisplays(
     } else {
       const key = (field.left ?? '').trim()
       const list = pagesOfTitle.get(key)
-      if (!list) return
-      const nth = seen.get(key) ?? 0
-      seen.set(key, nth + 1)
-      right = list[Math.min(nth, list.length - 1)]
+      if (list) {
+        const nth = seen.get(key) ?? 0
+        seen.set(key, nth + 1)
+        right = list[Math.min(nth, list.length - 1)]
+      }
     }
-    if (right === undefined || (field.right ?? '') === right) return
-    tr.setNodeMarkup(offset, undefined, {
+    pages.push({ position: offset, text: right ?? field.right ?? '' })
+  })
+  return pages
+}
+
+export function applyTocPageDisplayUpdates(
+  tr: Transaction,
+  pages: readonly TocPageDisplay[],
+): boolean {
+  let changed = false
+  for (const { position, text } of pages) {
+    const node = tr.doc.nodeAt(position)
+    if (node?.type.name !== 'docProtected') continue
+    const field = node.attrs.fieldDisplay as FieldDisplay | null
+    if (field?.kind !== 'tocLine' || (field.right ?? '') === text) continue
+    tr.setNodeMarkup(position, undefined, {
       ...node.attrs,
-      fieldDisplay: { ...field, right },
+      fieldDisplay: { ...field, right: text },
     })
     changed = true
-  })
+  }
   return changed
+}
+
+export function applyTocPageDisplays(
+  doc: PmNode,
+  tr: Transaction,
+  headings: HeadingRef[],
+  displays: Array<string | undefined>,
+  pageTextOfBookmark?: (bookmark: string) => string | undefined,
+): boolean {
+  return applyTocPageDisplayUpdates(
+    tr,
+    collectTocPageDisplays(doc, headings, displays, pageTextOfBookmark),
+  )
+}
+
+/** Paint the worker's derived text without changing the ProseMirror source. */
+export function paintTocPageDisplays(
+  view: Pick<EditorView, 'nodeDOM'>,
+  pages: readonly TocPageDisplay[],
+): number | undefined {
+  let firstChanged: number | undefined
+  for (const { position, text } of pages) {
+    const root = view.nodeDOM(position)
+    const page = root instanceof HTMLElement ? root.querySelector('.doc-toc-page') : null
+    if (!page || page.textContent === text) continue
+    page.textContent = text
+    firstChanged ??= position
+  }
+  return firstChanged
 }
 
 /**

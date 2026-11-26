@@ -93,6 +93,7 @@ function placementDecorations(
   const decorations = projectViewportDecorations(content.decorations ?? [], editing, content.blocks)
   editing.doc.forEach((node, position, index) => {
     const block = content.blocks[index]
+    const continuation = block.paragraph && block.paragraph.from > block.from + 1
     decorations.push(
       Decoration.node(
         position,
@@ -100,6 +101,7 @@ function placementDecorations(
         {
           style:
             positionedBox(block.box, content.canvas.left, content.canvas.top) +
+            (continuation ? ';text-indent:0 !important' : '') +
             (block.hidden ? ';visibility:hidden !important;pointer-events:none !important' : ''),
         },
         { viewportBlock: true },
@@ -257,7 +259,14 @@ function samePlacements(previous: ViewportContent, next: ViewportContent): boole
       return (
         block.from === other.from &&
         block.to === other.to &&
-        block.box === other.box &&
+        (block.box === other.box ||
+          (block.paragraph &&
+            block.box.top === other.box.top &&
+            block.box.left === other.box.left &&
+            block.box.width === other.box.width &&
+            block.box.height === other.box.height)) &&
+        block.paragraph?.from === other.paragraph?.from &&
+        block.paragraph?.to === other.paragraph?.to &&
         block.hidden === other.hidden &&
         block.tocLeaders === other.tocLeaders &&
         block.pictures?.length === other.pictures?.length &&

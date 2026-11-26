@@ -6,7 +6,7 @@ import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import { LAYOUT_REPLAY } from './editor/authored-document'
 import type { PmNode } from './editor/convert'
-import type { LayoutMessage, LayoutReply } from './editor/layout-client'
+import type { LayoutMessage, LayoutReply, ViewportLayoutDetails } from './editor/layout-client'
 import type { ViewportLayout } from './editor/viewport-layout'
 import { createExternalDocsHost, installDocsHost, type DocsEditorServices } from './host/docs-host'
 import { LocaleProvider, setModuleLang } from './i18n/locale'
@@ -56,6 +56,7 @@ function runLayout(
     onUncaughtError: (reason) => fail(String(reason)),
   })
   let layout: ViewportLayout | null = null
+  let details: ViewportLayoutDetails | undefined
   let initialViewportPublished = false
   let publication = 0
   let opened = false
@@ -119,7 +120,7 @@ function runLayout(
       revision = receivedRevision
       edits.length = 0
       if (editor.state.doc.eq(transaction.doc)) {
-        if (layout) publish(layout)
+        if (layout) publish(layout, details)
         port.postMessage({ type: 'applied', revision })
         return
       }
@@ -181,9 +182,10 @@ function runLayout(
       content: content || null,
     })
   }
-  const publish = (next: ViewportLayout | null) => {
+  const publish = (next: ViewportLayout | null, measuredDetails?: ViewportLayoutDetails) => {
     const previous = layout
     layout = editor && next?.document !== editor.state.doc ? null : next
+    details = layout ? measuredDetails : undefined
     publication++
     if (!opened || failed) return
     if (!layout) {
@@ -197,6 +199,7 @@ function runLayout(
       pages: layout.pages,
       starts: layout.pageStarts(),
       pageFrames: layout.pageFrames(),
+      ...details,
       geometry: layout.geometry(),
       initial: layout.read({ top: 0, bottom: height }),
     } satisfies LayoutReply)
@@ -230,12 +233,12 @@ function runLayout(
       editor = openedEditor
       if (edits.length === 0) {
         opened = true
-        if (layout) publish(layout)
+        if (layout) publish(layout, details)
       } else {
         const previous = editor.state.doc
         applyEdits()
         opened = !failed
-        if (opened && previous === editor.state.doc && layout) publish(layout)
+        if (opened && previous === editor.state.doc && layout) publish(layout, details)
       }
     })
   }

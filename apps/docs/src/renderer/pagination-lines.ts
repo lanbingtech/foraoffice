@@ -1,5 +1,6 @@
 // DOM line-box sampling for page-crossing blocks (cached per element), the
 // line-split re-slice, table row cut positions and line anchors.
+import type { EditorView } from '@tiptap/pm/view'
 import { rangeSlot } from './dom-range'
 import { applyBlockMeta, lineLeadPx, unshiftRunRect } from './pagination-measure'
 import { CapacityWindows, SortedYs } from './pagination-index'
@@ -122,6 +123,7 @@ export function sliceWithLineSplit(
   metaOf?: BlockMetaOf,
   out?: SliceOutputs,
   resume?: PassResume,
+  tableBoundaries?: TableCellBoundaryLookup,
 ): PageSlice[] {
   applyBlockMeta(blocks, metaOf, zoomFactor)
   const outs: SliceOutputs = out ?? {}
@@ -145,7 +147,15 @@ export function sliceWithLineSplit(
   try {
     for (let i = 0; i < maxPasses; i++) {
       const t0 = performance.now()
-      const changed = fillLineBoxes(run, geoms, zoomFactor, slices, metaOf, outs.lineRequests)
+      const changed = fillLineBoxes(
+        run,
+        geoms,
+        zoomFactor,
+        slices,
+        metaOf,
+        outs.lineRequests,
+        tableBoundaries,
+      )
       const wrapped = fillColWraps(run, colWrapRequestsOf(run, slices, geoms, outs), zoomFactor)
       outs.fillMs += performance.now() - t0
       if (!changed && !wrapped) {
@@ -495,6 +505,16 @@ function computeLineSampleSig(el: HTMLElement, textH: number): string {
   return `${lineSampleFontEpoch}:${Math.round(textH * 4)}:${Math.round(w * 4)}:${nodes}:${h}:${js}:${spans}`
 }
 
+/** Line boxes tile the text area, excluding merged paragraph spacing and notes. */
+function sampledTextHeight(block: BlockBox): number {
+  return (
+    block.height -
+    (block.spaceAfterPx ?? 0) -
+    (block.spaceBeforePx ?? 0) -
+    (block.footnoteExtraPx ?? 0)
+  )
+}
+
 export function fillLineBoxes(
   blocks: BlockBox[],
   geoms: SectionGeom[],
@@ -502,6 +522,7 @@ export function fillLineBoxes(
   slices?: PageSlice[],
   metaOf?: BlockMetaOf,
   requested?: Set<BlockBox>,
+  tableBoundaries?: TableCellBoundaryLookup,
 ): boolean {
   const geomOf = (s: number) => geoms[Math.max(0, Math.min(s, geoms.length - 1))]
   // cut bounds = page bounds + column bounds of multi-column pages (blocks crossing within a column also need line-level splits)
@@ -582,14 +603,7 @@ export function fillLineBoxes(
     if (!clipMarked && block.el.classList.contains('doc-protected-image') && block.height <= capH)
       continue
 
-    // line boxes tile only the text area (block height includes the merged-in
-    // space-after, any folded-in leading space-before, and the footnote
-    // reservation, none of which lines may cover)
-    const textH =
-      block.height -
-      (block.spaceAfterPx ?? 0) -
-      (block.spaceBeforePx ?? 0) -
-      (block.footnoteExtraPx ?? 0)
+    const textH = sampledTextHeight(block)
     const sig = lineSampleSig(block.el, textH)
     const cached = lineSampleCache.get(block.el)
     const hit = cached?.sig === sig ? cached : null
@@ -598,7 +612,7 @@ export function fillLineBoxes(
       // flags mutate the rows, so cached rows are cloned per use
       const rows = hit?.rows
         ? hit.rows.map((r) => ({ ...r }))
-        : domTableRows(block.el, textH, zoomFactor)
+        : domTableRows(block.el, textH, zoomFactor, tableBoundaries?.capture)
       if (!hit?.rows) lineSampleCache.set(block.el, { sig, rows: rows.map((r) => ({ ...r })) })
       if (block.rowPlan) {
         // model-side keep policy (pagination-plan.ts): the tr attributes and
@@ -903,7 +917,7 @@ export function indexedRowBoxes(rowTops: number[], blockHeight: number): LineBox
   }))
 }
 
-function domTableRows(el: HTMLElement, blockHeight: number, zoomFactor: number): TableRowBox[] {
+function tableRowGeometry(el: HTMLElement, blockHeight: number, zoomFactor: number) {
   const gaps = Array.from(el.querySelectorAll('.page-gap-inline')).map((g) =>
     g.getBoundingClientRect(),
   )
@@ -914,8 +928,18 @@ function domTableRows(el: HTMLElement, blockHeight: number, zoomFactor: number):
     const trTop = tr.getBoundingClientRect().top
     return (trTop - elTop - gapAbove(trTop)) / zoomFactor
   })
+  return { trs, boxes: indexedRowBoxes(tops, blockHeight), elTop, gapAbove }
+}
+
+function domTableRows(
+  el: HTMLElement,
+  blockHeight: number,
+  zoomFactor: number,
+  capture?: CellLineCapture,
+): TableRowBox[] {
+  const { trs, boxes, elTop, gapAbove } = tableRowGeometry(el, blockHeight, zoomFactor)
   let active: Array<{ until: number; bands: Array<[number, number]>; next: number }> = []
-  return indexedRowBoxes(tops, blockHeight).map((b, i) => {
+  return boxes.map((b, i) => {
     if (!trs[i]) return { height: b.height }
     active = active.filter((span) => span.until > i)
     const precedingSpanInk: Array<[number, number]> = []
@@ -939,6 +963,7 @@ function domTableRows(el: HTMLElement, blockHeight: number, zoomFactor: number):
       elTop,
       gapAbove,
       zoomFactor,
+      capture,
     )
     for (const span of spans)
       active.push({ until: Math.min(trs.length, i + span.rows), bands: span.bands, next: 0 })
@@ -990,6 +1015,10 @@ export function forcedCutYs(
   return out
 }
 
+type CellLineStart = { node: Node; screenTop: number }
+type CellLineEntry = { band: [number, number]; child: number; para: number; start?: CellLineStart }
+type CellLineCapture = (box: RowCellBox, cell: HTMLElement, starts: CellLineStart[]) => void
+
 function rowCutYs(
   tr: Element,
   rowTop: number,
@@ -997,6 +1026,7 @@ function rowCutYs(
   elTop: number,
   gapAbove: (top: number) => number,
   zoomFactor: number,
+  capture?: CellLineCapture,
 ): {
   cuts: number[]
   contentBottom: number
@@ -1050,7 +1080,7 @@ function rowCutYs(
     const bands: Array<[number, number]> = []
     const byPara = new Map<Element, Array<[number, number]>>()
     const paraIds = new Map<Element, number>()
-    const entries: Array<{ band: [number, number]; child: number; para: number }> = []
+    const entries: CellLineEntry[] = []
     const toBand = (r: DOMRect): [number, number] => [
       (r.top - elTop - gapAbove(r.top)) / zoomFactor - rowTop,
       (r.bottom - elTop - gapAbove(r.bottom)) / zoomFactor - rowTop,
@@ -1069,10 +1099,21 @@ function rowCutYs(
       }
       return id
     }
-    const addEntry = (band: [number, number], node: Node, para: Element | null) => {
+    const addEntry = (
+      band: [number, number],
+      node: Node,
+      para: Element | null,
+      screenTop: number,
+    ) => {
       const child = childIndexOf(node)
       if (child < 0) cellsOk = false
-      else entries.push({ band, child, para: paraIdOf(para, child) })
+      else
+        entries.push({
+          band,
+          child,
+          para: paraIdOf(para, child),
+          ...(capture ? { start: { node, screenTop } } : {}),
+        })
     }
     const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT)
     for (let n = walker.nextNode(); n; n = walker.nextNode()) {
@@ -1082,9 +1123,10 @@ function rowCutYs(
       range.selectNodeContents(n)
       for (const r of range.getClientRects()) {
         if (r.height <= 0 || r.width <= 0) continue
-        const band = toBand(unshiftRunRect(r, n, zoomFactor))
+        const rect = unshiftRunRect(r, n, zoomFactor)
+        const band = toBand(rect)
         bands.push(band)
-        addEntry(band, n, para)
+        addEntry(band, n, para, rect.top)
         if (para) {
           const list = byPara.get(para) ?? []
           list.push(band)
@@ -1099,7 +1141,7 @@ function rowCutYs(
       if (r.height > 0 && r.width > 0) {
         const band = toBand(r)
         bands.push(band)
-        addEntry(band, obj, obj.closest(PARA_SELECTOR))
+        addEntry(band, obj, obj.closest(PARA_SELECTOR), r.top)
       }
     }
     // empty paragraphs above the cell's content are lines Word breaks between;
@@ -1114,7 +1156,7 @@ function rowCutYs(
       if (band[0] >= contentB - 0.5) continue
       bands.push(band)
       byPara.set(para, [band])
-      addEntry(band, para, para)
+      addEntry(band, para, para, r.top)
     }
     if (bands.length > 0) cellBands.push(bands)
     const span =
@@ -1131,7 +1173,8 @@ function rowCutYs(
       spans.push({ rows: span, bands: merged })
     }
     for (const list of byPara.values()) paraBands.push(list)
-    if (cellsOk) cellBoxes.push(cellBoxOf(cell as HTMLElement, entries, zoomFactor, toBand))
+    if (cellsOk)
+      cellBoxes.push(cellBoxOf(cell as HTMLElement, entries, zoomFactor, toBand, capture))
   }
   const contentBottom = cellBands.reduce(
     (max, bands) => bands.reduce((m, [, b]) => Math.max(m, b), max),
@@ -1157,9 +1200,10 @@ function rowCutYs(
  *  removed here (Word aligns within each row fragment, not the whole row) */
 function cellBoxOf(
   cell: HTMLElement,
-  entries: Array<{ band: [number, number]; child: number; para: number }>,
+  entries: CellLineEntry[],
   zoomFactor: number,
   toBand: (r: DOMRect) => [number, number],
+  capture?: CellLineCapture,
 ): RowCellBox {
   const va = cell.style.verticalAlign
   let alignDy = 0
@@ -1199,14 +1243,25 @@ function cellBoxOf(
       ? 0
       : parseFloat(getComputedStyle(ch).marginTop) || 0,
   )
-  return { ...cellLinesOf(shifted), childBox, childAfter, childBefore, alignDy, alignFrac }
+  const starts = capture ? [] : undefined
+  const box = {
+    ...cellLinesOf(shifted, starts),
+    childBox,
+    childAfter,
+    childBefore,
+    alignDy,
+    alignFrac,
+  }
+  if (starts) capture?.(box, cell, starts)
+  return box
 }
 
 /** Pure core of cellBoxOf: rect entries → clustered lines (same overlap rule as
  *  clusterLineBands), each line keeping the child index / paragraph id of its
  *  topmost rect */
 export function cellLinesOf(
-  entries: Array<{ band: [number, number]; child: number; para: number }>,
+  entries: CellLineEntry[],
+  starts?: CellLineStart[],
 ): Pick<RowCellBox, 'lines' | 'childOf' | 'paraOf'> {
   const sorted = [...entries].sort((a, b) => a.band[0] - b.band[0])
   const lines: Array<[number, number]> = []
@@ -1217,14 +1272,175 @@ export function cellLinesOf(
     const last = lines[lines.length - 1]
     const overlap = last ? last[1] - top : 0
     const minH = last ? Math.min(last[1] - last[0], bottom - top) : 0
-    if (last && overlap > 1 && overlap > 0.4 * minH) last[1] = Math.max(last[1], bottom)
-    else {
+    if (last && overlap > 1 && overlap > 0.4 * minH) {
+      last[1] = Math.max(last[1], bottom)
+      // Runs on one line can have different ink tops. Preserve the source-first run.
+      if (
+        starts &&
+        e.start &&
+        (starts.at(-1)?.node.compareDocumentPosition(e.start.node) ?? 0) &
+          Node.DOCUMENT_POSITION_PRECEDING
+      ) {
+        starts[starts.length - 1] = e.start
+      }
+    } else {
       lines.push([top, bottom])
       childOf.push(e.child)
       paraOf.push(e.para)
+      if (e.start) starts?.push(e.start)
     }
   }
   return { lines, childOf, paraOf }
+}
+
+type TableCellBoundaryLookup = ReturnType<typeof createTableCellBoundaryLookup>
+
+/** Resolve line boundaries of planned rows before leaving the same natural-flow measurement. */
+export function createTableCellBoundaryLookup(view: EditorView, zoomFactor: number) {
+  const doc = view.state.doc
+  const samples = new WeakMap<
+    RowCellBox,
+    {
+      cell: HTMLElement
+      starts: CellLineStart[]
+      positions: Map<number, number>
+    }
+  >()
+  const capture: CellLineCapture = (box, cell, starts) => {
+    samples.set(box, { cell, starts, positions: new Map() })
+  }
+  const tableGeometry = new WeakMap<BlockBox, ReturnType<typeof tableRowGeometry>>()
+  const attempted = new WeakSet<TableRowBox>()
+
+  function sampleCachedRow(block: BlockBox, row: TableRowBox, index: number): void {
+    if (attempted.has(row) || !block.el || !row.cells) return
+    attempted.add(row)
+    let geometry = tableGeometry.get(block)
+    if (!geometry) {
+      geometry = tableRowGeometry(block.el, sampledTextHeight(block), zoomFactor)
+      tableGeometry.set(block, geometry)
+    }
+    const { trs, boxes, elTop, gapAbove } = geometry
+    const tr = trs[index]
+    if (!tr) return
+    const { offsetInBlock, height } = boxes[index]
+    const measured = rowCutYs(tr, offsetInBlock, height, elTop, gapAbove, zoomFactor, capture)
+    // These are numeric geometry records only. A cache hit may have the same
+    // row height but different wraps, so prove the planner's cell inputs agree.
+    if (JSON.stringify(measured.cells) !== JSON.stringify(row.cells)) return
+    row.cells.forEach((box, cell) => samples.set(box, samples.get(measured.cells![cell])!))
+  }
+
+  function read(
+    block: BlockBox,
+    rowIndex: number,
+    cellIndex: number,
+    lines: readonly number[],
+  ): number[] | undefined {
+    const row = block.tableRows?.[rowIndex]
+    const box = row?.cells?.[cellIndex]
+    if (
+      !block.el ||
+      !row ||
+      !box ||
+      view.isDestroyed ||
+      view.state.doc !== doc ||
+      !view.dom.contains(block.el)
+    )
+      return
+    if (lines.some((line) => !Number.isInteger(line) || line < 0 || line > box.lines.length)) return
+    if (!samples.has(box)) sampleCachedRow(block, row, rowIndex)
+    const sample = samples.get(box)
+    if (!sample || sample.starts.length !== box.lines.length) return
+    const { cell, starts, positions } = sample
+    try {
+      const start = doc.resolve(view.posAtDOM(cell, 0))
+      const depth = start.depth
+      if (
+        depth < 3 ||
+        start.parentOffset !== 0 ||
+        (start.parent.type.name !== 'docTableCell' &&
+          start.parent.type.name !== 'docTableHeader') ||
+        start.node(depth - 1).type.name !== 'docTableRow' ||
+        start.node(depth - 2).type.name !== 'docTable' ||
+        start.index(depth - 1) !== cellIndex ||
+        start.index(depth - 2) !== rowIndex ||
+        view.nodeDOM(start.before()) !== cell ||
+        view.nodeDOM(start.before(depth - 2)) !== block.el ||
+        cell.querySelector('.doc-nested-table')
+      )
+        return
+      positions.set(0, start.pos)
+      if (box.lines.length > 0) positions.set(box.lines.length, start.end())
+      for (const line of lines) {
+        if (positions.has(line)) continue
+        const child = cell.children[box.childOf[line]]
+        const anchor = starts[line]
+        if (!child?.contains(anchor.node)) return
+        const position =
+          box.childOf[line] !== box.childOf[line - 1]
+            ? sourceNodeStart(view, child)
+            : cellLineSourcePosition(view, anchor, child, zoomFactor)
+        if (position === undefined || position <= start.pos || position >= start.end()) return
+        positions.set(line, position)
+      }
+      const ordered = [...positions].sort(([a], [b]) => a - b)
+      if (ordered.some(([, pos], i) => i > 0 && pos <= ordered[i - 1][1])) return
+      return lines.map((line) => positions.get(line)!)
+    } catch {
+      return
+    }
+  }
+  return { capture, read }
+}
+
+/** A PM node's DOM resolves through its parent, outside the node's content. */
+function sourceNodeStart(view: EditorView, node: Element): number | undefined {
+  const parent = node.parentNode
+  if (!parent) return
+  const pos = view.posAtDOM(parent, Array.prototype.indexOf.call(parent.childNodes, node))
+  if (view.nodeDOM(pos) === node) return pos
+}
+
+function cellLineSourcePosition(
+  view: EditorView,
+  anchor: CellLineStart,
+  child: Element,
+  zoomFactor: number,
+): number | undefined {
+  const { node, screenTop } = anchor
+  if (!(node instanceof Text)) {
+    for (
+      let element = node instanceof Element ? node : null;
+      element && element !== child;
+      element = element.parentElement
+    ) {
+      const start = sourceNodeStart(view, element)
+      if (start !== undefined && view.state.doc.nodeAt(start)?.isInline) return start
+    }
+    return
+  }
+  const offset = lineStartCharOffset(node, screenTop, zoomFactor)
+  const range = charRange()
+  range.setStart(node, offset)
+  range.setEnd(node, offset + 1)
+  if (
+    !Array.from(range.getClientRects()).some(
+      (rect) =>
+        rect.height > 0 && Math.abs(unshiftRunRect(rect, node, zoomFactor).top - screenTop) <= 1,
+    )
+  )
+    return
+  const from = view.posAtDOM(node, 0)
+  const to = view.posAtDOM(node, node.length)
+  const pos = view.posAtDOM(node, offset)
+  if (
+    pos !== from + offset ||
+    to !== from + node.length ||
+    view.state.doc.textBetween(from, to) !== node.data
+  )
+    return
+  return pos
 }
 
 /** Rects sharing vertical overlap collapse into one line interval. Same-line rects

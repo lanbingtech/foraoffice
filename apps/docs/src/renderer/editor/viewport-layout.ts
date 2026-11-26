@@ -1,30 +1,31 @@
 import type { Node as PmNode } from '@tiptap/pm/model'
 import type { EditorView } from '@tiptap/pm/view'
 import type { PageCut } from '../pagination-cuts'
+import { hasNonLocalFlow } from '../pagination-measure'
 import { sliceStartsVisiblePage } from '../pagination-slices'
 import type { PmNode as DocumentJson } from './convert'
 import type { PageLayout } from './goto'
 import { pagePositions } from './goto'
-import { pageFramesFromGaps, type PageFrame } from './pagination-gaps'
+import { pageFramesFromGaps, pageGapPositions, type PageFrame } from './pagination-gaps'
 import { topLevelDomRanges } from './top-level-pos'
 import {
   readViewportDecorations,
   viewDecorationWindow,
   type ViewportDecorations,
 } from './viewport-decorations'
-import { createViewportEditing } from './viewport-editing'
+import { createViewportEditing, type ViewportModelBlock } from './viewport-editing'
 import {
   boxInCanvas,
   intersectsViewport,
+  measureParagraphFragments,
   measurePictureFragments,
   type LayoutBox,
+  type ParagraphFragment,
   type PictureFragment,
   type ViewportBounds,
 } from './viewport-fragments'
 
-interface PositionedBlock {
-  from: number
-  to: number
+interface PositionedBlock extends ViewportModelBlock {
   box: LayoutBox
   pictures?: PictureFragment[]
   hidden?: boolean
@@ -35,6 +36,7 @@ interface MeasuredBlock {
   placement: PositionedBlock
   through: number
   ink?: LayoutBox
+  fragments?: ParagraphFragment[]
 }
 
 export interface ViewportGeometry {
@@ -126,9 +128,31 @@ export function viewportContent(
     else low = middle + 1
   }
   for (let i = low; i < geometry.blocks.length; i++) {
-    const { placement, ink = placement.box } = geometry.blocks[i]
+    const { placement, ink = placement.box, fragments } = geometry.blocks[i]
     if (ink.top >= viewport.bottom) break
     if (!intersectsViewport(ink, viewport)) continue
+    if (fragments) {
+      let start = 0
+      let end = fragments.length
+      while (start < end) {
+        const middle = (start + end) >>> 1
+        const { top, height } = fragments[middle].box
+        if (top + height > viewport.top) end = middle
+        else start = middle + 1
+      }
+      const first = fragments[start]
+      if (!first || first.box.top >= viewport.bottom) continue
+      while (end + 1 < fragments.length && fragments[end + 1].box.top < viewport.bottom) end++
+      if (start > 0 || end < fragments.length - 1) {
+        const last = fragments[end]
+        visible.push({
+          ...placement,
+          box: { ...placement.box, top: first.top, height: last.bottom - first.top },
+          paragraph: { from: first.from, to: last.to },
+        })
+        continue
+      }
+    }
     const pictures = placement.pictures?.filter((fragment) =>
       intersectsViewport(fragment.box, viewport),
     )
@@ -173,12 +197,57 @@ export function viewportLayout(
   const measure = (): ViewportGeometry => {
     const root = view.dom.getBoundingClientRect()
     const scale = view.dom.currentCSSZoom || 1
+    const decorations = readViewportDecorations(view)
+    const candidates = new Map<HTMLElement, number[] | null>()
+    const anchors = pageGapPositions(view.state)
+    layout.cuts.forEach((cut, index) => {
+      if (cut.lead.kind !== 'line') return
+      const block = layout.blocks[cut.lead.block]
+      const element = block?.el
+      if (!element) return
+      const position = anchors.get(index)
+      if (
+        position === undefined ||
+        block.breakBefore ||
+        cut.blank ||
+        cut.regions?.length ||
+        cut.gap?.kind !== 'inline' ||
+        cut.gap.pullUpPx !== 0 ||
+        !Number.isFinite(cut.lead.lineOffset)
+      ) {
+        candidates.set(element, null)
+        return
+      }
+      const starts = candidates.get(element)
+      if (starts) starts.push(position)
+      else if (starts === undefined) candidates.set(element, [position])
+    })
+    if (
+      candidates.size &&
+      (layout.blocks.some((block) => block.floated) || hasNonLocalFlow(view.dom))
+    )
+      candidates.clear()
     const blocks: MeasuredBlock[] = []
     const empty: Record<number, PositionedBlock> = {}
     for (const { dom, node, from, to } of topLevelDomRanges(view)) {
       if (!(dom instanceof HTMLElement) || dom.parentElement !== view.dom) continue
       const box = boxInCanvas(dom.getBoundingClientRect(), root, scale)
       const pictures = node && measurePictureFragments(view, node, from, root, scale)
+      const positions = candidates.get(dom)
+      // Keep the same inline widgets in the projected paragraph, including at
+      // its local start and end. Other decorations need the full paragraph.
+      const spans = positions && viewDecorationWindow(decorations, from, to)
+      const fragments =
+        node &&
+        positions &&
+        spans &&
+        spans.length === positions.length &&
+        spans.every(
+          (span, index) =>
+            'flowGap' in span && span.flowGap.kind === 'inline' && span.from === positions[index],
+        )
+          ? measureParagraphFragments(view, node, dom, from, positions, box, root, scale)
+          : undefined
       // Out-of-flow figures can paint across pages from a zero-height wrapper.
       // Keep its placement at the anchor but index the painted descendants.
       let ink: LayoutBox | undefined
@@ -202,7 +271,7 @@ export function viewportLayout(
         ...(leaders.some((value) => value !== null) ? { tocLeaders: leaders } : {}),
       }
       const coverage = ink ?? box
-      blocks.push({ placement, through: coverage.top + coverage.height, ink })
+      blocks.push({ placement, through: coverage.top + coverage.height, ink, fragments })
       if (hidden) empty[from] = placement
     }
     blocks.sort((a, b) => (a.ink ?? a.placement.box).top - (b.ink ?? b.placement.box).top)
@@ -212,7 +281,7 @@ export function viewportLayout(
       canvas: boxInCanvas(root, root, scale),
       blocks,
       empty,
-      decorations: readViewportDecorations(view),
+      decorations,
     }
   }
 

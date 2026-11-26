@@ -807,6 +807,68 @@ describe('viewport surface', () => {
     }
   })
 
+  it('keeps both page-turn widgets at the source-mapped edges of a paragraph continuation', () => {
+    const owner = new Editor({
+      element: document.body.appendChild(document.createElement('div')),
+      extensions: editorExtensions,
+      content: {
+        type: 'doc',
+        content: [
+          {
+            type: 'docParagraph',
+            attrs: { indentFirstLine: 720 },
+            content: [{ type: 'text', text: 'before middle after' }],
+          },
+        ],
+      },
+    })
+    const source = owner.state.doc
+    const surface = createViewportSurface(
+      document.body.appendChild(document.createElement('div')),
+      {
+        readSource: () => ({ state: owner.state, revision: 0 }),
+        dispatch: vi.fn(),
+        requestRange: vi.fn(),
+      },
+    )
+    mounted.push(surface)
+    try {
+      const metrics = { marginTop: 30, marginBottom: 20, marginLeft: 40, marginRight: 45 }
+      setPageGaps(
+        owner.view,
+        [8, 14].map((pos) => ({ pos, kind: 'inline', metrics })),
+      )
+      expect(
+        surface.publish({
+          publication: 1,
+          revision: 0,
+          sequence: 1,
+          content: {
+            ...placed([
+              {
+                from: 0,
+                to: source.content.size,
+                box: box(40, 88),
+                paragraph: { from: 8, to: 14 },
+              },
+            ]),
+            decorations: readViewportDecorations(owner.view),
+          },
+        }),
+      ).toBe('applied')
+      const view = surface.view!
+      const paragraph = view.nodeDOM(0) as HTMLElement
+      expect(paragraph.style.textIndent).toBe('0px')
+      expect(view.state.doc.textContent).toBe('middle')
+      expect(
+        Array.from(paragraph.querySelectorAll('.page-gap-inline'), (gap) => view.posAtDOM(gap, 0)),
+      ).toEqual([1, 7])
+      expect(owner.state.doc).toBe(source)
+    } finally {
+      owner.destroy()
+    }
+  })
+
   it('keeps the overlapping DOM when the window advances past several blocks', () => {
     const nodes = Array.from({ length: 24 }, (_, index) => paragraph(`Block ${index}`))
     const doc = schema.node('doc', null, nodes)

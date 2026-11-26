@@ -20,6 +20,7 @@ interface ModelRange {
 
 export interface ViewportModelBlock extends ModelRange {
   readonly pictures?: readonly ModelRange[]
+  readonly paragraph?: ModelRange
 }
 
 export interface EditingViewport {
@@ -50,8 +51,7 @@ function pictureRange(block: ViewportModelBlock, paragraph: PmNode): ModelRange 
   if (selected === pictures.length) return { from: pictures[0].from, to: pictures[selected - 1].to }
 }
 
-/** The represented range is contiguous. A clipped paragraph can contribute
- * its visible pictures at either outer edge; a missing interior cannot. */
+/** A clipped paragraph can contribute either outer edge of the contiguous range. */
 export function createViewportEditing(
   source: PmNode,
   blocks: readonly ViewportModelBlock[],
@@ -70,16 +70,28 @@ export function createViewportEditing(
     if (!node || block.from !== position || block.to !== position + node.nodeSize) return
     position = block.to
     to = position
-    if (!block.pictures) continue
-    const pictures = pictureRange(block, node)
-    if (!pictures) return
-    if (pictures.from > block.from + 1) {
+    const { pictures, paragraph } = block
+    if (!pictures && !paragraph) continue
+    if (pictures && paragraph) return
+    const clip = pictures ? pictureRange(block, node) : paragraph
+    if (
+      !clip ||
+      !Number.isInteger(clip.from) ||
+      !Number.isInteger(clip.to) ||
+      clip.from < block.from + 1 ||
+      clip.to > block.to - 1 ||
+      clip.from >= clip.to ||
+      (paragraph &&
+        (node.type.name !== 'docParagraph' || !node.firstChild?.isText || node.childCount !== 1))
+    )
+      return
+    if (clip.from > block.from + 1) {
       if (index !== 0) return
-      from = pictures.from
+      from = clip.from
     }
-    if (pictures.to < block.to - 1) {
+    if (clip.to < block.to - 1) {
       if (index !== blocks.length - 1) return
-      to = pictures.to
+      to = clip.to
     }
   }
   const slice = source.slice(from, to, true)

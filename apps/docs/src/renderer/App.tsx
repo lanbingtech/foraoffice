@@ -224,6 +224,7 @@ import {
   type PageCut,
   pageNumbers,
   sliceWithLineSplit,
+  createTableCellBoundaryLookup,
   type SliceOutputs,
   tableRowFlags,
   type BlockBox,
@@ -365,6 +366,12 @@ import {
 } from './editor/track-changes-options'
 import { pagePositions, type PageLayout } from './editor/goto'
 import { viewportLayout, type ViewportLayout } from './editor/viewport-layout'
+import type { ViewportLayoutDetails } from './editor/layout-client'
+import {
+  collectViewportTableFragments,
+  rebaseViewportTableFragments,
+  type ViewportTableRowFragment,
+} from './editor/viewport-table-source'
 import { layoutReplicaPlugins } from './editor/authored-document'
 import { PagedViewProbe, pagedViewProbe } from './editor/paged-view-probe'
 import { Ribbon, type ConvertFormat } from './components/Ribbon'
@@ -456,9 +463,12 @@ import { installSelectionBar } from './editor/selection-bar'
 import type { CompareEntry } from './editor/compare'
 import { collectHeadings, headingLevelOf } from './editor/headings'
 import {
-  applyTocPageDisplays,
+  applyTocPageDisplayUpdates,
   backfillTocPageDom,
+  collectTocPageDisplays,
+  paintTocPageDisplays,
   tocPageDisplayForBookmarkBlock,
+  type TocPageDisplay,
 } from './editor/toc-refresh'
 import { setSelectionAlign } from './editor/direction'
 
@@ -857,7 +867,7 @@ export function App({
   embedded = false,
 }: {
   onRuntime?: (value: DocsAppRuntime | null) => void
-  onViewportLayout?: (value: ViewportLayout | null) => void
+  onViewportLayout?: (value: ViewportLayout | null, details?: ViewportLayoutDetails) => void
   onInitialViewport?: (value: ViewportLayout, modelEnd: number, paperEnd: number) => void
   onViewportOpen?: (editor: Editor | null) => void
   sourceImport?: FileActionContext['sourceImport']
@@ -4656,11 +4666,26 @@ export function App({
       }
       if (onViewportLayout && !viewportMeasuredDocument) return reject('partial-layout')
       if (!blocksKeepSlicing(items, slices, factor)) return reject('geometry')
-      if (onViewportLayout) viewportMeasuredDocument = pmDoc
+      if (onViewportLayout) {
+        const previous = measuredTableFragments
+        if (previous && previous.document !== pmDoc) {
+          const fragments = rebaseViewportTableFragments(
+            previous.document,
+            pmDoc,
+            previous.fragments,
+          )
+          if (!fragments) return reject('table-fragments')
+          measuredTableFragments = { document: pmDoc, fragments }
+        }
+        viewportMeasuredDocument = pmDoc
+      }
       return true
     }
     let hasTocFields = false
     let tocRefreshComplete = false
+    let measuredTocPages: readonly TocPageDisplay[] | undefined
+    let measuredTableFragments:
+      { document: PmNode; fragments: readonly ViewportTableRowFragment[] } | undefined
     const makeTocBookmarkPageLookup = (blocks: BlockBox[], cuts: PageCut[]) => {
       let bookmarkBlocks: Map<number, BlockBox | null> | undefined
       return (bookmark: string) => {
@@ -4698,16 +4723,21 @@ export function App({
           ? undefined
           : cuts[Math.max(0, Math.min(pageOfY(slices, top), cuts.length - 1))]?.display
       })
-      const tr = editor.state.tr
-      const changed = applyTocPageDisplays(before, tr, headings, displays, pageTextOfBookmark)
-      if (changed) tr.setMeta('addToHistory', false)
+      const pages = collectTocPageDisplays(before, headings, displays, pageTextOfBookmark)
       // Updating a field can rebuild its view. Apply after layout has finished
       // with the measured DOM and only while it still describes this document.
       return () => {
         if (editor.state.doc !== before) return
         tocRefreshComplete = true
-        if (changed) {
-          editor.view.dispatch(tr)
+        if (onViewportLayout) {
+          measuredTocPages = pages
+          const first = paintTocPageDisplays(editor.view, pages)
+          if (first !== undefined) followUpAt('toc-page-display', before.resolve(first).index(0))
+          return
+        }
+        const tr = editor.state.tr
+        if (applyTocPageDisplayUpdates(tr, pages)) {
+          editor.view.dispatch(tr.setMeta('addToHistory', false))
           carryDocSeen(editor, before)
         }
       }
@@ -4758,7 +4788,13 @@ export function App({
       }
       if (state.pending || timer !== null) return
       viewportPublished = true
-      onViewportLayout(viewportLayout(editor.view, layout, annotationFirstPageRef.current))
+      onViewportLayout(viewportLayout(editor.view, layout, annotationFirstPageRef.current), {
+        tocPages: measuredTocPages,
+        tableFragments:
+          measuredTableFragments?.document === editor.state.doc
+            ? measuredTableFragments.fragments
+            : undefined,
+      })
     }
     const remeasure = (forceFull = false, synchronous = false) => {
       if (disposed) return
@@ -4911,7 +4947,8 @@ export function App({
           if (
             layout &&
             hasTocFields &&
-            (!tocRefreshComplete ||
+            (onViewportLayout ||
+              !tocRefreshComplete ||
               [...edited].some((index) =>
                 headingLevelOf(editor.state.doc.child(index), editor.storage.listNumbering?.styles),
               ))
@@ -4950,6 +4987,7 @@ export function App({
       const tocLines = pm.querySelectorAll<HTMLElement>('.doc-toc-line')
       hasTocFields = tocLines.length > 0
       tocRefreshComplete = false
+      measuredTocPages = undefined
       const model = editor?.state.doc
       let measuredCount = model?.childCount ?? 0
       let measuredEndPos = model?.content.size ?? 0
@@ -5182,6 +5220,9 @@ export function App({
         ])
         const resume = resumeFor(blocks, secSig, dirty)
         if (resume) resumePasses++
+        const tableBoundaries = onViewportLayout
+          ? createTableCellBoundaryLookup(editor.view, factor)
+          : undefined
         const t1 = performance.now()
         // rowSplits enables the per-cell row split; the canvas only needs the
         // matching row heights (the preview applies the cell shifts)
@@ -5203,6 +5244,7 @@ export function App({
           blockMetaOf,
           sliceOut,
           resume ?? undefined,
+          tableBoundaries,
         )
         const floatTops = floats.map((f) => f.top)
         const pullFloats = () => {
@@ -5221,11 +5263,33 @@ export function App({
           const base = withEndnotes?.totalHeight ?? totalHeight
           const again = appendFloatSpillBlock(blocks, base, floats, spillOverhangPx)
           if ((again ?? base) < flowH - 0.5) {
-            s = sliceWithLineSplit(blocks, geoms, again ?? base, factor, blockMetaOf, sliceOut)
+            s = sliceWithLineSplit(
+              blocks,
+              geoms,
+              again ?? base,
+              factor,
+              blockMetaOf,
+              sliceOut,
+              undefined,
+              tableBoundaries,
+            )
             pullFloats()
           }
         }
         tSlice = performance.now() - t1
+        if (tableBoundaries) {
+          const measuredSource = editor.state.doc
+          measuredTableFragments = {
+            document: measuredSource,
+            fragments: collectViewportTableFragments(
+              measuredSource,
+              blocks,
+              s,
+              sliceOut.rowSplits ?? [],
+              tableBoundaries,
+            ),
+          }
+        }
         const cuts = buildPageCuts(blocks, s, geoms, hfHs ?? [singleHfPx], {
           evenOddHf,
           // a lone section follows the live Different First Page toggle (pageHfOf, hfHeightsOf)
@@ -5971,7 +6035,8 @@ export function App({
             )
           }
           // Empty caches can follow the measured page on pristine open.
-          backfillTocPageDom(tocLines, tocPageTextOf, dirtyRef.current, tocBookmarksByIndex)
+          if (!onViewportLayout || !dirtyRef.current)
+            backfillTocPageDom(tocLines, tocPageTextOf, dirtyRef.current, tocBookmarksByIndex)
           previousHeaderFooterContent = headerFooterContent
         }
         tGapsBuild = performance.now() - tGaps0

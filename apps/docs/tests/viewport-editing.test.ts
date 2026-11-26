@@ -59,6 +59,27 @@ function pictureDocument() {
 }
 
 describe('editable document viewport', () => {
+  it('maps an interior paragraph continuation to its original text and preserves offscreen text', () => {
+    const source = schema.node('doc', null, [paragraph('before middle after')])
+    const viewport = createViewportEditing(source, [
+      { from: 0, to: source.content.size, paragraph: { from: 8, to: 14 } },
+    ])!
+    expect(viewport.doc.textContent).toBe('middle')
+    expect(viewport.toSource(1)).toBe(8)
+    expect(viewport.toLocal(14)).toBe(7)
+    expect(viewport.toLocal(15)).toBeUndefined()
+
+    const local = EditorState.create({ doc: viewport.doc })
+    const authoritative = EditorState.create({ doc: source })
+    const transaction = projectViewportTransaction(
+      viewport,
+      authoritative,
+      local.tr.insertText('!', 7),
+    )
+    expect(transaction?.doc.textContent).toBe('before middle! after')
+    expect(projectViewportTransaction(viewport, authoritative, local.tr.split(4))).toBeUndefined()
+  })
+
   it('translates multiple text steps and a backward selection while retaining offscreen blocks', () => {
     const { source, viewport, local, authoritative } = textViewport()
     expect(viewport.doc.textContent).toBe('abcDEF')

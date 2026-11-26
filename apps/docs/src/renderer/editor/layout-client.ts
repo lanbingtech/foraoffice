@@ -5,7 +5,9 @@ import type { OpenFileResult } from '../../shared/ipc'
 import type { PageCut } from '../pagination-cuts'
 import { AuthoredDocument, AuthoredEditor, readImportedBody } from './authored-document'
 import type { PmNode } from './convert'
+import type { TocPageDisplay } from './toc-refresh'
 import type { ViewportBounds } from './viewport-fragments'
+import type { ViewportTableRowFragment } from './viewport-table-source'
 import {
   viewportContent,
   type ViewportContent,
@@ -27,7 +29,12 @@ export type LayoutMessage =
   | (ViewportRequestStamp & { type: 'reveal'; position: number; height: number })
   | { type: 'edit'; fromRevision: number; toRevision: number; steps: unknown[] }
 
-type LayoutPublication = {
+export interface ViewportLayoutDetails {
+  tocPages?: readonly TocPageDisplay[]
+  tableFragments?: readonly ViewportTableRowFragment[]
+}
+
+type LayoutPublication = ViewportLayoutDetails & {
   type: 'layout'
   publication: number
   revision: number
