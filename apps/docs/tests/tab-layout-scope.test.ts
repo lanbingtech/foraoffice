@@ -148,4 +148,30 @@ describe('tab and TOC layout after a wrap-width commit', () => {
     commit(blocks[2])
     expect(tabSize(blocks[0])).toBe('200px')
   })
+
+  it('measures an inline edit without reading other tab paragraphs or TOC entries', () => {
+    const outside = blocks[2].querySelector('.doc-tab')
+    editor.view.dispatch(editor.state.tr.insertText('x', 1))
+    expect(tabSize(blocks[0])).toBe('300px')
+    expect(blocks[2].querySelector('.doc-tab')).toBe(outside)
+    expect(reads.has(blocks[1])).toBe(false)
+    expect(reads.has(blocks[2])).toBe(false)
+    expect(reads.has(blocks[3])).toBe(false)
+  })
+
+  it('clears the local geometry when an inline edit removes the paragraph’s last tab', () => {
+    editor.view.dispatch(editor.state.tr.delete(2, 3))
+    expect(blocks[0].classList.contains('has-tab-stops')).toBe(false)
+    expect(blocks[0].querySelector('.doc-tab')).toBeNull()
+    expect(tabSize(blocks[2])).toBe('300px')
+    expect(reads.has(blocks[2])).toBe(false)
+  })
+
+  it('rechecks the full flow on an inline edit when CSS columns couple its blocks', () => {
+    editor.view.dom.style.columnCount = '2'
+    widths.set(blocks[2], 400)
+    editor.view.dispatch(editor.state.tr.insertText('x', 1))
+    expect(tabSize(blocks[2])).toBe('200px')
+    expect(reads.has(blocks[2])).toBe(true)
+  })
 })
