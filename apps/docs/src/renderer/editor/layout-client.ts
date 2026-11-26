@@ -26,7 +26,12 @@ export type LayoutMessage =
       includeSource?: boolean
     }
   | { type: 'viewport'; sequence: number; publication: number; bounds: ViewportBounds }
-  | (ViewportRequestStamp & { type: 'reveal'; position: number; height: number })
+  | (ViewportRequestStamp & {
+      type: 'reveal'
+      position: number
+      height: number
+      scope?: 'table-cell'
+    })
   | { type: 'edit'; fromRevision: number; toRevision: number; steps: unknown[] }
 
 export interface ViewportLayoutDetails {
@@ -139,7 +144,7 @@ export class LayoutClient {
   }
 
   /** Reveal a position from the same source revision as the current layout. */
-  requestReveal(position: number, height: number, revision: number): boolean {
+  requestReveal(position: number, height: number, revision: number, scope?: 'table-cell'): boolean {
     if (
       !this.displayIsCurrent() ||
       !this.active ||
@@ -157,6 +162,7 @@ export class LayoutClient {
       sequence: ++this.sequence,
       position,
       height,
+      ...(scope ? { scope } : {}),
     })
     return true
   }

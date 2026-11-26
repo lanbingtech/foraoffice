@@ -2,6 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { _electron as electron, expect, test } from '@playwright/test'
 import type { Editor } from '@tiptap/core'
+import type { LayoutReply } from '../apps/docs/src/renderer/editor/layout-client'
 import type { ViewportTableRowFragment } from '../apps/docs/src/renderer/editor/viewport-table-source'
 import type { DesktopApi } from '../apps/docs/src/shared/ipc'
 import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
@@ -30,7 +31,10 @@ test('background pagination maps split table lines to their authored cells', asy
         '<w:tblGrid><w:gridCol w:w="4320"/><w:gridCol w:w="4320"/></w:tblGrid><w:tr>' +
         `<w:tc><w:tcPr><w:tcW w:w="4320" w:type="dxa"/></w:tcPr>${paragraphs('Left', 115)}</w:tc>` +
         `<w:tc><w:tcPr><w:tcW w:w="4320" w:type="dxa"/></w:tcPr>${paragraphs('Right', 76)}</w:tc>` +
-        '</w:tr></w:tbl><w:p><w:r><w:t>Following paragraph</w:t></w:r></w:p>',
+        '</w:tr></w:tbl><w:p><w:r><w:t>Following paragraph</w:t></w:r></w:p>' +
+        '<w:tbl><w:tblGrid><w:gridCol w:w="4320"/></w:tblGrid>' +
+        '<w:tr><w:trPr><w:trHeight w:val="60" w:hRule="exact"/></w:trPr><w:tc>' +
+        '<w:p><w:r><w:t>Height-limited cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
     }),
   )
   const env = { ...process.env, AI_OFFICE_USER_DATA: join(root, 'profile'), GENOFFICE_LANG: 'en' }
@@ -49,17 +53,21 @@ test('background pagination maps split table lines to their authored cells', asy
       const bytes =
         file.data ?? (await fetch(file.dataUrl).then((response) => response.arrayBuffer()))
       const { port1, port2 } = new MessageChannel()
-      const readLayout = (revision: number) =>
-        new Promise<readonly ViewportTableRowFragment[]>((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error('No background table layout')), 15000)
-          port1.onmessage = ({ data }) => {
-            if (data.type !== 'failure' && (data.type !== 'layout' || data.revision !== revision))
-              return
+      const readReply = <T extends LayoutReply>(matches: (reply: LayoutReply) => reply is T) =>
+        new Promise<T>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('No background table reply')), 15000)
+          port1.onmessage = ({ data }: MessageEvent<LayoutReply>) => {
+            if (data.type !== 'failure' && !matches(data)) return
             clearTimeout(timer)
             if (data.type === 'failure') reject(new Error(data.reason))
-            else resolve(data.tableFragments ?? [])
+            else if (matches(data)) resolve(data)
           }
         })
+      const readLayout = (revision: number) =>
+        readReply(
+          (reply): reply is Extract<LayoutReply, { type: 'layout' }> =>
+            reply.type === 'layout' && reply.revision === revision,
+        )
       const initial = readLayout(0)
       try {
         window.postMessage(
@@ -82,8 +90,40 @@ test('background pagination maps split table lines to their authored cells', asy
           },
           [bytes],
         )
-        const frames = await initial
+        const publication = await initial
+        const frames: readonly ViewportTableRowFragment[] = publication.tableFragments ?? []
         const model = __aidocs.editor.state.doc
+        let linePosition = -1
+        let clippedPosition = -1
+        model.descendants((node, position) => {
+          if (node.type.name !== 'docParagraph') return
+          if (node.textContent === 'Left line 90') linePosition = position
+          if (node.textContent === 'Height-limited cell') clippedPosition = position
+        })
+        if (linePosition < 0 || clippedPosition < 0)
+          throw new Error('Missing continuation or exact-height paragraph')
+        const clipped = __aidocs.editor.view.nodeDOM(clippedPosition)
+        if (!(clipped instanceof Element) || !clipped.closest('.cell-clip'))
+          throw new Error('Fixture does not render an exact-height cell')
+        const revealCell = (position: number, sequence: number) => {
+          const answer = readReply(
+            (reply): reply is Extract<LayoutReply, { type: 'viewport' | 'reveal-unavailable' }> =>
+              (reply.type === 'viewport' || reply.type === 'reveal-unavailable') &&
+              reply.sequence === sequence,
+          )
+          port1.postMessage({
+            type: 'reveal',
+            position: position + 1,
+            height: innerHeight,
+            publication: publication.publication,
+            revision: 0,
+            sequence,
+            scope: 'table-cell',
+          })
+          return answer
+        }
+        const cell = await revealCell(linePosition, 1)
+        const clippedCell = await revealCell(clippedPosition, 2)
         const edit = __aidocs.editor.state.tr.insertText(' X', 6)
         const revised = readLayout(1)
         port1.postMessage({
@@ -92,11 +132,14 @@ test('background pagination maps split table lines to their authored cells', asy
           toRevision: 1,
           steps: edit.steps.map((step) => step.toJSON()),
         })
-        const after = await revised
+        const after = (await revised).tableFragments ?? []
         const source = model.child(1).firstChild!
         return {
           frames,
           after,
+          cell,
+          clippedCell,
+          linePosition,
           tablePosition: model.firstChild!.nodeSize,
           source: [source.firstChild!.textContent, source.lastChild!.textContent],
           texts: [0, 1].map((index) =>
@@ -115,6 +158,25 @@ test('background pagination maps split table lines to their authored cells', asy
       result.frames.map((_, index) => index),
     )
     expect(result.texts).toEqual(result.source)
+    expect(result.cell).toMatchObject({
+      type: 'viewport',
+      revision: 0,
+      reveal: { position: result.linePosition + 1 },
+      content: {
+        blocks: [
+          {
+            from: result.tablePosition,
+            tableCellText: {
+              position: result.linePosition,
+              from: result.linePosition + 1,
+              to: result.linePosition + 13,
+            },
+          },
+        ],
+        model: { document: { content: [{ type: 'docParagraph' }] } },
+      },
+    })
+    expect(result.clippedCell).toMatchObject({ type: 'reveal-unavailable', revision: 0 })
     expect(
       result.frames.every(
         ({ tablePosition, rowIndex }) => tablePosition === result.tablePosition && rowIndex === 0,

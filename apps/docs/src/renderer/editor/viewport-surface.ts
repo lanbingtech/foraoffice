@@ -4,6 +4,7 @@ import { keydownHandler } from '@tiptap/pm/keymap'
 import {
   AllSelection,
   EditorState,
+  TextSelection,
   type Command,
   type Selection,
   type Transaction,
@@ -93,13 +94,16 @@ function placementDecorations(
   const decorations = projectViewportDecorations(content.decorations ?? [], editing, content.blocks)
   editing.doc.forEach((node, position, index) => {
     const block = content.blocks[index]
-    const continuation = block.paragraph && block.paragraph.from > block.from + 1
+    const continuation =
+      (block.paragraph && block.paragraph.from > block.from + 1) ||
+      (block.tableCellText && block.tableCellText.from > block.tableCellText.position + 1)
     decorations.push(
       Decoration.node(
         position,
         position + node.nodeSize,
         {
           style:
+            (block.tableCellTypography ? `${block.tableCellTypography};` : '') +
             positionedBox(block.box, content.canvas.left, content.canvas.top) +
             (continuation ? ';text-indent:0 !important' : '') +
             (block.hidden ? ';visibility:hidden !important;pointer-events:none !important' : ''),
@@ -221,6 +225,7 @@ function confirmedEditing(
   const localRange = { from: previous.localRange.from, to: previous.localRange.to + delta }
   const offset = sourceRange.from - localRange.from
   return {
+    cellTextblock: previous.cellTextblock,
     source,
     doc: transaction.doc,
     sourceRange,
@@ -267,6 +272,10 @@ function samePlacements(previous: ViewportContent, next: ViewportContent): boole
             block.box.height === other.box.height)) &&
         block.paragraph?.from === other.paragraph?.from &&
         block.paragraph?.to === other.paragraph?.to &&
+        block.tableCellText?.position === other.tableCellText?.position &&
+        block.tableCellText?.from === other.tableCellText?.from &&
+        block.tableCellText?.to === other.tableCellText?.to &&
+        block.tableCellTypography === other.tableCellTypography &&
         block.hidden === other.hidden &&
         block.tocLeaders === other.tocLeaders &&
         block.pictures?.length === other.pictures?.length &&
@@ -429,6 +438,29 @@ export function createViewportSurface(
     )
     if (!projected) return request('transaction', source, transaction)
     commit(source, transaction, projected)
+  }
+
+  const adoptCellCaret = (local: EditorView, event: MouseEvent): boolean => {
+    if (
+      !current?.parked ||
+      current.editing.cellTextblock === undefined ||
+      event.button !== 0 ||
+      event.shiftKey ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey
+    )
+      return false
+    const hit = local.posAtCoords({ left: event.clientX, top: event.clientY })
+    if (!hit || current.editing.toSource(hit.pos) === undefined) return false
+    const position = local.state.doc.resolve(hit.pos)
+    if (position.parent.inlineContent)
+      dispatchTransaction(
+        local.state.tr
+          .setSelection(TextSelection.create(local.state.doc, hit.pos))
+          .setMeta('pointer', true),
+      )
+    return false
   }
 
   const selectAll = (_view: EditorView, event: KeyboardEvent): boolean => {
@@ -716,6 +748,7 @@ export function createViewportSurface(
       nodeViews: options.nodeViews?.(source.state),
       handleKeyDown,
       handleDOMEvents: {
+        mousedown: adoptCellCaret,
         beforeinput: historyInput,
         compositionstart: startComposition,
         compositionend: finishComposition,

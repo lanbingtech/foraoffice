@@ -152,7 +152,7 @@ function runLayout(
     if (data?.type === 'reveal') {
       const result =
         opened && data.revision === revision && data.publication === publication
-          ? layout?.reveal(data.position, data.height)
+          ? layout?.reveal(data.position, data.height, data.scope)
           : undefined
       const stamp = {
         sequence: data.sequence,

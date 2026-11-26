@@ -3,12 +3,16 @@ import { AllSelection, EditorState, NodeSelection, TextSelection } from '@tiptap
 import { describe, expect, it } from 'vitest'
 import {
   createViewportEditing,
+  projectViewportFollowUps,
   projectViewportTransaction,
 } from '../src/renderer/editor/viewport-editing'
 
 const schema = new Schema({
   nodes: {
-    doc: { content: 'docParagraph+' },
+    doc: { content: '(docParagraph | docTable)+' },
+    docTable: { content: 'docTableRow+' },
+    docTableRow: { content: 'docTableCell+' },
+    docTableCell: { content: 'docParagraph+', attrs: { rowspan: { default: 1 } } },
     docParagraph: { content: 'inline*' },
     docInlineImage: {
       inline: true,
@@ -59,6 +63,58 @@ function pictureDocument() {
 }
 
 describe('editable document viewport', () => {
+  it('maps a merged-cell text continuation without changing its table siblings', () => {
+    const cell = schema.node('docTableCell', { rowspan: 2 }, [
+      paragraph('before middle after'),
+      paragraph('next in the same cell'),
+    ])
+    const neighbour = schema.node('docTableCell', null, paragraph('neighbour'))
+    const table = schema.node('docTable', null, [
+      schema.node('docTableRow', null, [cell, neighbour]),
+      schema.node('docTableRow', null, neighbour),
+    ])
+    const source = schema.node('doc', null, [paragraph('lead'), table])
+    const tableFrom = source.firstChild!.nodeSize
+    const position = tableFrom + 3
+    const from = position + 1 + 'before '.length
+    const blocks = [
+      {
+        from: tableFrom,
+        to: tableFrom + table.nodeSize,
+        tableCellText: { position, from, to: from + 'middle'.length },
+      },
+    ]
+    const viewport = createViewportEditing(source, blocks)!
+    expect(viewport.doc.textContent).toBe('middle')
+    expect(viewport.toSource(1)).toBe(from)
+    expect(viewport.toLocal(from - 1)).toBeUndefined()
+
+    const local = EditorState.create({ doc: viewport.doc })
+    const authoritative = EditorState.create({ doc: source })
+    const edit = local.tr.insertText('!', 7)
+    edit.setSelection(TextSelection.create(edit.doc, 8))
+    const projected = projectViewportTransaction(viewport, authoritative, edit)!
+    const row = projected.doc.lastChild!.firstChild!
+    expect(projected.selection.from).toBe(from + 7)
+    expect(row.firstChild!.attrs.rowspan).toBe(2)
+    expect(row.firstChild!.firstChild!.textContent).toBe('before middle! after')
+    expect(row.firstChild!.lastChild).toBe(cell.lastChild)
+    expect(row.lastChild).toBe(neighbour)
+    expect(projectViewportTransaction(viewport, authoritative, local.tr.split(4))).toBeUndefined()
+
+    const accepted = authoritative.apply(projected)
+    const followUp = accepted.tr.insertText('?', from + 7)
+    expect(projectViewportFollowUps(viewport, local, edit, [followUp])?.doc.textContent).toBe(
+      'middle!?',
+    )
+    expect(createViewportEditing(source, [{ ...blocks[0], from: 0 }])).toBeUndefined()
+    expect(
+      createViewportEditing(source, [
+        { ...blocks[0], tableCellText: { position, from, to: from + cell.nodeSize } },
+      ]),
+    ).toBeUndefined()
+  })
+
   it('maps an interior paragraph continuation to its original text and preserves offscreen text', () => {
     const source = schema.node('doc', null, [paragraph('before middle after')])
     const viewport = createViewportEditing(source, [

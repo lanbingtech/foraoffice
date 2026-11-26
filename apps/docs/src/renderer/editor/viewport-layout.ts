@@ -27,6 +27,7 @@ import {
 
 interface PositionedBlock extends ViewportModelBlock {
   box: LayoutBox
+  tableCellTypography?: string
   pictures?: PictureFragment[]
   hidden?: boolean
   tocLeaders?: readonly (number | null)[]
@@ -82,7 +83,85 @@ export interface ViewportLayout {
   reveal(
     position: number,
     height: number,
+    scope?: 'table-cell',
   ): { content: ViewportContent; reveal: ViewportReveal } | undefined
+}
+
+const cellTypography = [
+  'font-family',
+  'font-size',
+  'font-weight',
+  'font-style',
+  'line-height',
+  'letter-spacing',
+  'word-spacing',
+  'text-align',
+  'text-indent',
+  'text-transform',
+  'white-space',
+  'word-break',
+  'overflow-wrap',
+  'direction',
+  'color',
+  'padding-top',
+  'padding-right',
+  'padding-bottom',
+  'padding-left',
+]
+
+/** An active editor may edit a cell's paragraph without mounting its table.
+ * Only accept paragraphs whose complete text layout exists in the measured view. */
+function readTableCell(
+  view: EditorView,
+  document: PmNode,
+  position: number,
+  geometry: ViewportGeometry,
+  root: DOMRectReadOnly,
+  scale: number,
+): ViewportContent | undefined {
+  const caret = document.resolve(position)
+  if (caret.depth !== 4 || caret.parent.type.name !== 'docParagraph') return
+  const paragraphPosition = caret.before()
+  const element = view.nodeDOM(paragraphPosition)
+  if (
+    !(element instanceof HTMLElement) ||
+    element.tagName !== 'P' ||
+    !element.isConnected ||
+    element.closest('.cell-clip, td[data-cell-clip], th[data-cell-clip]') ||
+    element.querySelector('.page-gap, .page-gap-cut, .doc-page-br')
+  )
+    return
+  const cell = caret.node(3)
+  if (cell.attrs.gridGap || cell.attrs.mergeGap) return
+  const style = getComputedStyle(element)
+  if (style.writingMode !== 'horizontal-tb' || style.visibility !== 'visible') return
+  const box = boxInCanvas(element.getBoundingClientRect(), root, scale)
+  if (!(box.width > 0) || !(box.height > 0)) return
+  const block: PositionedBlock = {
+    from: caret.before(1),
+    to: caret.after(1),
+    box,
+    tableCellText: {
+      position: paragraphPosition,
+      from: caret.start(),
+      to: caret.end(),
+    },
+    tableCellTypography: cellTypography
+      .map((property) => `${property}:${style.getPropertyValue(property)}`)
+      .join(';'),
+  }
+  const editing = createViewportEditing(document, [block])
+  if (!editing) return
+  return {
+    canvas: geometry.canvas,
+    blocks: [block],
+    decorations: viewDecorationWindow(geometry.decorations ?? [], paragraphPosition, caret.after()),
+    model: {
+      document: editing.doc.toJSON() as DocumentJson,
+      from: editing.sourceRange.from,
+      to: editing.sourceRange.to,
+    },
+  }
 }
 
 /** A hidden model atom can sit between visible blocks but have no ink in the
@@ -340,7 +419,7 @@ export function viewportLayout(
       if (!live()) return
       return viewportContent((geometry ??= measure()), viewport, document)
     },
-    reveal(position, height) {
+    reveal(position, height, scope) {
       if (
         !live() ||
         !Number.isSafeInteger(position) ||
@@ -352,17 +431,21 @@ export function viewportLayout(
         return
       const measured = (geometry ??= measure())
       let caretTop: number
+      const root = view.dom.getBoundingClientRect()
+      const scale = view.dom.currentCSSZoom || 1
       try {
-        const root = view.dom.getBoundingClientRect()
-        caretTop = (view.coordsAtPos(position).top - root.top) / (view.dom.currentCSSZoom || 1)
+        caretTop = (view.coordsAtPos(position).top - root.top) / scale
       } catch {
         return
       }
       if (!Number.isFinite(caretTop) || caretTop < 0 || caretTop > measured.canvas.height) return
       const maxTop = Math.max(0, measured.canvas.height - height)
       const top = Math.min(maxTop, Math.max(0, caretTop - height * 0.3))
-      const content = viewportContent(measured, { top, bottom: top + height }, document)
-      if (!content.model || position < content.model.from || position > content.model.to) return
+      const content =
+        scope === 'table-cell'
+          ? readTableCell(view, document, position, measured, root, scale)
+          : viewportContent(measured, { top, bottom: top + height }, document)
+      if (!content?.model || position < content.model.from || position > content.model.to) return
       return { content, reveal: { position, top } }
     },
   }

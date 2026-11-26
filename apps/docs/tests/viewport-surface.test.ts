@@ -32,6 +32,9 @@ const schema = new Schema({
   marks: { inserted: { toDOM: () => ['ins', 0] } },
   nodes: {
     doc: { content: 'block+' },
+    docTable: { group: 'block', content: 'docTableRow+', toDOM: () => ['table', ['tbody', 0]] },
+    docTableRow: { content: 'docTableCell+', toDOM: () => ['tr', 0] },
+    docTableCell: { content: 'docParagraph+', toDOM: () => ['td', 0] },
     docParagraph: {
       group: 'block',
       content: 'inline*',
@@ -120,6 +123,76 @@ function fixture(isEditable = true, plugins: Plugin[] = []) {
 function placed(blocks: ViewportContent['blocks']): ViewportContent {
   return { canvas, blocks }
 }
+
+it('uses the authored table caret for clicks, deletion, and continued input in a projected cell', () => {
+  const lead = paragraph('lead')
+  const original = paragraph('A')
+  const table = schema.node(
+    'docTable',
+    null,
+    schema.node('docTableRow', null, schema.node('docTableCell', null, original)),
+  )
+  const doc = schema.node('doc', null, [lead, table])
+  const position = lead.nodeSize + 3
+  let state = EditorState.create({ doc, plugins: [history()] })
+  let revision = 0
+  const mount = document.createElement('div')
+  document.body.append(mount)
+  const surface = createViewportSurface(mount, {
+    readSource: () => ({ state, revision }),
+    dispatch(transaction) {
+      const accepted = state.applyTransaction(transaction)
+      state = accepted.state
+      if (transaction.docChanged) revision++
+      return accepted.transactions
+    },
+    requestRange: vi.fn(),
+  })
+  mounted.push(surface)
+
+  function publish() {
+    const para = state.doc.nodeAt(position)!
+    const content: ViewportContent = {
+      canvas,
+      blocks: [
+        {
+          from: lead.nodeSize,
+          to: state.doc.content.size,
+          tableCellText: { position, from: position + 1, to: position + para.nodeSize - 1 },
+          box: box(5, 400),
+        },
+      ],
+      decorations: [
+        {
+          from: position,
+          to: position + para.nodeSize,
+          through: position + para.nodeSize,
+          inline: false,
+          attrs: { class: 'has-tab-stops' },
+        },
+      ],
+    }
+    expect(surface.publish({ content, revision, publication: revision + 1, sequence: 0 })).toBe(
+      'applied',
+    )
+  }
+  publish()
+  const view = surface.view!
+  expect(view.dom.querySelector('p')?.classList.contains('has-tab-stops')).toBe(true)
+  vi.spyOn(view, 'posAtCoords').mockReturnValue({ pos: 1, inside: 0 })
+  view.dom.querySelector('p')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+  expect(state.selection.from).toBe(position + 1)
+  view.dispatch(view.state.tr.delete(1, 2))
+  expect(state.doc.nodeAt(position)?.textContent).toBe('')
+  publish()
+  expect(view.state.selection.from).toBe(1)
+  view.dispatch(view.state.tr.insertText('甲'))
+  view.dispatch(view.state.tr.insertText('乙'))
+  expect(view.state.doc.textContent).toBe('甲乙')
+  expect(state.doc.nodeAt(position)?.textContent).toBe('甲乙')
+  expect(state.doc.firstChild).toBe(lead)
+  expect(state.selection.from).toBe(position + 3)
+})
 
 it('paints the source transaction chain before accepting the next visible edit', () => {
   const appendSourceEdits = new Plugin({
