@@ -26,8 +26,9 @@ import { rangeSlot } from '../dom-range'
 import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
 import { DOC_CSS_COMMITTED_EVENT } from './cjk-punct-shrink'
 import { WRAP_WIDTHS_COMMITTED_EVENT, type WrapWidthChanges } from './column-layout'
-import { hasCoupledWrapGeometry } from './settled-measure'
-import { paragraphEditMeasurement } from './paged-view-probe'
+import { hasCoupledWrapGeometry, independentParagraphEdit } from './settled-measure'
+import { pagedViewProbe, paragraphEditMeasurement } from './paged-view-probe'
+import { appliedInlineEditIndex } from './pagination-fast-path'
 import { TopLevelPositions } from './top-level-pos'
 import { appendsAtEnd, touchedTopLevelBlocks } from './touched-blocks'
 import { blockDecorationPlugin, blockLocalDecorations } from './local-edit'
@@ -551,6 +552,7 @@ function tabDecorationsInRanges(
 }
 
 class TabLayoutView {
+  private completeMeasurement = false
   private lastMeasurement?: { blocks?: ReadonlySet<HTMLElement>; signature: string }
   private seenSigs = new Set<string>()
   private frozen = false
@@ -620,8 +622,13 @@ class TabLayoutView {
 
   update(view: EditorView, prevState: EditorState) {
     if (view.state.doc !== prevState.doc) {
+      const index =
+        this.completeMeasurement && !this.retryRaf && !pagedViewProbe(view)
+          ? appliedInlineEditIndex(prevState, view.state)
+          : null
+      const local = index === null ? undefined : independentParagraphEdit(view, index)
       this.invalidate()
-      this.measure()
+      this.measure(local && new Set([local.element]))
       return
     }
     if (
@@ -677,8 +684,12 @@ class TabLayoutView {
     }
     const { view } = this
     // a streamed tail is still landing: measured once, when it has (settled event)
-    if (isPhasedContentPending()) return
+    if (isPhasedContentPending()) {
+      this.completeMeasurement = false
+      return
+    }
     if (!view.dom.isConnected) {
+      this.completeMeasurement = false
       this.scheduleRetry(blocks)
       return
     }
@@ -694,6 +705,7 @@ class TabLayoutView {
       if (range) rootsByPosition.set(range.from, root)
     }
     const paras: Array<{ node: ProseMirrorNode; pos: number; el: HTMLElement | null }> = []
+    const tablessRanges: Array<{ from: number; to: number }> = []
     const addPara = (node: ProseMirrorNode, pos: number) => {
       if (!node.isTextblock) return true
       let hasTab = paraHasTabCache.get(node)
@@ -704,6 +716,8 @@ class TabLayoutView {
       if (hasTab) {
         const el = rootsByPosition.get(pos) ?? view.nodeDOM(pos)
         paras.push({ node, pos, el: el instanceof HTMLElement ? el : null })
+      } else if (roots) {
+        tablessRanges.push({ from: pos, to: pos + node.nodeSize })
       }
       return false
     }
@@ -753,13 +767,14 @@ class TabLayoutView {
       if (measuring.length > 0) observer?.start()
     }
 
-    if (retry && paraRanges.length === 0) {
+    if (!roots || retry) this.completeMeasurement = !retry
+    if (retry && paraRanges.length === 0 && tablessRanges.length === 0) {
       this.scheduleRetry(blocks)
       return
     }
     if (this.frozen) return
 
-    const signature = JSON.stringify([Boolean(roots), paraRanges, tabs])
+    const signature = JSON.stringify([Boolean(roots), paraRanges, tablessRanges, tabs])
     const recheck = () => {
       if (roots && retry) this.scheduleRetry(blocks)
       else this.retries = 0
@@ -792,7 +807,10 @@ class TabLayoutView {
       decos.push(Decoration.inline(t.pos, t.pos + 1, attrs, { ...attrs, wrap: t.wrap }))
     }
     const previous = roots
-      ? tabDecorationsInRanges(old, edit && !retry ? [edit] : paraRanges)
+      ? tabDecorationsInRanges(
+          old,
+          [...paraRanges, ...tablessRanges].sort((a, b) => a.from - b.from),
+        )
       : old.find().sort((a, b) => a.from - b.from)
     decos.sort((a, b) => a.from - b.from)
     if (
