@@ -136,6 +136,8 @@ it('uses the authored table caret for clicks, deletion, and continued input in a
   const position = lead.nodeSize + 3
   let state = EditorState.create({ doc, plugins: [history()] })
   let revision = 0
+  let reportAcceptedChain = true
+  const requestRange = vi.fn()
   const mount = document.createElement('div')
   document.body.append(mount)
   const surface = createViewportSurface(mount, {
@@ -144,9 +146,9 @@ it('uses the authored table caret for clicks, deletion, and continued input in a
       const accepted = state.applyTransaction(transaction)
       state = accepted.state
       if (transaction.docChanged) revision++
-      return accepted.transactions
+      return reportAcceptedChain ? accepted.transactions : undefined
     },
-    requestRange: vi.fn(),
+    requestRange,
   })
   mounted.push(surface)
 
@@ -192,6 +194,27 @@ it('uses the authored table caret for clicks, deletion, and continued input in a
   expect(state.doc.nodeAt(position)?.textContent).toBe('甲乙')
   expect(state.doc.firstChild).toBe(lead)
   expect(state.selection.from).toBe(position + 3)
+
+  view.dom.dispatchEvent(new InputEvent('beforeinput', { inputType: 'historyUndo' }))
+  expect(view.state.doc.textContent).toBe(state.doc.nodeAt(position)?.textContent)
+  expect(view.state.selection.from).toBe(state.selection.from - position)
+  expect(view.dom.querySelector('p')?.textContent).toBe('A')
+  expect(requestRange).toHaveBeenLastCalledWith({
+    reason: 'selection',
+    revision,
+    selection: state.selection,
+  })
+
+  reportAcceptedChain = false
+  view.dom.dispatchEvent(new InputEvent('beforeinput', { inputType: 'historyRedo' }))
+  expect(view.state.doc.textContent).toBe(state.doc.nodeAt(position)?.textContent)
+  expect(view.state.selection.from).toBe(state.selection.from - position)
+  expect(view.dom.querySelector('p')?.textContent).toBe('甲乙')
+  expect(requestRange).toHaveBeenLastCalledWith({
+    reason: 'selection',
+    revision,
+    selection: state.selection,
+  })
 })
 
 it('paints the source transaction chain before accepting the next visible edit', () => {

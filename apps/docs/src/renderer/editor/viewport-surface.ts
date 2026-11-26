@@ -357,6 +357,37 @@ export function createViewportSurface(
     return formatted?.length ? geometry.add(state.doc, [...formatted]) : geometry
   }
 
+  const showConfirmed = (
+    mounted: NonNullable<typeof current>,
+    confirmed: SourceState,
+    visible: Transaction,
+  ): boolean => {
+    if (current !== mounted || !view) return false
+    const editing = confirmedEditing(mounted.editing, visible, confirmed.state.doc)
+    const geometry = mounted.geometry.map(visible.mapping, editing.doc)
+    if (
+      visible.docChanged &&
+      !retainsPlacements(mounted.editing, editing, mounted.content, geometry)
+    )
+      return false
+    const selection = localSelection(confirmed.state.selection, editing)
+    current = {
+      ...mounted,
+      editing,
+      geometry,
+      parked: !selection,
+      source: confirmed.state,
+    }
+    view.updateState(
+      EditorState.create({
+        doc: editing.doc,
+        selection,
+        storedMarks: selection && !view.composing ? confirmed.state.storedMarks : null,
+      }),
+    )
+    return true
+  }
+
   const commit = (source: SourceState, transaction: Transaction, projected: Transaction) => {
     const mounted = current
     const applied = options.dispatch(projected)
@@ -390,33 +421,12 @@ export function createViewportSurface(
     )
       return request('geometry', confirmed)
 
-    // Reflect only confirmed changes from the owner in this view.
-    const editing = confirmedEditing(mounted.editing, visible, confirmed.state.doc)
-    const geometry = mounted.geometry.map(visible.mapping, editing.doc)
-    if (
-      visible.docChanged &&
-      !retainsPlacements(mounted.editing, editing, mounted.content, geometry)
-    ) {
+    if (!showConfirmed(mounted, confirmed, visible)) {
       // The owner has the edit. Keep the last measured window until a new
       // publication can place the resulting blocks rather than flowing them
       // at the canvas origin.
       request('geometry', confirmed)
-      return
     }
-    const selection = localSelection(confirmed.state.selection, editing)
-    current = {
-      ...mounted,
-      editing,
-      geometry,
-      parked: !selection,
-      source: confirmed.state,
-    }
-    const local = EditorState.create({
-      doc: editing.doc,
-      selection,
-      storedMarks: selection && !view.composing ? confirmed.state.storedMarks : null,
-    })
-    view.updateState(local)
   }
 
   const dispatchTransaction = (transaction: Transaction) => {
@@ -518,16 +528,39 @@ export function createViewportSurface(
   const applyHistory = (command: Command) => {
     if (!canRunHistory()) return
     const source = options.readSource()
+    const mounted = current
     // History belongs to the whole document and can target an unmounted page.
     command(source.state, (transaction) => {
-      options.dispatch(transaction)
+      const applied = options.dispatch(transaction)
       if (disposed) return
       const updated = options.readSource()
       if (
-        updated.state.doc !== source.state.doc ||
-        !updated.state.selection.eq(source.state.selection)
+        updated.state.doc === source.state.doc &&
+        updated.state.selection.eq(source.state.selection)
       )
-        request('selection', updated)
+        return
+      const accepted =
+        applied ?? (transaction.doc === updated.state.doc ? [transaction] : undefined)
+      if (
+        mounted &&
+        current === mounted &&
+        view &&
+        mounted.editing.source === source.state.doc &&
+        !retired(mounted.stamp) &&
+        accepted &&
+        accepted[0] === transaction &&
+        accepted.at(-1)?.doc === updated.state.doc
+      ) {
+        const visible = projectViewportFollowUps(
+          mounted.editing,
+          view.state,
+          view.state.tr,
+          accepted,
+        )
+        if (visible) showConfirmed(mounted, updated, visible)
+      }
+      // The caret can map to a mounted range that extends beyond the screen.
+      request('selection', updated)
     })
   }
 
