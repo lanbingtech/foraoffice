@@ -311,6 +311,16 @@ it('binds the current document for host-started MCP and reports scope revocation
     await vi.waitFor(() => expect(channel.complete).toHaveBeenCalled())
     const reply = JSON.parse(channel.complete.mock.calls[0][0])
     expect(reply.result).toMatchObject({ bindingId: 'host-grant', documentId: expect.any(String) })
+    editor.commands.setTextSelection({ from: 1, to: 3 })
+    const context = await commands.handle({
+      requestId: 'context',
+      callerId: 'external',
+      bindingId: 'host-grant',
+      command: 'read_document',
+      payload: {},
+    })
+    expect(context).toMatchObject({ selection: { text: 'Li' } })
+    expect(context).not.toHaveProperty('actionSelection')
     commands.releaseAll()
     expect(channel.request.mock.calls.map(([value]) => JSON.parse(value))).toContainEqual({
       jsonrpc: '2.0',

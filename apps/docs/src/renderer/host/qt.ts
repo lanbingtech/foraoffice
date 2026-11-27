@@ -174,7 +174,7 @@ export function createQtDocsHost(channel: DocsQtChannel) {
       try {
         if (!editor?.runtime || !editor.commands.bindScope)
           throw new Error('The live document runtime is not ready')
-        const scope = editor.runtime.capture()
+        const scope = editor.runtime.capture({ selection: 'live' })
         const { bindingId } = message.params
         try {
           editor.commands.bindScope(bindingId, scope, () => {

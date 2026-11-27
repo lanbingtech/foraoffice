@@ -16,7 +16,23 @@ export interface DocsImageReferenceIssue {
   reason: 'unbound' | 'malformed' | 'expired' | 'unsupported' | 'missing'
 }
 
-export interface DocsOperationResult extends ToolExecution {
+export interface DocsSelection {
+  kind: 'caret' | 'range'
+  /** ProseMirror document positions at the revision of the enclosing result. */
+  from: number
+  to: number
+  startBlockIndex: number
+  endBlockIndex: number
+  text: string
+  textTruncated?: true
+}
+
+export interface DocsSelectionContext {
+  selection?: DocsSelection
+  actionSelection?: DocsSelection
+}
+
+export interface DocsOperationResult extends ToolExecution, DocsSelectionContext {
   structurePlan?: import('./structure-plan').DocsStructurePlan
   receipt?: {
     outcome:

@@ -435,7 +435,7 @@ function createDocxContentTools(deps: DocToolDeps, host: SessionHost): McpToolDe
       name: 'read_document',
       discover,
       description:
-        "Read the current live document context and refresh this caller's editing baseline.",
+        "Read the current live document context and refresh this caller's editing baseline. The selection field contains the current caret position or selected text.",
       inputSchema: {
         document: z
           .string()

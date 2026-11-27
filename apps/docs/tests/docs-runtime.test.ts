@@ -1558,6 +1558,53 @@ describe('shared Docs runtime', () => {
     runtime.dispose()
   })
 
+  it('orders a live context read after a pending operation on the same MCP caller', async () => {
+    const editor = await documentWith('One Two')
+    const order: string[] = []
+    let markSaving!: () => void
+    let finishSave!: () => void
+    const saving = new Promise<void>((resolve) => {
+      markSaving = resolve
+    })
+    const release = new Promise<void>((resolve) => {
+      finishSave = resolve
+    })
+    const runtime = createDocsRuntime({
+      current: () => ({ editor, identity: editor, numIds: { bullet: null, ordered: null } }),
+      save: async () => {
+        markSaving()
+        await release
+        order.push('save')
+        return { ok: true, path: '/work/document.docx', committed: true, pending: false }
+      },
+    })
+    const commands = createDocsCommandRouter(runtime)
+    const save = commands.handle({
+      callerId: 'external',
+      requestId: 'save',
+      command: 'save_document',
+      payload: { path: '/work/document.docx' },
+    })
+    await saving
+    editor.commands.setTextSelection({ from: 5, to: 8 })
+    const read = commands
+      .handle({ callerId: 'external', requestId: 'read', command: 'read_document', payload: {} })
+      .then((context) => {
+        order.push('read')
+        return context
+      })
+    await Promise.resolve()
+    finishSave()
+    try {
+      await save
+      expect(await read).toMatchObject({ selection: { text: 'Two' } })
+      expect(order).toEqual(['save', 'read'])
+    } finally {
+      commands.dispose()
+      runtime.dispose()
+    }
+  })
+
   it('refuses a pending picture after a manual edit even when another caller reads the new content', async () => {
     const editor = await documentWith('Original')
     const runtime = createDocsRuntime({

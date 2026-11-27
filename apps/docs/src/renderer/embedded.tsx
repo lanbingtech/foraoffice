@@ -88,6 +88,7 @@ export type {
   DocsSaveResult,
   DocsSaveOutcome,
   DocsErrorCode,
+  DocsSelection,
 } from '../shared/operation-result'
 export type { DocsStructurePlan } from '../shared/structure-plan'
 export type { DocsRangePreconditions } from '../shared/edit-preconditions'

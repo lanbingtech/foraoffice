@@ -30,7 +30,7 @@ async function fixture() {
   runtime = createDocsRuntime({
     current: () => ({ editor: active, identity: active, numIds: { bullet: null, ordered: null } }),
   })
-  const scope = runtime.capture()
+  const scope = runtime.capture({ selection: 'live' })
   const router = createDocsCommandRouter(runtime)
   router.bindScope('document-grant', scope)
   service = await createDocsHttpMcpServer({
@@ -85,6 +85,33 @@ it('exposes standard HTTP MCP tools over the live unsaved document using returne
   expect(JSON.stringify(await client.callTool({ name: 'read_document' }))).toContain(
     'Manual addition',
   )
+})
+
+it('reads the live selection and caret on the same connection and uses the latest read for edits', async () => {
+  const { active, service } = await fixture()
+  active.commands.setTextSelection({ from: 1, to: 8 })
+  const { client } = await connect(service)
+  const first = await client.callTool({ name: 'get_document_context' })
+  expect(first.structuredContent).toMatchObject({
+    selection: { kind: 'range', from: 1, to: 8, text: 'Unsaved' },
+    output: expect.stringContaining('<sel>Unsaved</sel>'),
+  })
+  expect(first.structuredContent).not.toHaveProperty('actionSelection')
+
+  active.commands.setTextSelection(9)
+  expect((await client.callTool({ name: 'read_document' })).structuredContent).toMatchObject({
+    selection: { kind: 'caret', from: 9, to: 9, startBlockIndex: 0, text: '' },
+  })
+
+  active.commands.setTextSelection({ from: 9, to: 14 })
+  expect((await client.callTool({ name: 'read_document' })).structuredContent).toMatchObject({
+    selection: { kind: 'range', from: 9, to: 14, text: 'words' },
+    text: expect.stringContaining('<sel>words</sel>'),
+  })
+  active.commands.setTextSelection({ from: 1, to: 8 })
+  const edited = await client.callTool({ name: 'replace_selection', arguments: { html: 'edits' } })
+  expect(edited.structuredContent).toMatchObject({ committed: true })
+  expect(active.getText()).toBe('Unsaved edits')
 })
 
 it('authenticates HTTP access and keeps another caller usable after a client terminates its session', async () => {

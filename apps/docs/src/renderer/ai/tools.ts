@@ -25,7 +25,6 @@ import {
   SECTION_BREAK_TYPES,
   resolvePageSetup,
   sectionIndexOfBlock,
-  pageSetupContextLines,
   sectionLine,
   type AiPageSetupAccess,
   type SectionBreakType,
@@ -60,7 +59,7 @@ import {
 import {
   blockRangePositions,
   buildCommentsContext,
-  buildDocumentContext,
+  buildDocContext,
   buildRevisionsContext,
   insertBlocksAfter,
   inheritBlockFormatting,
@@ -873,10 +872,13 @@ function executeSyncTool(
       return {
         // the still-valid frozen scope keeps the reported selection consistent
         // with what scope:'selection' and cursor-relative inserts will act on
-        output: [
-          buildDocumentContext(editor, scope ?? undefined, hf?.read()),
-          ...(pageSetup ? pageSetupContextLines(pageSetup.list()) : []),
-        ].join('\n'),
+        output: buildDocContext(
+          editor,
+          scope ?? undefined,
+          undefined,
+          hf?.read(),
+          pageSetup?.list(),
+        ),
         mutated: false,
         summary: t('aiSumReadDocContext'),
       }
