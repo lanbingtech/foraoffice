@@ -187,13 +187,24 @@ and usage. Set `dryRun: true` to validate a batch against the current document
 without changing its contents, revision or undo history. Use `query_document`
 for fresh revision-bound targets and their editing restrictions.
 
-`get_document_context` retains the existing text in `output` and adds
+`get_document_context` returns readable document context in `output` and includes
 `editable` and, when available and authorized, `resourceContext` alongside
 it. The latter includes indexes for granted attachments and knowledge files.
 The `editable` value reflects the caller's grant as well as the document
 state. A reference or review grant cannot use draft controls. A caller that
 started a draft under a write grant may still stop or discard its own draft
 if the editor becomes read-only.
+
+Both `get_document_context` and `read_document` return `selection` in the MCP
+result. It contains `kind` (`caret` or `range`), `from` and `to` in ProseMirror
+document positions, zero-based `startBlockIndex` and `endBlockIndex`, and the
+projected `text`. A caret has equal endpoints and empty text. When text exceeds
+the response limit the result includes `textTruncated: true`.
+
+For an Ask AI action, `actionSelection` contains its captured editing target,
+and the text context describes that target. `selection` still reports the
+current editor selection. For a live document connection, either full-context
+read also sets the caller's target for subsequent selection-relative edits.
 
 When upgrading from an SDK that exposed `get_editor_capabilities`, switch
 discovery to `tools/list` and remove calls to the former tool.
@@ -734,8 +745,9 @@ credentials and needs no model. The host supplies any external client's own
 configuration format and conversation lifecycle.
 
 Node hosts can reuse `createDocsHttpMcpServer({ version, endpoint, bindingId,
-documentId, releaseScope, readOnly? })` from `@foraoffice/docs-sdk/services`. Bind a captured
-runtime scope before creating the service; release/close the service on document
+documentId, releaseScope, readOnly? })` from `@foraoffice/docs-sdk/services`. Use
+`runtime.capture({ selection: 'live' })` for a document connection and bind that
+scope before creating the service. Release/close the service on document
 replacement and host disposal. `service.connection` has the same connection
 shape; `service.close()` is idempotent. The existing `/docs` command bridge is
 private host IPC and is never the HTTP MCP URL.

@@ -36,6 +36,7 @@ import {
 import { modelTextOf, projectedNodeText, redactNode, type RedactableNode } from './redact-view'
 import { opSignatures } from './ops'
 import { pageSetupContextLines, type AiSectionState } from './page-setup'
+import type { DocsSelection } from '../../shared/operation-result'
 import { listRevisionEntries } from './revision-ops'
 import type { StoryRevision } from '../editor/story-revisions'
 
@@ -194,8 +195,8 @@ export interface SelectionScope {
   /** true when the user has an actual range selected (not just a caret) */
   isRange: boolean
   /** exact ProseMirror positions; run-level commands narrow to them when the range is partial */
-  from?: number
-  to?: number
+  from: number
+  to: number
 }
 
 export function getSelectionScope(
@@ -226,15 +227,29 @@ export function getSelectionScope(
   return { startIndex, endIndex, isRange: !empty, from, to }
 }
 
+export function describeSelection(editor: Editor, scope: SelectionScope): DocsSelection {
+  const { from, to, startIndex, endIndex, isRange } = scope
+  const text = isRange ? liveTextBetween(editor, from, to) : ''
+  return {
+    kind: isRange ? 'range' : 'caret',
+    from,
+    to,
+    startBlockIndex: startIndex,
+    endBlockIndex: endIndex,
+    text: clip(text, SELECTION_MAX_CHARS),
+    ...(text.length > SELECTION_MAX_CHARS && { textTruncated: true }),
+  }
+}
+
 /**
  * The character-precise part of a range selection, clamped to its block range;
- * null when the selection covers the blocks whole (or carries no positions).
+ * null when the selection covers the blocks whole.
  */
 export function partialSelection(
   editor: Editor,
   scope: SelectionScope,
 ): { from: number; to: number } | null {
-  if (!scope.isRange || scope.from === undefined || scope.to === undefined) return null
+  if (!scope.isRange) return null
   const doc = editor.state.doc
   if (scope.startIndex < 0 || scope.endIndex >= doc.childCount) return null
   const { from, to } = blockRangePositions(editor, scope.startIndex, scope.endIndex)

@@ -296,6 +296,10 @@ it('edits the captured live document from the packaged stdio MCP process', async
     }),
   )
   await expectStandardToolDiscovery(client)
+  expect((await client.callTool({ name: 'read_document' })).structuredContent).toMatchObject({
+    selection: { text: 'Two' },
+    actionSelection: { text: 'One' },
+  })
   const changed = await client.callTool({ name: 'replace_selection', arguments: { html: 'New' } })
   expect(changed.isError).not.toBe(true)
   expect(active.getText()).toBe('New Two')
@@ -331,7 +335,14 @@ it('exposes a host-bound document over a standard SDK transport with no Electron
   client = new Client({ name: 'ordinary-harness', version: '1' }, { capabilities: {} })
   await client.connect(clientTransport)
   await expectStandardToolDiscovery(client)
-  expect((await client.callTool({ name: 'read_document' })).isError).not.toBe(true)
+  for (const name of ['get_document_context', 'read_document']) {
+    const response = await client.callTool({ name })
+    expect(response.isError).not.toBe(true)
+    expect(response.structuredContent).toMatchObject({
+      selection: { kind: 'range', from: 5, to: 8, text: 'Two' },
+      actionSelection: { kind: 'range', from: 1, to: 4, text: 'One' },
+    })
+  }
   const result = await client.callTool({ name: 'replace_selection', arguments: { html: 'New' } })
   expect(result.structuredContent).toMatchObject({ committed: true })
   expect(active.getText()).toBe('New Two')

@@ -42,7 +42,7 @@ export function createDocsMcpServer(options: DocsMcpServerOptions): McpServer {
     {
       name: 'read_document',
       description:
-        "Read authorized live unsaved content and refresh this caller's context without retargeting a captured selection.",
+        "Read authorized live unsaved content and refresh this caller's context. Read the current caret or selected text from selection. If actionSelection is present, it identifies the captured target for this action's edits.",
       inputSchema: { type: 'object', properties: {} },
     },
     {

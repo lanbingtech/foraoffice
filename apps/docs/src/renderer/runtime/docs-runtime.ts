@@ -7,12 +7,14 @@ import type { AgentToolCall, ToolExecution } from '@genoffice/agent-core'
 import { ResourceAccessError } from '@genoffice/agent-core/resource-tools'
 import {
   buildDocContext,
+  describeSelection,
   getSelectionScope,
   parseHtmlFragment,
   parseInlineFragment,
   resolveImageRefs,
   type AiTrack,
   type NumIds,
+  type SelectionScope,
 } from '../ai/protocol'
 import { executeOps } from '../ai/ops'
 import type { DocsEngineTarget } from '../../shared/document-query'
@@ -44,6 +46,7 @@ import type {
   DocsOperationResult,
   DocsSaveOutcome,
   DocsSaveResult,
+  DocsSelectionContext,
 } from '../../shared/operation-result'
 import {
   readDocumentMedia,
@@ -134,6 +137,8 @@ function authoredStoreUnavailable(name: string, doc: RuntimeDocument | null) {
 
 export interface RuntimeCaller {
   id: string
+  /** Return the current selection separately from a captured edit target on full context reads. */
+  readLiveSelection?: boolean
   /** Keep the provider instance stable until its authority is replaced or revoked. */
   resources?: () => DocsResourceTools | undefined
 }
@@ -147,14 +152,17 @@ export interface DocsRuntimeBindings {
   resources?(): DocsResourceTools | undefined
 }
 
+type DocsRuntimeContext = DocsSelectionContext & {
+  documentId: string
+  revision: number
+  file?: DocsRuntimeFileState
+  text: string
+}
+
 export interface DocsRuntimeClient {
   readonly signal: AbortSignal
-  context(options?: { captureSelection?: boolean }): {
-    documentId: string
-    revision: number
-    file?: DocsRuntimeFileState
-    text: string
-  }
+  context(options?: { captureSelection?: boolean }): DocsRuntimeContext
+  readContext(signal?: AbortSignal): Promise<DocsRuntimeContext>
   availableTools(): string[]
   checkEditable(
     signal?: AbortSignal,
@@ -168,7 +176,7 @@ export interface DocsRuntimeClient {
 export interface DocsRuntime {
   connect(caller: RuntimeCaller): DocsRuntimeClient
   availableTools(): string[]
-  capture(): DocsRuntimeScope
+  capture(options?: { selection?: 'captured' | 'live' }): DocsRuntimeScope
   dispose(): void
 }
 
@@ -187,6 +195,7 @@ interface ClientSeed {
   seen?: ProseMirrorNode
   seenState?: unknown
   frozen: FrozenSelection | null
+  capturedSelection: boolean
   editor?: Editor
 }
 
@@ -196,7 +205,7 @@ interface InternalClient extends DocsRuntimeClient {
     signal?: AbortSignal,
     nativeCli?: boolean,
   ): Promise<DocsOperationResult>
-  fork(caller: RuntimeCaller): InternalClient
+  fork(caller: RuntimeCaller, capturedSelection: boolean): InternalClient
 }
 
 const failure = (
@@ -330,6 +339,7 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
     let revisionsSeen = seed?.seen
     let revisionState = seed?.seenState
     let frozen = seed?.frozen ?? null
+    const capturedSelection = seed?.capturedSelection === true
     let observedEditor = seed?.editor
     let releaseCarry: (() => void) | undefined
     const carryRead: Parameters<typeof onDocSeenCarry>[1] = (before, after, savedSideState) => {
@@ -426,8 +436,8 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
       )
         carryRead(transaction.before, transaction.doc)
       if (!transaction.docChanged || !frozen || !observedEditor) return
-      const from = transaction.mapping.map(frozen.scope.from!, -1)
-      const to = Math.max(from, transaction.mapping.map(frozen.scope.to!, 1))
+      const from = transaction.mapping.map(frozen.scope.from, -1)
+      const to = Math.max(from, transaction.mapping.map(frozen.scope.to, 1))
       frozen = {
         doc: observedEditor.state.doc,
         scope: getSelectionScope(observedEditor, { from, to, empty: from === to }),
@@ -435,16 +445,24 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
     }
     observedEditor?.on('transaction', mapScope)
     if (observedEditor) releaseCarry = onDocSeenCarry(observedEditor, carryRead)
+    const selectionContext = (editor: Editor, scope: SelectionScope): DocsSelectionContext => ({
+      selection: describeSelection(editor, scope),
+      ...(capturedSelection &&
+        frozen && {
+          actionSelection: describeSelection(editor, frozen.scope),
+        }),
+    })
     const client: InternalClient = {
       signal: lifetime.signal,
-      fork(nextCaller) {
+      fork(nextCaller, captureSelection) {
         if (closed || disposed || current().identity !== boundIdentity)
           throw new Error('The captured document binding is no longer valid')
         return connect(nextCaller, {
           identity: boundIdentity,
           seen,
           seenState,
-          frozen,
+          frozen: captureSelection ? frozen : null,
+          capturedSelection: captureSelection,
           editor: observedEditor,
         })
       },
@@ -491,12 +509,15 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
         }
         revisionsSeen = seen = doc.editor.state.doc
         revisionState = seenState = doc.stateVersion
-        if (options?.captureSelection !== false || !frozen)
-          frozen = { scope: getSelectionScope(doc.editor), doc: seen }
+        const liveScope = caller.readLiveSelection ? getSelectionScope(doc.editor) : undefined
+        const captureSelection = options?.captureSelection ?? !(liveScope && capturedSelection)
+        if (captureSelection || !frozen)
+          frozen = { scope: liveScope ?? getSelectionScope(doc.editor), doc: seen }
         markDocSeen(doc.editor)
         return {
           documentId,
           revision: documentState.revision,
+          ...(liveScope && selectionContext(doc.editor, liveScope)),
           ...(doc.file ? { file: doc.file } : {}),
           text:
             bindDocumentImageHtml(
@@ -511,6 +532,15 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
               documentState.revision,
             ) + documentMediaReferences(doc.editor, documentId, documentState.revision),
         }
+      },
+      readContext(signal) {
+        // A context read can set the caller's edit target. Order it with the tools using that target.
+        const read = boundState.queue.then(() => {
+          signal?.throwIfAborted()
+          return client.context()
+        })
+        boundState.queue = read.catch(() => undefined)
+        return read
       },
       execute(call, signal, nativeCli = false) {
         const operationSignal = signal
@@ -906,6 +936,14 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
           }
           const reviewsRevisions = call.name === 'accept_changes' || call.name === 'reject_changes'
           const readsBlocks = call.name === 'get_document_context' || call.name === 'read_blocks'
+          const liveScope =
+            call.name === 'get_document_context' && caller.readLiveSelection
+              ? getSelectionScope(doc.editor)
+              : undefined
+          const contextScope =
+            liveScope && !capturedSelection
+              ? { scope: liveScope, doc: doc.editor.state.doc }
+              : frozen
           const blocksWereCurrent = seen === doc.editor.state.doc
           const revisionsWereCurrent = revisionsSeen === doc.editor.state.doc
           const stateWasCurrent = seenState === doc.stateVersion
@@ -1111,7 +1149,7 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
                         doc.numIds,
                         doc.track,
                         operationSignal,
-                        frozen,
+                        contextScope,
                         doc.comments,
                         doc.headerFooter,
                         doc.pageSetup,
@@ -1166,7 +1204,12 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
                 boundState.documentId,
                 boundState.revision,
               )
-              result = { ...result, editable: doc.editor.isEditable }
+              if (liveScope && !capturedSelection) frozen = contextScope
+              result = {
+                ...result,
+                editable: doc.editor.isEditable,
+                ...(liveScope && selectionContext(doc.editor, liveScope)),
+              }
             }
             if (call.name === 'get_document_context' && doc.file)
               result.output =
@@ -1383,7 +1426,7 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
         ? []
         : listTools(doc, bindings.resources?.())
     },
-    capture() {
+    capture(options) {
       const seed = connect({ id: crypto.randomUUID() })
       const context = seed.context()
       const scopedClients = new Set<DocsRuntimeClient>()
@@ -1392,7 +1435,7 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
         signal: seed.signal,
         availableTools: seed.availableTools,
         connect(caller) {
-          const client = seed.fork(caller)
+          const client = seed.fork(caller, options?.selection !== 'live')
           scopedClients.add(client)
           return client
         },

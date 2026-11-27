@@ -95,6 +95,7 @@ export function createDocsCommandRouter(runtime: DocsRuntime): DocsCommands {
           return runtime.availableTools()
         }
         if (!client) {
+          const caller = { id: callerId, readLiveSelection: true }
           if (message.bindingId) {
             const scope = scopes.get(message.bindingId)
             if (!scope) {
@@ -110,14 +111,14 @@ export function createDocsCommandRouter(runtime: DocsRuntime): DocsCommands {
                 revision: 0,
               })
             }
-            client = scope.connect({ id: callerId })
+            client = scope.connect(caller)
           } else {
-            client = runtime.connect({ id: callerId })
+            client = runtime.connect(caller)
             client.context()
           }
           callers.set(key, { callerId, bindingId: message.bindingId, client })
         }
-        if (message.command === 'read_document') return client.context({ captureSelection: false })
+        if (message.command === 'read_document') return await client.readContext(operationSignal)
         if (message.command === 'save_document') {
           const input = message.payload as { path?: unknown; overwrite?: unknown } | null
           if (!input || typeof input.path !== 'string' || !input.path)

@@ -273,7 +273,12 @@ test('the embedded public editor edits, undoes, saves and reopens Word with its 
         throw new Error(`${name} returned invalid operation metadata`)
       return result.output
     }
-    expect(JSON.stringify((await tool('read_document', {})).content)).toContain('Manual Word text')
+    const context = await tool('read_document', {})
+    expect(JSON.stringify(context.content)).toContain('Manual Word text')
+    expect(context.structuredContent).toMatchObject({
+      selection: { kind: 'caret', text: '' },
+      actionSelection: { kind: 'range', text: 'Manual' },
+    })
     const queried = JSON.parse(
       await toolOutput('query_document', {
         domain: 'body',

@@ -42,5 +42,6 @@ export type {
   DocsSaveResult,
   DocsSaveOutcome,
   DocsErrorCode,
+  DocsSelection,
 } from '../shared/operation-result'
 export type { McpCommandMessage, McpCommandResult } from '../shared/ipc'
