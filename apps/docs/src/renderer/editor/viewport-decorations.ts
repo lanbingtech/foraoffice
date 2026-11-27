@@ -102,7 +102,16 @@ export function projectViewportDecorations(
   const clipped = new Map<number, { to: number; localFrom: number; localTo: number }>()
   editing.doc.forEach((node, localFrom, index) => {
     const block = blocks[index]
-    if (block.pictures)
+    const cell = block.tableCellText
+    if (cell) {
+      const paragraph = editing.source.nodeAt(cell.position)
+      if (paragraph)
+        clipped.set(cell.position, {
+          to: cell.position + paragraph.nodeSize,
+          localFrom,
+          localTo: localFrom + node.nodeSize,
+        })
+    } else if (block.pictures)
       clipped.set(block.from, { to: block.to, localFrom, localTo: localFrom + node.nodeSize })
   })
   for (const span of decorations) {

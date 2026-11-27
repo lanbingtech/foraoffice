@@ -36,6 +36,8 @@ import {
   computeSectionedSlicesF2,
   keepDemandLines,
   planRowSplit,
+  rowSplitFragmentsOf,
+  sliceWithLineSplit,
   cellLinesOf,
   rowSplitCss,
   effectiveHfRefs,
@@ -5591,6 +5593,82 @@ describe('computeSectionedSlicesF2 — multi-cell rows split per cell (Word row 
   })
   const page = [{ contentHeight: 200, forceBreak: false }]
 
+  it('ties a forced in-row split to the exact two columns of one sheet', () => {
+    const out: SliceOutputs = { rowSplits: [] }
+    const row = {
+      height: 100,
+      contentBottom: 100,
+      forcedCuts: [60],
+      cells: [
+        { ...linesOf(5, 20, 5), alignDy: 0, alignFrac: 0 },
+        { ...linesOf(1, 20, 1), alignDy: 0, alignFrac: 0 },
+        { ...linesOf(0, 20, 1), alignDy: 0, alignFrac: 0 },
+      ],
+    }
+    const slices = computeSectionedSlicesF2(
+      [makeTableBlock(0, [row])],
+      [{ ...page[0], cols: 2 }],
+      100,
+      out,
+    )
+    expect(slices).toHaveLength(1)
+    const columns = slices[0].regions![0].columns
+    expect(columns).toEqual([
+      { start: 0, end: 60 },
+      { start: 60, end: 100 },
+    ])
+    const fragments = rowSplitFragmentsOf(out.rowSplits![0])
+    expect(fragments?.map(({ from, to, cells }) => [from, to, ...cells])).toEqual([
+      [0, 60, [0, 3], [0, 1], [0, 0]],
+      [60, 100, [3, 5], [1, 1], [0, 0]],
+    ])
+    expect(fragments?.[0].window).toBe(columns[0])
+    expect(fragments?.[1].window).toBe(columns[1])
+  })
+
+  it('retains carried row splits on their exact sheets after parity insertion and a resumed pass', () => {
+    const blocks = [
+      block(0, 50),
+      {
+        ...makeTableBlock(50, [
+          {
+            height: 100,
+            contentBottom: 100,
+            forcedCuts: [60],
+            cells: [
+              { ...linesOf(5, 20, 5), alignDy: 0, alignFrac: 0 },
+              { ...linesOf(1, 20, 1), alignDy: 0, alignFrac: 0 },
+            ],
+          },
+        ]),
+        section: 1,
+      },
+      block(150, 50, { section: 1, breakBefore: true }),
+    ]
+    const geoms: SectionGeom[] = [page[0], { ...page[0], forceBreak: true, startType: 'oddPage' }]
+    const previous: SliceOutputs = { rowSplits: [] }
+    const slices = sliceWithLineSplit(blocks, geoms, 200, 1, undefined, previous)
+    expect(slices.map(({ start, end }) => [start, end])).toEqual([
+      [0, 50],
+      [50, 50],
+      [50, 110],
+      [110, 150],
+      [150, 200],
+    ])
+    const resumed: SliceOutputs = { rowSplits: [] }
+    const next = sliceWithLineSplit(blocks, geoms, 200, 1, undefined, resumed, {
+      prevSlices: previous.preParity!,
+      prevOut: previous,
+      page: 3,
+      block: 2,
+    })
+    expect(next).toEqual(slices)
+    expect(resumed.rowSplits![0]).toBe(previous.rowSplits![0])
+    const fragments = rowSplitFragmentsOf(resumed.rowSplits![0])
+    expect(fragments?.[0].window).toBe(next[2])
+    expect(fragments?.[1].window).toBe(next[3])
+  })
+
   it('the first fragment fills the page and each cell breaks at its own line boundary', () => {
     // page 200; a 40px row leaves 160. Cell 0: 15 lines x 20px in 3 paragraphs
     // (8 lines fit, the cut leaves 3+2 lines of paragraph 2). Cell 1: 4 lines x
@@ -5631,6 +5709,13 @@ describe('computeSectionedSlicesF2 — multi-cell rows split per cell (Word row 
         ],
       },
     ])
+    const fragments = rowSplitFragmentsOf(out.rowSplits![0])
+    expect(fragments?.map(({ from, to, cells }) => [from, to, ...cells])).toEqual([
+      [40, 200, [0, 8], [0, 2]],
+      [200, 340, [8, 15], [2, 4]],
+    ])
+    expect(fragments?.[0].window).toBe(slices[0])
+    expect(fragments?.[1].window).toBe(slices[1])
   })
 
   it('a centered cell that fits the first fragment whole is centered within the fragment', () => {
@@ -5770,6 +5855,11 @@ describe('computeSectionedSlicesF2 — multi-cell rows split per cell (Word row 
     expect(plan).toEqual({
       lastFragment: 40,
       target: 120,
+      fragments: [
+        { from: 0, to: 60, cells: [[0, 3]] },
+        { from: 60, to: 80, cells: [[3, 3]] },
+        { from: 80, to: 120, cells: [[3, 5]] },
+      ],
       rules: [
         { from: 0, cell: 0, child: 0, clipBottom: 40 },
         { from: 0, cell: 0, child: 1, tail: true, hide: true },
@@ -6006,6 +6096,7 @@ describe('computeSectionedSlicesF2 — multi-cell rows split per cell (Word row 
       lastFragment: 90,
       target: 90,
       rules: [],
+      fragments: [],
     })
   })
 

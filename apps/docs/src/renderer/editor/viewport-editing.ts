@@ -1,4 +1,4 @@
-import type { Node as PmNode } from '@tiptap/pm/model'
+import { Fragment, type Node as PmNode } from '@tiptap/pm/model'
 import { AllSelection, type EditorState, type Selection, type Transaction } from '@tiptap/pm/state'
 import {
   AddMarkStep,
@@ -20,6 +20,9 @@ interface ModelRange {
 
 export interface ViewportModelBlock extends ModelRange {
   readonly pictures?: readonly ModelRange[]
+  readonly paragraph?: ModelRange
+  /** The active text within a cell. The outer range identifies the authored table. */
+  readonly tableCellText?: ModelRange & { readonly position: number }
 }
 
 export interface EditingViewport {
@@ -27,8 +30,74 @@ export interface EditingViewport {
   readonly doc: PmNode
   readonly sourceRange: ModelRange
   readonly localRange: ModelRange
+  readonly cellTextblock?: number
   toSource(position: number): number | undefined
   toLocal(position: number): number | undefined
+}
+
+function tableCellEditing(source: PmNode, block: ViewportModelBlock): EditingViewport | undefined {
+  const range = block.tableCellText
+  if (
+    !range ||
+    block.pictures ||
+    block.paragraph ||
+    !Number.isInteger(range.position) ||
+    range.position < 0 ||
+    range.position <= block.from ||
+    range.position >= source.content.size
+  )
+    return
+  const position = source.resolve(range.position)
+  const paragraph = position.nodeAfter
+  if (
+    position.depth !== 3 ||
+    position.node(1).type.name !== 'docTable' ||
+    position.before(1) !== block.from ||
+    position.after(1) !== block.to ||
+    position.node(2).type.name !== 'docTableRow' ||
+    !['docTableCell', 'docTableHeader'].includes(position.parent.type.name) ||
+    position.parent.attrs.gridGap ||
+    position.parent.attrs.mergeGap ||
+    paragraph?.type.name !== 'docParagraph' ||
+    !contains(
+      { from: range.position + 1, to: range.position + paragraph.nodeSize - 1 },
+      range.from,
+    ) ||
+    !contains({ from: range.from, to: range.position + paragraph.nodeSize - 1 }, range.to) ||
+    (range.from === range.to && paragraph.content.size > 0)
+  )
+    return
+
+  const content = Fragment.from(
+    paragraph.cut(range.from - range.position - 1, range.to - range.position - 1),
+  )
+  if (!source.type.validContent(content)) return
+  const doc = source.copy(content)
+  const sourceRange = { from: range.from, to: range.to }
+  const localRange = { from: 1, to: doc.content.size - 1 }
+  const offset = sourceRange.from - localRange.from
+  return {
+    source,
+    doc,
+    sourceRange,
+    localRange,
+    cellTextblock: range.position,
+    toSource: (position) => (contains(localRange, position) ? position + offset : undefined),
+    toLocal: (position) => (contains(sourceRange, position) ? position - offset : undefined),
+  }
+}
+
+function representedContent(viewport: EditingViewport, document: PmNode, from: number, to: number) {
+  const position = viewport.cellTextblock
+  if (position === undefined) return document.slice(from, to, true).content
+  const paragraph = document.nodeAt(position)
+  if (
+    paragraph?.type.name !== 'docParagraph' ||
+    from < position + 1 ||
+    to > position + paragraph.nodeSize - 1
+  )
+    return
+  return Fragment.from(paragraph.cut(from - position - 1, to - position - 1))
 }
 
 function pictureRange(block: ViewportModelBlock, paragraph: PmNode): ModelRange | undefined {
@@ -50,12 +119,12 @@ function pictureRange(block: ViewportModelBlock, paragraph: PmNode): ModelRange 
   if (selected === pictures.length) return { from: pictures[0].from, to: pictures[selected - 1].to }
 }
 
-/** The represented range is contiguous. A clipped paragraph can contribute
- * its visible pictures at either outer edge; a missing interior cannot. */
+/** A clipped paragraph can contribute either outer edge of the contiguous range. */
 export function createViewportEditing(
   source: PmNode,
   blocks: readonly ViewportModelBlock[],
 ): EditingViewport | undefined {
+  if (blocks.length === 1 && blocks[0].tableCellText) return tableCellEditing(source, blocks[0])
   const first = blocks[0]?.from
   if (first === undefined || !Number.isInteger(first) || first < 0 || first >= source.content.size)
     return
@@ -66,20 +135,33 @@ export function createViewportEditing(
   let to = first
   for (let index = 0; index < blocks.length; index++) {
     const block = blocks[index]
+    if (block.tableCellText) return
     const node = source.maybeChild(start.index() + index)
     if (!node || block.from !== position || block.to !== position + node.nodeSize) return
     position = block.to
     to = position
-    if (!block.pictures) continue
-    const pictures = pictureRange(block, node)
-    if (!pictures) return
-    if (pictures.from > block.from + 1) {
+    const { pictures, paragraph } = block
+    if (!pictures && !paragraph) continue
+    if (pictures && paragraph) return
+    const clip = pictures ? pictureRange(block, node) : paragraph
+    if (
+      !clip ||
+      !Number.isInteger(clip.from) ||
+      !Number.isInteger(clip.to) ||
+      clip.from < block.from + 1 ||
+      clip.to > block.to - 1 ||
+      clip.from >= clip.to ||
+      (paragraph &&
+        (node.type.name !== 'docParagraph' || !node.firstChild?.isText || node.childCount !== 1))
+    )
+      return
+    if (clip.from > block.from + 1) {
       if (index !== 0) return
-      from = pictures.from
+      from = clip.from
     }
-    if (pictures.to < block.to - 1) {
+    if (clip.to < block.to - 1) {
       if (index !== blocks.length - 1) return
-      to = pictures.to
+      to = clip.to
     }
   }
   const slice = source.slice(from, to, true)
@@ -193,7 +275,7 @@ export function projectViewportTransaction(
   if (representedTo > result.doc.content.size) return
   if (
     local.docChanged &&
-    !result.doc.slice(representedFrom, representedTo, true).content.eq(local.doc.content)
+    !representedContent(viewport, result.doc, representedFrom, representedTo)?.eq(local.doc.content)
   )
     return
 
@@ -243,7 +325,10 @@ export function projectViewportFollowUps(
     }
   }
   const to = offset + result.doc.content.size - clippedEnd
-  if (to > last.doc.content.size || !last.doc.slice(from, to, true).content.eq(result.doc.content))
+  if (
+    to > last.doc.content.size ||
+    !representedContent(viewport, last.doc, from, to)?.eq(result.doc.content)
+  )
     return
   return result
 }

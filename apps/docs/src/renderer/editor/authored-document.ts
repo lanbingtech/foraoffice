@@ -1,7 +1,9 @@
-import type { Editor } from '@tiptap/core'
+import { Editor, type EditorEvents, type Extensions } from '@tiptap/core'
 import { Fragment, type Node, type Schema } from '@tiptap/pm/model'
 import { EditorState, Plugin, type PluginSpec, type Transaction } from '@tiptap/pm/state'
+import type { EditorView } from '@tiptap/pm/view'
 import type { PmNode } from './convert'
+import { mountedDocumentPresentation } from './document-presentation'
 import { dispatchDocumentTransaction } from './undo-redo'
 
 const presentation = new WeakSet<Plugin>()
@@ -43,13 +45,73 @@ export function layoutReplicaPlugins(plugins: readonly Plugin[]): Plugin[] {
   })
 }
 
+/** Keep the native Tiptap command and event APIs on the unmounted document owner. */
+export class AuthoredEditor extends Editor {
+  dispatchAuthored?: (transaction: Transaction) => void
+  acceptAuthored?: (event: EditorEvents['transaction']) => void
+  private disposed = false
+  private observingUncommittedState = false
+
+  constructor(extensions: Extensions) {
+    super({ extensions, element: null })
+  }
+
+  override get isDestroyed(): boolean {
+    return this.disposed
+  }
+
+  override destroy(): void {
+    this.disposed = true
+    this.dispatchAuthored = undefined
+    this.acceptAuthored = undefined
+    super.destroy()
+  }
+
+  override get view(): EditorView {
+    const view = super.view
+    const dispatch = this.dispatchAuthored
+    if (!dispatch && !this.disposed) return view
+    return new Proxy(view, {
+      get: (target, key, receiver) => {
+        if (key === 'isDestroyed') return this.isDestroyed
+        if (key === 'dispatch' && dispatch) return dispatch
+        if (key === 'updateState' && this.disposed) return () => {}
+        const presentation = mountedDocumentPresentation(this)?.editorView
+        if (presentation && Reflect.has(presentation, key)) return Reflect.get(presentation, key)
+        return Reflect.get(target, key, receiver)
+      },
+    })
+  }
+
+  applyAuthored(transaction: Transaction): void {
+    if (this.observingUncommittedState)
+      throw new Error('Dispatch from transaction after acceptance, not beforeTransaction')
+    super.view.dispatch(transaction)
+  }
+
+  override emit<K extends keyof EditorEvents>(
+    event: K,
+    ...args: EditorEvents[K] extends any[] ? EditorEvents[K] : [EditorEvents[K]]
+  ): this {
+    // Record the accepted chain before other listeners can dispatch a follow-up.
+    if (event === 'transaction') this.acceptAuthored?.(args[0] as EditorEvents['transaction'])
+    if (event !== 'beforeTransaction') return super.emit(event, ...args)
+    this.observingUncommittedState = true
+    try {
+      return super.emit(event, ...args)
+    } finally {
+      this.observingUncommittedState = false
+    }
+  }
+}
+
 /** Owns the accepted editor state without constructing a full document view. */
 export class AuthoredDocument {
   private currentRevision = 0
-  private closed = false
+  private accepting?: { transactions: Transaction[]; advanced: boolean }
 
   constructor(
-    private readonly editor: Editor,
+    private readonly editor: AuthoredEditor,
     doc: Node,
     private readonly publish: (transactions: readonly Transaction[]) => void,
   ) {
@@ -62,6 +124,8 @@ export class AuthoredDocument {
       )
     })
     editor.view.updateState(EditorState.create({ doc, plugins }))
+    editor.dispatchAuthored = (transaction) => this.dispatch(transaction)
+    editor.acceptAuthored = this.onTransaction
   }
 
   read() {
@@ -69,25 +133,36 @@ export class AuthoredDocument {
   }
 
   dispatch(transaction: Transaction): readonly Transaction[] {
-    if (this.closed) return []
-    const transactions: Transaction[] = []
-    dispatchDocumentTransaction(
-      transaction,
-      () => this.editor.state,
-      (next) => {
-        const applied = this.editor.state.applyTransaction(next)
-        this.editor.view.updateState(applied.state)
-        for (const accepted of applied.transactions) transactions.push(accepted)
-      },
-    )
-    if (transactions.some((accepted) => accepted.steps.length > 0)) this.currentRevision++
-    this.publish(transactions)
-    return transactions
+    if (this.editor.isDestroyed) return []
+    const parent = this.accepting
+    const batch = parent ?? { transactions: [], advanced: false }
+    const start = batch.transactions.length
+    this.accepting = batch
+    try {
+      dispatchDocumentTransaction(
+        transaction,
+        () => this.editor.state,
+        (next) => this.editor.applyAuthored(next),
+      )
+    } finally {
+      this.accepting = parent
+      if (!parent && batch.transactions.length > 0) this.publish(batch.transactions)
+    }
+    return batch.transactions.slice(start)
+  }
+
+  private onTransaction = ({ transaction, appendedTransactions }: EditorEvents['transaction']) => {
+    const batch = this.accepting
+    if (!batch) return
+    const accepted = [transaction, ...appendedTransactions]
+    batch.transactions.push(...accepted)
+    if (!batch.advanced && accepted.some((transaction) => transaction.steps.length > 0)) {
+      batch.advanced = true
+      this.currentRevision++
+    }
   }
 
   destroy(): void {
-    if (this.closed) return
-    this.closed = true
     this.editor.destroy()
   }
 }

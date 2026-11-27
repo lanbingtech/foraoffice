@@ -492,6 +492,16 @@ export interface RowSplitPatch {
   rules: RowSplitRule[]
 }
 
+export interface RowSplitFragment {
+  /** Fragment bounds in virtual flow coordinates, before the paper clip. */
+  readonly from: number
+  readonly to: number
+  /** Half-open line ranges in the owning row's measured cells, in the same cell order. */
+  readonly cells: readonly (readonly [start: number, end: number])[]
+  /** The actual page or column window assigned by the slicer. */
+  readonly window: PageSlice | PageColumn
+}
+
 export interface SliceOutputs {
   /** slicer runs the fixed-point loop took, and where its time went (diagnostics) */
   iterations?: number

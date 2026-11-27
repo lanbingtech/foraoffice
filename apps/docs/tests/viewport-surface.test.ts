@@ -4,6 +4,7 @@ import { Schema } from '@tiptap/pm/model'
 import {
   AllSelection,
   EditorState,
+  NodeSelection,
   Plugin,
   TextSelection,
   type Transaction,
@@ -11,6 +12,7 @@ import {
 import { Decoration, DecorationSet, EditorView } from '@tiptap/pm/view'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { columnSplitDecoration, patchSplitNodeViews } from '../src/renderer/editor/column-layout'
+import { documentPresentation } from '../src/renderer/editor/document-presentation'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { setPageGaps } from '../src/renderer/editor/pagination-gaps'
 import {
@@ -26,11 +28,15 @@ import {
   type ViewportSurface,
 } from '../src/renderer/editor/viewport-surface'
 import { viewportLayout, type ViewportContent } from '../src/renderer/editor/viewport-layout'
+import { applyGapLedger, buildPageCuts } from '../src/renderer/pagination-cuts'
 
 const schema = new Schema({
   marks: { inserted: { toDOM: () => ['ins', 0] } },
   nodes: {
     doc: { content: 'block+' },
+    docTable: { group: 'block', content: 'docTableRow+', toDOM: () => ['table', ['tbody', 0]] },
+    docTableRow: { content: 'docTableCell+', toDOM: () => ['tr', 0] },
+    docTableCell: { content: 'docParagraph+', toDOM: () => ['td', 0] },
     docParagraph: {
       group: 'block',
       content: 'inline*',
@@ -119,6 +125,182 @@ function fixture(isEditable = true, plugins: Plugin[] = []) {
 function placed(blocks: ViewportContent['blocks']): ViewportContent {
   return { canvas, blocks }
 }
+
+it('uses the authored table caret for clicks, deletion, and continued input in a projected cell', () => {
+  const lead = paragraph('lead')
+  const original = paragraph('A')
+  const sibling = paragraph('Adjacent cell')
+  const table = schema.node(
+    'docTable',
+    null,
+    schema.node('docTableRow', null, [
+      schema.node('docTableCell', null, original),
+      schema.node('docTableCell', null, sibling),
+    ]),
+  )
+  const doc = schema.node('doc', null, [lead, table])
+  const position = lead.nodeSize + 3
+  let state = EditorState.create({ doc, plugins: [history()] })
+  let revision = 0
+  let reportAcceptedChain = true
+  const requestRange = vi.fn()
+  const mount = document.createElement('div')
+  document.body.append(mount)
+  const surface = createViewportSurface(mount, {
+    readSource: () => ({ state, revision }),
+    dispatch(transaction) {
+      const accepted = state.applyTransaction(transaction)
+      state = accepted.state
+      if (transaction.docChanged) revision++
+      return reportAcceptedChain ? accepted.transactions : undefined
+    },
+    requestRange,
+  })
+  mounted.push(surface)
+
+  function publish() {
+    const para = state.doc.nodeAt(position)!
+    const content: ViewportContent = {
+      canvas,
+      surrounding: placed([
+        { from: 0, to: lead.nodeSize, box: box(5, 375) },
+        { from: lead.nodeSize, to: state.doc.content.size, box: box(5, 400, 200, 22) },
+      ]),
+      blocks: [
+        {
+          from: lead.nodeSize,
+          to: state.doc.content.size,
+          tableCellText: { position, from: position + 1, to: position + para.nodeSize - 1 },
+          box: box(5, 400),
+        },
+      ],
+      decorations: [
+        {
+          from: position,
+          to: position + para.nodeSize,
+          through: position + para.nodeSize,
+          inline: false,
+          attrs: { class: 'has-tab-stops' },
+        },
+      ],
+    }
+    expect(surface.publish({ content, revision, publication: revision + 1, sequence: 0 })).toBe(
+      'applied',
+    )
+  }
+  publish()
+  const view = surface.view!
+  const paper = mount.querySelector('[inert]')!
+  expect(paper.getAttribute('contenteditable')).toBe('false')
+  expect(paper.querySelector<HTMLElement>('td:first-child p')?.style.visibility).toBe('hidden')
+  const neighboring = paper.querySelector('td:last-child p')!
+  expect(neighboring.textContent).toBe(sibling.textContent)
+  expect(neighboring.getAttribute('style')).toBeNull()
+  expect(view.dom.querySelector('p')?.classList.contains('has-tab-stops')).toBe(true)
+  vi.spyOn(view, 'posAtCoords').mockReturnValue({ pos: 1, inside: 0 })
+  view.dom.querySelector('p')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+  expect(state.selection.from).toBe(position + 1)
+  view.dispatch(view.state.tr.delete(1, 2))
+  expect(state.doc.nodeAt(position)?.textContent).toBe('')
+  publish()
+  expect(view.state.selection.from).toBe(1)
+  view.dispatch(view.state.tr.insertText('甲'))
+  view.dispatch(view.state.tr.insertText('乙'))
+  expect(view.state.doc.textContent).toBe('甲乙')
+  expect(state.doc.nodeAt(position)?.textContent).toBe('甲乙')
+  expect(state.doc.firstChild).toBe(lead)
+  expect(state.selection.from).toBe(position + 3)
+
+  view.dom.dispatchEvent(new InputEvent('beforeinput', { inputType: 'historyUndo' }))
+  expect(view.state.doc.textContent).toBe(state.doc.nodeAt(position)?.textContent)
+  expect(view.state.selection.from).toBe(state.selection.from - position)
+  expect(view.dom.querySelector('p')?.textContent).toBe('A')
+  expect(requestRange).toHaveBeenLastCalledWith({
+    reason: 'selection',
+    revision,
+    selection: state.selection,
+  })
+
+  reportAcceptedChain = false
+  view.dom.dispatchEvent(new InputEvent('beforeinput', { inputType: 'historyRedo' }))
+  expect(view.state.doc.textContent).toBe(state.doc.nodeAt(position)?.textContent)
+  expect(view.state.selection.from).toBe(state.selection.from - position)
+  expect(view.dom.querySelector('p')?.textContent).toBe('甲乙')
+  expect(mount.querySelector('[inert] td:last-child p')).toBe(neighboring)
+  expect(requestRange).toHaveBeenLastCalledWith({
+    reason: 'selection',
+    revision,
+    selection: state.selection,
+  })
+})
+
+it('uses authored positions when ordinary Docs commands address a projected body', () => {
+  const owner = new Editor({
+    element: null,
+    extensions: editorExtensions,
+    content: {
+      type: 'doc',
+      content: ['outside', 'inside'].map((text) => ({
+        type: 'docParagraph',
+        content: [{ type: 'text', text }],
+      })),
+    },
+  })
+  expect(documentPresentation(owner).dom).toBeUndefined()
+  const mount = document.body.appendChild(document.createElement('div'))
+  const requestRange = vi.fn()
+  const surface = createViewportSurface(mount, {
+    ownerEditor: owner,
+    readSource: () => ({ state: owner.state, revision: 0 }),
+    dispatch: (tr) => owner.view.dispatch(tr),
+    requestRange,
+  })
+  mounted.push(surface)
+  try {
+    const from = owner.state.doc.firstChild!.nodeSize
+    expect(
+      surface.publish({
+        revision: 0,
+        publication: 1,
+        sequence: 0,
+        content: placed([{ from, to: owner.state.doc.content.size, box: box(5, 400) }]),
+      }),
+    ).toBe('applied')
+    const local = surface.view!
+    const coords = { left: 5, right: 5, top: 400, bottom: 412 }
+    const locate = vi.spyOn(local, 'coordsAtPos').mockReturnValue(coords)
+    vi.spyOn(local, 'posAtCoords').mockReturnValue({ pos: 2, inside: 0 })
+    const body = documentPresentation(owner)
+    expect(body.dom).toBe(local.dom)
+    expect(body.boundsAt(from + 2)).toEqual(coords)
+    expect(locate).toHaveBeenCalledWith(2, 1)
+    expect(body.boundsAt(1)).toBeUndefined()
+    expect(body.hitTest({ left: 5, top: 406 })).toEqual({ pos: from + 2, inside: from })
+
+    const selection = TextSelection.create(owner.state.doc, from + 3)
+    body.select(selection, true)
+    expect(owner.state.selection.eq(selection)).toBe(true)
+    expect(local.state.selection.from).toBe(3)
+    expect(requestRange).toHaveBeenLastCalledWith({
+      reason: 'navigation',
+      revision: 0,
+      selection,
+      target: { from: from + 3, to: from + 3, align: 'caret' },
+    })
+    body.scrollTo(1, 3)
+    expect(requestRange).toHaveBeenLastCalledWith({
+      reason: 'navigation',
+      revision: 0,
+      selection,
+      target: { from: 1, to: 3, align: 'node' },
+    })
+    expect(owner.state.selection.eq(selection)).toBe(true)
+  } finally {
+    surface.destroy()
+    expect(documentPresentation(owner).dom).toBeUndefined()
+    owner.destroy()
+  }
+})
 
 it('paints the source transaction chain before accepting the next visible edit', () => {
   const appendSourceEdits = new Plugin({
@@ -445,10 +627,10 @@ describe('viewport surface', () => {
     },
   )
 
-  it('uses Tiptap text serializers for selected source atoms outside the viewport', () => {
+  it('uses Tiptap text serializers for source atoms in both document and local selections', () => {
     const first = paragraph('abc')
     const doc = schema.node('doc', null, [first, schema.nodes.docAnchor.create()])
-    const state = EditorState.create({ doc, selection: new AllSelection(doc) })
+    let state = EditorState.create({ doc, selection: new AllSelection(doc) })
     const surface = createViewportSurface(
       document.body.appendChild(document.createElement('div')),
       {
@@ -469,6 +651,16 @@ describe('viewport surface', () => {
     Object.defineProperty(event, 'clipboardData', { value: { setData } })
     surface.view!.dom.dispatchEvent(event)
     expect(setData).toHaveBeenCalledWith('text/plain', 'abc\n\nsource atom')
+
+    state = state.apply(state.tr.setSelection(NodeSelection.create(doc, first.nodeSize)))
+    surface.publish({
+      revision: 0,
+      publication: 1,
+      sequence: 2,
+      content: placed([{ from: first.nodeSize, to: doc.content.size, box: box(30, 430) }]),
+    })
+    const view = surface.view!
+    expect(view.serializeForClipboard(view.state.selection.content()).text).toBe('source atom')
   })
 
   it('selects and copies the whole document while painting only its visible range', () => {
@@ -625,6 +817,80 @@ describe('viewport surface', () => {
     }
   })
 
+  it('reads mixed paper, a blank page and a zero-height turn in canvas coordinates', () => {
+    const wrap = document.body.appendChild(document.createElement('div'))
+    wrap.className = 'page-wrap'
+    const doc = schema.node('doc', null, ['First page', 'Wide page', 'Next page'].map(paragraph))
+    const authority = new EditorView(wrap, { state: EditorState.create({ doc }) })
+    authority.dom.classList.add('doc-page')
+    authority.dom.style.paddingTop = '10px'
+    Object.defineProperty(authority.dom, 'currentCSSZoom', { value: 2 })
+    vi.spyOn(wrap, 'getBoundingClientRect').mockReturnValue(new DOMRect(100, 200, 1228, 1240))
+    vi.spyOn(authority.dom, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(128, 220, 1200, 1220),
+    )
+    const starts = [0, doc.child(0).nodeSize, doc.child(0).nodeSize + doc.child(1).nodeSize]
+    const blocks = starts.map((pos, index) => ({
+      top: [0, 40, 60][index],
+      height: 20,
+      el: authority.nodeDOM(pos) as HTMLElement,
+    }))
+    const slices = [
+      { start: 0, end: 40, section: 0 },
+      { start: 40, end: 40, section: 0 },
+      { start: 40, end: 60, section: 1 },
+      { start: 60, end: 84, section: 1 },
+      { start: 60, end: 92, section: 1 },
+    ]
+    const geoms = [
+      { contentHeight: 100, forceBreak: false },
+      { contentHeight: 80, forceBreak: true },
+    ]
+    const cuts = buildPageCuts(blocks, slices, geoms, [])
+    const band = {
+      kind: 'block' as const,
+      heightPx: 78,
+      marginBottomPx: 30,
+      marginTopPx: 20,
+      marginLeftPx: 0,
+      pullUpPx: 0,
+      repeatHeaderPx: 0,
+      flowTopPx: 40,
+    }
+    applyGapLedger(cuts, [
+      { ...band, page: 1 },
+      { ...band, page: 2, pageBox: { left: 0, width: 600 } },
+      {
+        ...band,
+        page: 3,
+        kind: 'cut',
+        heightPx: 0,
+        marginBottomPx: 0,
+        marginTopPx: 0,
+        flowTopPx: 60,
+      },
+    ])
+    try {
+      const layout = viewportLayout(
+        authority,
+        { blocks, sections: [], slices, cuts, geoms, hfHeights: [], rowSplits: [], carries: [] },
+        { left: 100, width: 400 },
+      )
+      const frames = [
+        { cutIndex: 0, sourceStart: starts[0] + 1, left: 100, top: -10, width: 400, height: 90 },
+        { cutIndex: 1, sourceStart: null, left: 100, top: 108, width: 400, height: 50 },
+        { cutIndex: 2, sourceStart: starts[1] + 1, left: 0, top: 186, width: 600, height: 40 },
+        { cutIndex: 3, sourceStart: starts[2] + 1, left: 0, top: 226, width: 600, height: 384 },
+      ]
+      expect(layout.pageFrames()).toEqual(frames)
+      authority.updateState(authority.state.apply(authority.state.tr.insertText('edit', 1)))
+      expect(layout.pageFrames()).toBeUndefined()
+    } finally {
+      authority.destroy()
+      wrap.remove()
+    }
+  })
+
   it('replays each measured TOC leader length from the owner and clears retired lengths', () => {
     const doc = schema.node('doc', null, [schema.nodes.docToc.create()])
     const state = EditorState.create({ doc })
@@ -727,6 +993,68 @@ describe('viewport surface', () => {
       expect(publish(2)).toBe('applied')
       expect(view.dom.querySelector<HTMLElement>('.page-gap-inline')?.style.height).toBe('91px')
       expect(owner.state.doc).toBe(original)
+    } finally {
+      owner.destroy()
+    }
+  })
+
+  it('keeps both page-turn widgets at the source-mapped edges of a paragraph continuation', () => {
+    const owner = new Editor({
+      element: document.body.appendChild(document.createElement('div')),
+      extensions: editorExtensions,
+      content: {
+        type: 'doc',
+        content: [
+          {
+            type: 'docParagraph',
+            attrs: { indentFirstLine: 720 },
+            content: [{ type: 'text', text: 'before middle after' }],
+          },
+        ],
+      },
+    })
+    const source = owner.state.doc
+    const surface = createViewportSurface(
+      document.body.appendChild(document.createElement('div')),
+      {
+        readSource: () => ({ state: owner.state, revision: 0 }),
+        dispatch: vi.fn(),
+        requestRange: vi.fn(),
+      },
+    )
+    mounted.push(surface)
+    try {
+      const metrics = { marginTop: 30, marginBottom: 20, marginLeft: 40, marginRight: 45 }
+      setPageGaps(
+        owner.view,
+        [8, 14].map((pos) => ({ pos, kind: 'inline', metrics })),
+      )
+      expect(
+        surface.publish({
+          publication: 1,
+          revision: 0,
+          sequence: 1,
+          content: {
+            ...placed([
+              {
+                from: 0,
+                to: source.content.size,
+                box: box(40, 88),
+                paragraph: { from: 8, to: 14 },
+              },
+            ]),
+            decorations: readViewportDecorations(owner.view),
+          },
+        }),
+      ).toBe('applied')
+      const view = surface.view!
+      const paragraph = view.nodeDOM(0) as HTMLElement
+      expect(paragraph.style.textIndent).toBe('0px')
+      expect(view.state.doc.textContent).toBe('middle')
+      expect(
+        Array.from(paragraph.querySelectorAll('.page-gap-inline'), (gap) => view.posAtDOM(gap, 0)),
+      ).toEqual([1, 7])
+      expect(owner.state.doc).toBe(source)
     } finally {
       owner.destroy()
     }
@@ -881,6 +1209,22 @@ describe('viewport surface', () => {
     expect(view.state.doc.textContent).toBe('D中!EF')
     expect(dispatch).toHaveBeenCalledTimes(2)
     expect(surface.publish({ publication: 3, revision: 0, sequence: 3, content })).toBe('stale')
+  })
+
+  it('moves a parked source caret on a click at the local default position', () => {
+    const { surface, read } = fixture()
+    const content = placed([{ from: 15, to: 20, box: box(30, 1250) }])
+    expect(surface.publish({ publication: 1, revision: 0, sequence: 1, content })).toBe('applied')
+    const view = surface.view!
+    const at = view.state.selection.head
+    const hit = vi.spyOn(view, 'posAtCoords').mockReturnValue({ pos: at, inside: 0 })
+    try {
+      view.dom.querySelector('p')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      expect(read().state.selection.head).toBe(15 + at)
+      expect(read().revision).toBe(0)
+    } finally {
+      hit.mockRestore()
+    }
   })
 
   it('requests rehydration for parked-caret edits and leaves the full source untouched', () => {

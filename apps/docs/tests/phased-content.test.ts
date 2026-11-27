@@ -183,7 +183,9 @@ describe('setContentPhased', () => {
     expect(scheduler.pending()).toBe(0)
     release(true)
     await host.canMountTail
-    while (scheduler.pending()) scheduler.drain()
+    expect(scheduler.pending()).toBe(1)
+    scheduler.drain()
+    expect(scheduler.pending()).toBe(0)
     expect(state.mounted).toEqual(document.content)
     await expect(waitForFullContent()).resolves.toBe(true)
   })

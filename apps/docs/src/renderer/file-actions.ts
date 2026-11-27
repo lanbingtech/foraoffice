@@ -55,7 +55,7 @@ import {
   type WatermarkSpec,
 } from '@genoffice/docx-engine'
 import type { Dispatch, SetStateAction } from 'react'
-import type { AiDocContent, OpenDocxResult } from '../shared/ipc'
+import type { AiDocContent, OpenDocxResult, OpenFileResult } from '../shared/ipc'
 import type { DocsErrorCode, DocsSaveOutcome } from '../shared/operation-result'
 import {
   hfVariantsFromParsed,
@@ -133,6 +133,7 @@ import { defaultEastAsiaFontFor } from './font-list'
 import { clearPrintZoom, setPrintZoom } from './print-zoom'
 import { collectPdfInternalLinks } from './pdf-internal-links'
 import type { PdfInternalLink } from '../shared/ipc'
+import { documentPresentation } from './editor/document-presentation'
 import { showToast } from './components/toast-bus'
 import { buildStandaloneHtml } from './html-export'
 import { aiPanelInitiallyOpen } from '@genoffice/ui/editor'
@@ -147,11 +148,16 @@ export type PendingPdfExport = {
 
 /** The App state the file actions need; built fresh per call. */
 export interface FileActionContext {
-  beforeDocumentReplace?(): void
+  beforeDocumentReplace?(keepPreparedLayout?: boolean): void
+  prepareBody?(file: OpenFileResult & { data: ArrayBuffer }): {
+    ready: Promise<{ editor: Editor; activate(): void } | null>
+    discard(): void
+  } | null
   sourceImport?: {
     /** The imported body, in source order and before any layout-derived changes. */
     publish(document: PmNode): void
     canMountTail: Promise<boolean>
+    scheduleTail?: (next: () => void) => void
   }
   /** Publish a replacement or saved baseline and its authored stores before lifecycle completion. */
   commitDocumentState?(operation: () => void): void
@@ -561,6 +567,7 @@ function phasedHostFor(ctx: FileActionContext): PhasedContentHost {
   return {
     owner: editor,
     canMountTail: ctx.sourceImport?.canMountTail,
+    mountTailInOnePass: ctx.sourceImport?.scheduleTail === undefined,
     setContent: (doc) => setOpenedEditorContent(editor, doc),
     appendNodes: (nodes, attempt) => appendStreamedNodes(editor, nodes, attempt),
     appliedAppend: (attempt) => streamedAppendApplied(editor.state, attempt),
@@ -590,11 +597,12 @@ function focusOpenedEditor(editor: Editor): void {
     if (editor.isDestroyed) return
     const active = document.activeElement
     if (active && active !== document.body) return
-    const dom = editor.view.dom as HTMLElement
+    const body = documentPresentation(editor)
+    const dom = body.dom
     // behind the opening screen the editor is display:none and DOM focus
     // silently drops — wait for it to be laid out, then focus once
-    if (dom.isConnected && dom.offsetParent !== null) {
-      editor.view.focus()
+    if (dom?.isConnected && dom.offsetParent !== null) {
+      body.focus()
       if (document.activeElement !== document.body) return
     }
     if (performance.now() - startedAt < 10_000) requestAnimationFrame(attempt)
@@ -625,12 +633,16 @@ export async function loadFile(
     generation === openGeneration &&
     !ctx.editor!.isDestroyed &&
     openingHost === getDocsDocumentHost()
+  let openingBody: ReturnType<NonNullable<FileActionContext['prepareBody']>> = null
   try {
     const bytes = result.data
       ? new Uint8Array(result.data)
       : result.hosted
         ? await blankDocxBytes()
         : await fetchDocBytes(result.dataUrl)
+    if (!currentOpen()) return 'superseded'
+    if (ctx.prepareBody && !result.hosted && bytes.byteLength > 0)
+      openingBody = ctx.prepareBody({ ...result, data: bytes.slice().buffer })
     // a 0-byte .docx (touch, failed download) is not a corrupt archive but an
     // empty document: open the blank template under the file's own path
     const parsed = await parseDocxOffThread(
@@ -658,16 +670,36 @@ export async function loadFile(
     await prefetchFaces(collectDocFonts(parsed))
     await loadBundledStandIns(collectDocFonts(parsed))
     if (!currentOpen()) return 'superseded'
-    ctx.beforeDocumentReplace?.()
+    const prepared =
+      openingBody &&
+      tier !== 'readOnly' &&
+      !parsed.protection?.enforced &&
+      !parsed.writeProtection?.hash
+        ? await openingBody.ready
+        : null
+    const body = prepared && !prepared.editor.isDestroyed ? prepared : null
+    if (!currentOpen()) return 'superseded'
+    if (!body) {
+      openingBody?.discard()
+      openingBody = null
+    }
+    ctx.beforeDocumentReplace?.(!!body)
     if (!currentOpen()) return 'superseded'
     let source: PmNode | undefined
     commitDocumentState(ctx, () => {
+      if (body) ctx.editor = body.editor
       ctx.editor!.storage.listNumbering.styles = parsed.styles
       ctx.editor!.storage.listNumbering.docDefaults = parsed.docDefaults
       ctx.editor!.storage.listNumbering.defs = parsed.numbering
       applyDocLayoutSettings(ctx.editor!, parsed)
-      source = blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed))
-      setContentPhased(phasedHostFor(ctx), source)
+      if (body) {
+        cancelPhasedContent(() => {})
+        body.activate()
+        openingBody = null
+      } else {
+        source = blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed))
+        setContentPhased(phasedHostFor(ctx), source, ctx.sourceImport?.scheduleTail)
+      }
       commentEndpoints(ctx.editor!.view, parsed.blocks)
       resetEditorHistory(ctx.editor!)
       if (tier !== 'readOnly') focusOpenedEditor(ctx.editor!)
@@ -785,6 +817,8 @@ export async function loadFile(
     ctx.setStatus(t('appOpenFailed', { error: String(err) }))
     showToast(t('appOpenFailed', { error: String(err) }), 'error')
     return 'failed'
+  } finally {
+    openingBody?.discard()
   }
 }
 

@@ -327,6 +327,43 @@ describe('SettledParagraphCache', () => {
     }
   })
 
+  it('tracks wrap inputs through local DOM changes without rescanning the document', () => {
+    const root = document.body.appendChild(document.createElement('div'))
+    root.innerHTML = '<p>text</p><div><span></span></div>'
+    const view = { dom: root }
+    const scans = vi.spyOn(root, 'querySelectorAll')
+    const paragraph = root.querySelector('p')!
+    const marker = root.querySelector('span')!
+    try {
+      expect(hasCoupledWrapGeometry(view, false)).toBe(false)
+      scans.mockClear()
+      paragraph.append(' more text')
+      expect(hasCoupledWrapGeometry(view, false)).toBe(false)
+      marker.classList.add('doc-col-split-float')
+      marker.style.cssFloat = 'left'
+      expect(hasCoupledWrapGeometry(view, false)).toBe(true)
+      marker.style.cssFloat = 'none'
+      expect(hasCoupledWrapGeometry(view, false)).toBe(false)
+      marker.style.cssFloat = 'left'
+      marker.closest('div')!.remove()
+      expect(hasCoupledWrapGeometry(view, false)).toBe(false)
+      root.insertAdjacentHTML(
+        'beforeend',
+        '<div><span class="doc-col-split-float" style="float:left"></span></div>',
+      )
+      expect(hasCoupledWrapGeometry(view, false)).toBe(true)
+      root.lastElementChild!.remove()
+      paragraph.classList.add('has-drop-cap')
+      expect(hasCoupledWrapGeometry(view, false)).toBe(true)
+      paragraph.classList.remove('has-drop-cap')
+      expect(hasCoupledWrapGeometry(view, false)).toBe(false)
+      expect(scans).not.toHaveBeenCalled()
+    } finally {
+      scans.mockRestore()
+      root.remove()
+    }
+  })
+
   it('does not read or couple paragraphs to a wrap marker that CSS does not float', () => {
     const root = document.createElement('div')
     root.innerHTML = `
@@ -348,6 +385,24 @@ describe('SettledParagraphCache', () => {
       }),
     ).toEqual([[0], [1]])
     expect(rect).not.toHaveBeenCalled()
+  })
+
+  it('tracks wrapping elements owned by a same-origin iframe', () => {
+    const frame = document.body.appendChild(document.createElement('iframe'))
+    try {
+      const root = frame.contentDocument!.body
+      const view = { dom: root }
+      expect(hasCoupledWrapGeometry(view, false)).toBe(false)
+      root.insertAdjacentHTML(
+        'beforeend',
+        '<span class="doc-col-split-float" style="float:left"></span>',
+      )
+      expect(hasCoupledWrapGeometry(view, false)).toBe(true)
+      root.firstElementChild!.className = ''
+      expect(hasCoupledWrapGeometry(view, false)).toBe(false)
+    } finally {
+      frame.remove()
+    }
   })
 
   it('reads a cell float only when measuring a paragraph in its cell', () => {

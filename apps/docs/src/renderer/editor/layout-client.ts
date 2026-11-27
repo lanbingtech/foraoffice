@@ -1,16 +1,20 @@
 import type { Lang } from '@genoffice/i18n'
-import { Editor, type Extensions } from '@tiptap/core'
+import type { Editor, Extensions } from '@tiptap/core'
 import type { Transaction } from '@tiptap/pm/state'
 import type { OpenFileResult } from '../../shared/ipc'
 import type { PageCut } from '../pagination-cuts'
-import { AuthoredDocument, readImportedBody } from './authored-document'
+import { AuthoredDocument, AuthoredEditor, readImportedBody } from './authored-document'
 import type { PmNode } from './convert'
+import type { TocPageDisplay } from './toc-refresh'
 import type { ViewportBounds } from './viewport-fragments'
+import type { ViewportTableRowFragment } from './viewport-table-source'
 import {
   viewportContent,
   type ViewportContent,
   type ViewportGeometry,
+  type ViewportPageFrame,
   type ViewportReveal,
+  type ViewportRevealScope,
 } from './viewport-layout'
 
 export type LayoutMessage =
@@ -23,17 +27,30 @@ export type LayoutMessage =
       includeSource?: boolean
     }
   | { type: 'viewport'; sequence: number; publication: number; bounds: ViewportBounds }
-  | (ViewportRequestStamp & { type: 'reveal'; position: number; height: number })
+  | { type: 'opening-demand'; publication: number; bottom: number }
+  | (ViewportRequestStamp & {
+      type: 'reveal'
+      position: number
+      height: number
+      scope?: ViewportRevealScope
+    })
   | { type: 'edit'; fromRevision: number; toRevision: number; steps: unknown[] }
 
-type LayoutPublication = {
+export interface ViewportLayoutDetails {
+  tocPages?: readonly TocPageDisplay[]
+  tableFragments?: readonly ViewportTableRowFragment[]
+}
+
+type LayoutPublication = ViewportLayoutDetails & {
   type: 'layout'
   publication: number
   revision: number
   pages: readonly PageCut[]
   starts?: readonly (number | null)[]
+  pageFrames?: readonly ViewportPageFrame[]
   geometry?: ViewportGeometry
   initial?: ViewportContent
+  opening?: true
 }
 
 interface ViewportRequestStamp {
@@ -55,16 +72,9 @@ type ImportedSource = {
   blocks: ReadableStream<PmNode[]>
 }
 
-type InitialViewport = {
-  type: 'initial-viewport'
-  revision: 0
-  content: ViewportContent
-}
-
 export type LayoutReply =
   | LayoutPublication
   | ImportedSource
-  | InitialViewport
   | { type: 'invalidated'; publication: number }
   | { type: 'applied'; revision: number }
   | ViewportPublication
@@ -72,13 +82,13 @@ export type LayoutReply =
   | { type: 'failure'; reason: string }
 
 interface LayoutClientEvents {
+  /** A scroll surface can keep a committed geometry while the same source is remeasured. */
+  retainCommittedViewport?(publication: number): boolean
   source?: {
     extensions: Extensions
     configure?(editor: Editor): void
     opened(document: AuthoredDocument): void
   }
-  /** The measured opening range expires on edit, replacement, or complete layout. */
-  initialViewport?(viewport: InitialViewport | null): void
   layout(layout: LayoutPublication | null, publication: number): void
   viewport(reply: ViewportPublication & { content: ViewportContent }): void
   revealUnavailable(position: number): void
@@ -88,10 +98,11 @@ interface LayoutClientEvents {
 export class LayoutClient {
   private revision = 0
   private sequence = 0
+  private requestedOpening = 0
+  private openingRange?: { publication: number; bottom: number }
   private latestPublication = 0
   private active?: LayoutPublication
   private sourceReceived = false
-  private hasInitialViewport = false
   private closed = false
   private readonly lifetime = new AbortController()
 
@@ -106,11 +117,30 @@ export class LayoutClient {
     port.start()
   }
 
+  requestOpening(bounds: ViewportBounds): void {
+    const opening = this.openingRange
+    if (!this.displayIsCurrent() || !opening || bounds.top <= 0) return
+    const height = bounds.bottom - bounds.top
+    if (
+      opening.bottom - bounds.bottom >= height * 2 ||
+      this.requestedOpening === opening.publication
+    )
+      return
+    this.requestedOpening = opening.publication
+    this.send({
+      type: 'opening-demand',
+      publication: opening.publication,
+      bottom: opening.bottom + height * 2,
+    })
+  }
+
   request(bounds: ViewportBounds): void {
     if (!this.displayIsCurrent() || !this.active) return
     const { geometry, publication, revision } = this.active
     const sequence = ++this.sequence
     if (geometry) {
+      this.requestOpening(bounds)
+      if (this.active.opening && bounds.top >= geometry.canvas.height) return
       const content = viewportContent(geometry, bounds)
       this.events.viewport({
         type: 'viewport',
@@ -130,10 +160,17 @@ export class LayoutClient {
   }
 
   /** Reveal a position from the same source revision as the current layout. */
-  requestReveal(position: number, height: number, revision: number): boolean {
+  requestReveal(
+    position: number,
+    height: number,
+    revision: number,
+    scope?: ViewportRevealScope,
+  ): boolean {
     if (
       !this.displayIsCurrent() ||
       !this.active ||
+      this.active.opening ||
+      this.active.publication !== this.latestPublication ||
       revision !== this.revision ||
       !Number.isSafeInteger(position) ||
       position < 0 ||
@@ -148,6 +185,7 @@ export class LayoutClient {
       sequence: ++this.sequence,
       position,
       height,
+      ...(scope ? { scope } : {}),
     })
     return true
   }
@@ -160,7 +198,6 @@ export class LayoutClient {
     if (steps.length === 0) return
     const fromRevision = this.revision++
     this.send({ type: 'edit', fromRevision, toRevision: this.revision, steps })
-    this.clearInitialViewport()
     this.clear()
   }
 
@@ -172,7 +209,6 @@ export class LayoutClient {
     this.port.removeEventListener('close', this.lost)
     this.resolution?.removeEventListener('change', this.displayChanged)
     this.port.close()
-    this.clearInitialViewport()
     this.clear()
   }
 
@@ -184,12 +220,6 @@ export class LayoutClient {
     if (!this.active) return
     this.active = undefined
     this.events.layout(null, this.latestPublication)
-  }
-
-  private clearInitialViewport(): void {
-    if (!this.hasInitialViewport) return
-    this.hasInitialViewport = false
-    this.events.initialViewport?.(null)
   }
 
   private lost = (): void => {
@@ -215,6 +245,7 @@ export class LayoutClient {
     return (
       data.revision === this.revision &&
       data.publication === this.active?.publication &&
+      data.publication === this.latestPublication &&
       data.sequence === this.sequence
     )
   }
@@ -233,9 +264,9 @@ export class LayoutClient {
     data: ImportedSource,
     source: NonNullable<LayoutClientEvents['source']>,
   ): Promise<void> {
-    let owner: Editor | undefined
+    let owner: AuthoredEditor | undefined
     try {
-      owner = new Editor({ element: null, extensions: source.extensions })
+      owner = new AuthoredEditor(source.extensions)
       source.configure?.(owner)
       const doc = await readImportedBody(data.root, data.blocks, owner.schema, this.lifetime.signal)
       if (!this.displayIsCurrent() || this.revision !== data.revision) return
@@ -256,28 +287,23 @@ export class LayoutClient {
       case 'source':
         this.receiveSource(data)
         return
-      case 'initial-viewport':
-        if (
-          data.revision === this.revision &&
-          this.latestPublication === 0 &&
-          !this.hasInitialViewport &&
-          this.events.initialViewport
-        ) {
-          this.hasInitialViewport = true
-          this.events.initialViewport?.(data)
-        }
-        return
       case 'layout':
         if (data.revision !== this.revision || data.publication <= this.latestPublication) return
         this.latestPublication = data.publication
         this.active = data
+        this.openingRange =
+          data.opening && data.geometry
+            ? { publication: data.publication, bottom: data.geometry.canvas.height }
+            : undefined
         this.events.layout(data, data.publication)
-        this.clearInitialViewport()
         return
       case 'invalidated':
         if (data.publication <= this.latestPublication) return
         this.latestPublication = data.publication
-        this.clearInitialViewport()
+        // Geometry already committed to the foreground is an immutable snapshot.
+        // It remains usable for local scroll until a new snapshot supersedes it.
+        if (this.active?.geometry && this.events.retainCommittedViewport?.(this.active.publication))
+          return
         this.clear()
         return
       case 'viewport':

@@ -1,9 +1,16 @@
-import { getTextBetween, getTextSerializersFromSchema } from '@tiptap/core'
+import {
+  extensions as coreExtensions,
+  getTextBetween,
+  getTextSerializersFromSchema,
+  type Editor,
+} from '@tiptap/core'
 import { redoNoScroll, undoNoScroll } from '@tiptap/pm/history'
 import { keydownHandler } from '@tiptap/pm/keymap'
+import { DOMSerializer } from '@tiptap/pm/model'
 import {
   AllSelection,
   EditorState,
+  TextSelection,
   type Command,
   type Selection,
   type Transaction,
@@ -11,6 +18,7 @@ import {
 import { Mapping, StepMap } from '@tiptap/pm/transform'
 import { Decoration, DecorationSet, EditorView, type EditorProps } from '@tiptap/pm/view'
 import { sourceCompositionKey } from './source-composition'
+import { mountDocumentPresentation } from './document-presentation'
 import { positionViewportColumnSplits, projectViewportDecorations } from './viewport-decorations'
 import {
   createViewportEditing,
@@ -20,6 +28,7 @@ import {
 } from './viewport-editing'
 import type { LayoutBox } from './viewport-fragments'
 import type { ViewportContent } from './viewport-layout'
+import { renderTablePaint } from './viewport-table-paint'
 
 export interface ViewportPacket {
   revision: number
@@ -35,20 +44,29 @@ interface SourceState {
 
 export interface ViewportRangeRequest {
   /** A selection request must reveal the owner's selection in the measured range. */
-  reason: 'layout' | 'geometry' | 'selection' | 'transaction' | 'source'
+  reason: 'layout' | 'geometry' | 'selection' | 'transaction' | 'source' | 'navigation'
   revision: number
   selection: Selection
+  /** A UI navigation target can differ from the owner's selection. */
+  target?: { from: number; to: number; align: 'node' | 'caret' }
   transaction?: Transaction
 }
 
 export interface ViewportSurfaceOptions {
+  ownerEditor?: Editor
   readSource(): SourceState
   editable?(source: EditorState): boolean
   /** Dispatch synchronously. Return the applied chain when the owner appends steps. */
   dispatch(transaction: Transaction): readonly Transaction[] | void
   requestRange(request: ViewportRangeRequest): void
+  /** A newer request may supersede a frame that was deferred during composition. */
+  isCurrent?(packet: ViewportPacket): boolean
   onPublished?(packet: ViewportPacket): void
   attributes?: Record<string, string>
+  clipboard?: Pick<
+    EditorProps,
+    'clipboardTextParser' | 'handlePaste' | 'transformPasted' | 'transformPastedHTML'
+  > & { beforePaste?: NonNullable<EditorProps['handleDOMEvents']>['paste'] }
   nodeViews?: (source: EditorState) => EditorProps['nodeViews']
   /** Decorations use viewport-local positions. */
   decorations?: (source: EditorState, editing: EditingViewport) => readonly Decoration[]
@@ -93,13 +111,19 @@ function placementDecorations(
   const decorations = projectViewportDecorations(content.decorations ?? [], editing, content.blocks)
   editing.doc.forEach((node, position, index) => {
     const block = content.blocks[index]
+    const continuation =
+      (block.paragraph && block.paragraph.from > block.from + 1) ||
+      (block.tableCellText && block.tableCellText.from > block.tableCellText.position + 1)
     decorations.push(
       Decoration.node(
         position,
         position + node.nodeSize,
         {
           style:
+            (block.tableCellTypography ? `${block.tableCellTypography};` : '') +
             positionedBox(block.box, content.canvas.left, content.canvas.top) +
+            (continuation ? ';text-indent:0 !important' : '') +
+            (content.surrounding ? ';pointer-events:auto;overflow:clip' : '') +
             (block.hidden ? ';visibility:hidden !important;pointer-events:none !important' : ''),
         },
         { viewportBlock: true },
@@ -219,6 +243,7 @@ function confirmedEditing(
   const localRange = { from: previous.localRange.from, to: previous.localRange.to + delta }
   const offset = sourceRange.from - localRange.from
   return {
+    cellTextblock: previous.cellTextblock,
     source,
     doc: transaction.doc,
     sourceRange,
@@ -242,6 +267,28 @@ function validBox(box: LayoutBox): boolean {
   )
 }
 
+function readWindow(source: EditorState, content: ViewportContent): EditingViewport | undefined {
+  if (
+    !validBox(content.canvas) ||
+    content.blocks.some(
+      ({ box, pictures }) => !validBox(box) || pictures?.some((picture) => !validBox(picture.box)),
+    )
+  )
+    return
+  const editing = createViewportEditing(source.doc, content.blocks)
+  if (!editing || !content.model) return editing
+  try {
+    if (
+      content.model.from === editing.sourceRange.from &&
+      content.model.to === editing.sourceRange.to &&
+      editing.doc.eq(source.schema.nodeFromJSON(content.model.document))
+    )
+      return editing
+  } catch {
+    // A packet for a different schema cannot enter the view.
+  }
+}
+
 /** Content picked from the same placement index shares immutable boxes and
  * fragments. Scrolling within this window moves the canvas without updating PM. */
 function samePlacements(previous: ViewportContent, next: ViewportContent): boolean {
@@ -257,7 +304,18 @@ function samePlacements(previous: ViewportContent, next: ViewportContent): boole
       return (
         block.from === other.from &&
         block.to === other.to &&
-        block.box === other.box &&
+        (block.box === other.box ||
+          (block.paragraph &&
+            block.box.top === other.box.top &&
+            block.box.left === other.box.left &&
+            block.box.width === other.box.width &&
+            block.box.height === other.box.height)) &&
+        block.paragraph?.from === other.paragraph?.from &&
+        block.paragraph?.to === other.paragraph?.to &&
+        block.tableCellText?.position === other.tableCellText?.position &&
+        block.tableCellText?.from === other.tableCellText?.from &&
+        block.tableCellText?.to === other.tableCellText?.to &&
+        block.tableCellTypography === other.tableCellTypography &&
         block.hidden === other.hidden &&
         block.tocLeaders === other.tocLeaders &&
         block.pictures?.length === other.pictures?.length &&
@@ -275,7 +333,11 @@ export function createViewportSurface(
   options: ViewportSurfaceOptions,
 ): ViewportSurface {
   const window = mount.ownerDocument.defaultView!
+  const root = mount.ownerDocument.createElement('div')
+  root.style.cssText = 'position:relative;isolation:isolate;margin-inline:auto'
+  mount.append(root)
   let view: EditorView | undefined
+  let surroundingView: EditorView | undefined
   let disposed = false
   let endingComposition = false
   let compositionSession: symbol | undefined
@@ -312,8 +374,14 @@ export function createViewportSurface(
 
   const editable = () => options.editable?.(options.readSource().state) ?? true
 
-  const attributes = () => {
-    const { content, parked } = current!
+  const ownerFocusEvent = (type: 'focus' | 'blur') => (_view: EditorView, event: FocusEvent) => {
+    const owner = options.ownerEditor
+    if (!owner) return false
+    const focus = coreExtensions.focusEventsPluginKey.get(owner.state)
+    return focus?.props.handleDOMEvents?.[type]?.call(focus, owner.view, event) ?? false
+  }
+
+  const canvasAttributes = (content: ViewportContent, extra?: string) => {
     const { width, height } = content.canvas
     return {
       ...options.attributes,
@@ -321,22 +389,72 @@ export function createViewportSurface(
         options.attributes?.style,
         'position:relative !important',
         'box-sizing:border-box !important',
+        'margin:0 !important',
         'padding:0 !important',
         'border-width:0 !important',
         `width:${width}px !important`,
         `height:${height}px !important`,
         `min-height:${height}px !important`,
-        parked ? 'caret-color:transparent !important' : '',
+        extra,
       ]
         .filter(Boolean)
         .join(';'),
     }
   }
 
+  const attributes = () => {
+    const { content, parked } = current!
+    return canvasAttributes(
+      content,
+      [
+        parked ? 'caret-color:transparent !important' : '',
+        content.surrounding
+          ? 'z-index:1;background:transparent !important;box-shadow:none !important;pointer-events:none'
+          : '',
+      ].join(';'),
+    )
+  }
+
   const decorations = (state: EditorState) => {
     const { editing, geometry, source } = current!
     const formatted = options.decorations?.(source, editing)
     return formatted?.length ? geometry.add(state.doc, [...formatted]) : geometry
+  }
+
+  const showConfirmed = (
+    mounted: NonNullable<typeof current>,
+    confirmed: SourceState,
+    visible: Transaction,
+  ): boolean => {
+    if (current !== mounted || !view) return false
+    const editing = confirmedEditing(mounted.editing, visible, confirmed.state.doc)
+    const geometry = mounted.geometry.map(visible.mapping, editing.doc)
+    if (
+      visible.docChanged &&
+      !retainsPlacements(mounted.editing, editing, mounted.content, geometry)
+    )
+      return false
+    const selection = localSelection(confirmed.state.selection, editing)
+    current = {
+      ...mounted,
+      editing,
+      geometry,
+      parked: !selection,
+      source: confirmed.state,
+    }
+    view.updateState(
+      EditorState.create({
+        doc: editing.doc,
+        selection,
+        storedMarks: selection && !view.composing ? confirmed.state.storedMarks : null,
+      }),
+    )
+    if (visible.docChanged && mounted.content.surrounding) {
+      const paragraph = view.nodeDOM(0)
+      if (paragraph instanceof HTMLElement && paragraph.scrollHeight > paragraph.clientHeight)
+        request('geometry', confirmed)
+    }
+    return true
   }
 
   const commit = (source: SourceState, transaction: Transaction, projected: Transaction) => {
@@ -372,33 +490,12 @@ export function createViewportSurface(
     )
       return request('geometry', confirmed)
 
-    // Reflect only confirmed changes from the owner in this view.
-    const editing = confirmedEditing(mounted.editing, visible, confirmed.state.doc)
-    const geometry = mounted.geometry.map(visible.mapping, editing.doc)
-    if (
-      visible.docChanged &&
-      !retainsPlacements(mounted.editing, editing, mounted.content, geometry)
-    ) {
+    if (!showConfirmed(mounted, confirmed, visible)) {
       // The owner has the edit. Keep the last measured window until a new
       // publication can place the resulting blocks rather than flowing them
       // at the canvas origin.
       request('geometry', confirmed)
-      return
     }
-    const selection = localSelection(confirmed.state.selection, editing)
-    current = {
-      ...mounted,
-      editing,
-      geometry,
-      parked: !selection,
-      source: confirmed.state,
-    }
-    const local = EditorState.create({
-      doc: editing.doc,
-      selection,
-      storedMarks: selection && !view.composing ? confirmed.state.storedMarks : null,
-    })
-    view.updateState(local)
   }
 
   const dispatchTransaction = (transaction: Transaction) => {
@@ -420,6 +517,28 @@ export function createViewportSurface(
     )
     if (!projected) return request('transaction', source, transaction)
     commit(source, transaction, projected)
+  }
+
+  const adoptParkedCaret = (local: EditorView, event: MouseEvent): boolean => {
+    if (
+      !current?.parked ||
+      event.button !== 0 ||
+      event.shiftKey ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey
+    )
+      return false
+    const hit = local.posAtCoords({ left: event.clientX, top: event.clientY })
+    if (!hit || current.editing.toSource(hit.pos) === undefined) return false
+    const position = local.state.doc.resolve(hit.pos)
+    if (position.parent.inlineContent)
+      dispatchTransaction(
+        local.state.tr
+          .setSelection(TextSelection.create(local.state.doc, hit.pos))
+          .setMeta('pointer', true),
+      )
+    return false
   }
 
   const selectAll = (_view: EditorView, event: KeyboardEvent): boolean => {
@@ -477,16 +596,39 @@ export function createViewportSurface(
   const applyHistory = (command: Command) => {
     if (!canRunHistory()) return
     const source = options.readSource()
+    const mounted = current
     // History belongs to the whole document and can target an unmounted page.
     command(source.state, (transaction) => {
-      options.dispatch(transaction)
+      const applied = options.dispatch(transaction)
       if (disposed) return
       const updated = options.readSource()
       if (
-        updated.state.doc !== source.state.doc ||
-        !updated.state.selection.eq(source.state.selection)
+        updated.state.doc === source.state.doc &&
+        updated.state.selection.eq(source.state.selection)
       )
-        request('selection', updated)
+        return
+      const accepted =
+        applied ?? (transaction.doc === updated.state.doc ? [transaction] : undefined)
+      if (
+        mounted &&
+        current === mounted &&
+        view &&
+        mounted.editing.source === source.state.doc &&
+        !retired(mounted.stamp) &&
+        accepted &&
+        accepted[0] === transaction &&
+        accepted.at(-1)?.doc === updated.state.doc
+      ) {
+        const visible = projectViewportFollowUps(
+          mounted.editing,
+          view.state,
+          view.state.tr,
+          accepted,
+        )
+        if (visible) showConfirmed(mounted, updated, visible)
+      }
+      // The caret can map to a mounted range that extends beyond the screen.
+      request('selection', updated)
     })
   }
 
@@ -613,7 +755,12 @@ export function createViewportSurface(
       if (!deferred) return
       const packet = deferred
       deferred = undefined
-      if (!retired(packet) && packet.revision === options.readSource().revision) paint(packet)
+      if (
+        !retired(packet) &&
+        packet.revision === options.readSource().revision &&
+        options.isCurrent?.(packet) !== false
+      )
+        paint(packet)
     }, 0)
     return false
   }
@@ -646,6 +793,87 @@ export function createViewportSurface(
     view.updateState(view.state.apply(trim))
   }
 
+  const paintSurrounding = (
+    content: ViewportContent,
+    active: EditingViewport,
+    source: EditorState,
+  ): boolean => {
+    const paper = content.surrounding
+    if (!paper) {
+      surroundingView?.destroy()
+      surroundingView = undefined
+      return true
+    }
+    const scene = readWindow(source, paper)
+    const position = active.cellTextblock
+    const local = position === undefined ? undefined : scene?.toLocal(position)
+    const paragraph = local === undefined ? undefined : scene?.doc.nodeAt(local)
+    if (
+      !scene ||
+      local === undefined ||
+      position === undefined ||
+      paragraph?.type.name !== 'docParagraph' ||
+      !active.doc.firstChild?.sameMarkup(paragraph) ||
+      active.sourceRange.from !== position + 1 ||
+      active.sourceRange.to !== position + paragraph.nodeSize - 1 ||
+      (['left', 'top', 'width', 'height'] as const).some(
+        (key) => paper.canvas[key] !== content.canvas[key],
+      )
+    )
+      return false
+
+    const state = EditorState.create({ doc: scene.doc })
+    const muted = Decoration.node(local, local + paragraph.nodeSize, {
+      style: 'visibility:hidden !important',
+    })
+    let geometry = placementDecorations(paper, scene).add(scene.doc, [muted])
+    const nodeViews = options.nodeViews?.(source)
+    const table = paper.tablePaint
+    const tablePlacement = table && paper.blocks.find(({ from }) => from === table.position)
+    const tableView: NonNullable<EditorProps['nodeViews']>['docTable'] = (
+      node,
+      editor,
+      getPos,
+      decorations,
+      inner,
+    ) => {
+      const at = getPos()
+      if (table && tablePlacement && at !== undefined && scene.toSource(at) === table.position)
+        return { dom: renderTablePaint(root.ownerDocument, table, position, tablePlacement.box) }
+      return (
+        nodeViews?.docTable?.(node, editor, getPos, decorations, inner) ??
+        DOMSerializer.renderSpec(root.ownerDocument, node.type.spec.toDOM!(node))
+      )
+    }
+    const props = {
+      state,
+      editable: () => false,
+      attributes: {
+        ...canvasAttributes(
+          paper,
+          'position:absolute !important;inset:0 auto auto 0;z-index:0;pointer-events:none;user-select:none',
+        ),
+        'aria-hidden': 'true',
+        inert: '',
+      },
+      decorations: () => geometry,
+      nodeViews: tablePlacement ? { ...nodeViews, docTable: tableView } : nodeViews,
+    }
+    if (surroundingView) surroundingView.update(props)
+    else {
+      surroundingView = new EditorView(root, props)
+      root.prepend(surroundingView.dom)
+    }
+    const borders = pictureBorders(surroundingView, paper)
+    if (borders.size) {
+      geometry = placementDecorations(paper, scene, borders).add(scene.doc, [muted])
+      surroundingView.updateState(state)
+    }
+    positionViewportColumnSplits(surroundingView, paper.decorations ?? [], scene)
+    positionTocLeaders(surroundingView, paper)
+    return true
+  }
+
   const paint = (packet: ViewportPacket): 'applied' | 'needs-range' => {
     const { content } = packet
     const source = options.readSource()
@@ -654,36 +882,20 @@ export function createViewportSurface(
       current?.source === source.state &&
       view?.editable === (options.editable?.(source.state) ?? true) &&
       !content.model &&
+      !current.content.surrounding &&
+      !content.surrounding &&
       samePlacements(current.content, content)
     ) {
       current.stamp = stamp
       options.onPublished?.(packet)
       return 'applied'
     }
-    const editing = createViewportEditing(source.state.doc, content.blocks)
-    let matches = true
-    if (content.model && editing) {
-      try {
-        matches =
-          content.model.from === editing.sourceRange.from &&
-          content.model.to === editing.sourceRange.to &&
-          editing.doc.eq(source.state.schema.nodeFromJSON(content.model.document))
-      } catch {
-        matches = false
-      }
-    }
-    if (
-      !editing ||
-      !matches ||
-      !validBox(content.canvas) ||
-      content.blocks.some(
-        ({ box, pictures }) =>
-          !validBox(box) || pictures?.some((picture) => !validBox(picture.box)),
-      )
-    ) {
+    const editing = readWindow(source.state, content)
+    if (!editing || !paintSurrounding(content, editing, source.state)) {
       request('layout', source)
       return 'needs-range'
     }
+    root.style.width = `${content.canvas.width}px`
     const selection = localSelection(source.state.selection, editing)
     const state = EditorState.create({
       doc: editing.doc,
@@ -699,7 +911,19 @@ export function createViewportSurface(
       source: source.state,
       stamp,
     }
+    const { beforePaste, ...clipboard } = options.clipboard ?? {}
     const props = {
+      ...clipboard,
+      clipboardTextSerializer: (_slice: unknown, local: EditorView) => {
+        const { doc, schema, selection } = local.state
+        const textSerializers = getTextSerializersFromSchema(schema)
+        return [...selection.ranges]
+          .sort((a, b) => a.$from.pos - b.$from.pos)
+          .map(({ $from, $to }) =>
+            getTextBetween(doc, { from: $from.pos, to: $to.pos }, { textSerializers }),
+          )
+          .join('\n\n')
+      },
       state,
       attributes,
       editable,
@@ -707,6 +931,10 @@ export function createViewportSurface(
       nodeViews: options.nodeViews?.(source.state),
       handleKeyDown,
       handleDOMEvents: {
+        ...(beforePaste ? { paste: beforePaste } : {}),
+        focus: ownerFocusEvent('focus'),
+        blur: ownerFocusEvent('blur'),
+        mousedown: adoptParkedCaret,
         beforeinput: historyInput,
         compositionstart: startComposition,
         compositionend: finishComposition,
@@ -716,7 +944,7 @@ export function createViewportSurface(
       dispatchTransaction,
     }
     if (view) view.update(props)
-    else view = new EditorView(mount, props)
+    else view = new EditorView(root, props)
     const borders = pictureBorders(view, content)
     if (borders.size) {
       current.geometry = placementDecorations(content, editing, borders)
@@ -727,6 +955,102 @@ export function createViewportSurface(
     options.onPublished?.(packet)
     return 'applied'
   }
+
+  const activeMap = () => {
+    const source = options.readSource()
+    return current?.editing.source === source.state.doc && !retired(current.stamp)
+      ? current.editing
+      : undefined
+  }
+  const hitTest = (point: { left: number; top: number }) => {
+    const editing = activeMap()
+    const hit = editing && view?.posAtCoords(point)
+    if (!hit || !editing) return null
+    const pos = editing.toSource(hit.pos)
+    return pos === undefined ? null : { pos, inside: editing.toSource(hit.inside) ?? -1 }
+  }
+  const mappedView: Partial<EditorView> = {
+    get dom() {
+      return view?.dom ?? root
+    },
+    get root() {
+      return view?.root ?? root.ownerDocument
+    },
+    get editable() {
+      return view?.editable ?? false
+    },
+    get composing() {
+      return view?.composing ?? false
+    },
+    focus: () => view?.focus(),
+    hasFocus: () => view?.hasFocus() ?? false,
+    posAtCoords: hitTest,
+    coordsAtPos(position, side) {
+      const local = activeMap()?.toLocal(position)
+      if (local === undefined || !view)
+        throw new RangeError('Document position is outside the mounted body')
+      return view.coordsAtPos(local, side)
+    },
+    nodeDOM(position) {
+      const local = activeMap()?.toLocal(position)
+      return local === undefined ? null : (view?.nodeDOM(local) ?? null)
+    },
+    domAtPos(position, side) {
+      const local = activeMap()?.toLocal(position)
+      if (local === undefined || !view)
+        throw new RangeError('Document position is outside the mounted body')
+      return view.domAtPos(local, side)
+    },
+    posAtDOM(node, offset, bias) {
+      const local = view?.posAtDOM(node, offset, bias)
+      const position = local === undefined ? undefined : activeMap()?.toSource(local)
+      if (position === undefined)
+        throw new RangeError('DOM position does not belong to the mounted body')
+      return position
+    },
+  }
+  const releasePresentation =
+    options.ownerEditor &&
+    mountDocumentPresentation(options.ownerEditor, {
+      get dom() {
+        return view?.dom
+      },
+      editorView: mappedView,
+      focus: () => view?.focus(),
+      boundsAt(position) {
+        const local = activeMap()?.toLocal(position)
+        return local === undefined ? undefined : view?.coordsAtPos(local, 1)
+      },
+      hitTest,
+      scrollTo(from, to) {
+        const source = options.readSource()
+        options.requestRange({
+          reason: 'navigation',
+          revision: source.revision,
+          selection: source.state.selection,
+          target: { from, to, align: 'node' },
+        })
+      },
+      select(selection, centerCaret) {
+        const source = options.readSource()
+        if (selection.$from.doc !== source.state.doc) return
+        const mounted = current
+        options.dispatch(source.state.tr.setSelection(selection))
+        const updated = options.readSource()
+        if (disposed) return
+        if (mounted && view && activeMap()) showConfirmed(mounted, updated, view.state.tr)
+        options.requestRange({
+          reason: 'navigation',
+          revision: updated.revision,
+          selection: updated.state.selection,
+          target: {
+            from: updated.state.selection.from,
+            to: updated.state.selection.to,
+            align: centerCaret ? 'caret' : 'node',
+          },
+        })
+      },
+    })
 
   return {
     get view() {
@@ -771,12 +1095,16 @@ export function createViewportSurface(
     destroy() {
       if (disposed) return
       disposed = true
+      releasePresentation?.()
       window.clearTimeout(compositionTimer)
       pendingHistory.length = 0
       deferred = undefined
       current = undefined
       view?.destroy()
       view = undefined
+      surroundingView?.destroy()
+      surroundingView = undefined
+      root.remove()
       if (compositionSession) {
         const transaction = closeComposition(options.readSource())
         if (transaction) options.dispatch(transaction)

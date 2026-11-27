@@ -9,7 +9,7 @@ import {
   type Ref,
 } from 'react'
 import type { Editor } from '@tiptap/core'
-import { NodeSelection, TextSelection, type Transaction } from '@tiptap/pm/state'
+import { TextSelection, type Transaction } from '@tiptap/pm/state'
 import { DecorationSet } from '@tiptap/pm/view'
 import { useI18n, type StringKey } from '../i18n/locale'
 import { searchPluginKey } from '../editor/extensions'
@@ -39,7 +39,8 @@ import {
   type GoToTarget,
   type PageLayout,
 } from '../editor/goto'
-import { pagedViewProbe, revealDocumentRange } from '../editor/paged-view-probe'
+import { documentPresentation } from '../editor/document-presentation'
+import { pagedViewProbe } from '../editor/paged-view-probe'
 
 export { foldCase } from '../editor/find'
 
@@ -72,6 +73,7 @@ interface FindPanelProps {
   focusGoToNonce?: number
   /** last pagination pass, for page / section / line targets */
   layout?: () => PageLayout | null
+  measuredPages?: () => readonly (number | null)[] | undefined
 }
 
 export interface FindPanelHandle {
@@ -82,8 +84,9 @@ export function FindPanelHost({
   editor,
   hasDocument,
   layout,
+  measuredPages,
   panelRef,
-}: Pick<FindPanelProps, 'editor' | 'layout'> & {
+}: Pick<FindPanelProps, 'editor' | 'layout' | 'measuredPages'> & {
   hasDocument: boolean
   panelRef: Ref<FindPanelHandle>
 }) {
@@ -110,6 +113,7 @@ export function FindPanelHost({
       focusReplaceNonce={request.replace}
       focusGoToNonce={request.goto}
       layout={layout}
+      measuredPages={measuredPages}
     />
   )
 }
@@ -141,7 +145,7 @@ const TARGET_KEYS: Record<GoToTarget, StringKey> = {
 }
 
 /** index of the last item at or before the caret, -1 when none */
-function lastAtOrBefore(positions: Array<number | null>, caret: number): number {
+function lastAtOrBefore(positions: readonly (number | null)[], caret: number): number {
   let idx = -1
   positions.forEach((p, i) => {
     if (p !== null && p <= caret) idx = i
@@ -151,25 +155,10 @@ function lastAtOrBefore(positions: Array<number | null>, caret: number): number 
 
 /** place the caret at `pos` (nearest valid text position) and bring it on screen */
 function jumpTo(editor: Editor, pos: number, centerCaret = false): void {
-  const { state, view } = editor
+  const { state } = editor
   const clamped = Math.max(0, Math.min(pos, state.doc.content.size))
   const sel = TextSelection.near(state.doc.resolve(clamped), 1)
-  revealDocumentRange(view, sel.from, sel instanceof NodeSelection ? sel.from : sel.to)
-  if (centerCaret) {
-    view.dispatch(state.tr.setSelection(sel))
-    const scroller = view.dom.closest('.editor-scroll')
-    if (scroller) {
-      const caret = view.coordsAtPos(sel.from, 1)
-      const viewport = scroller.getBoundingClientRect()
-      scroller.scrollTop += (caret.top + caret.bottom - viewport.top - viewport.bottom) / 2
-      return
-    }
-  } else {
-    view.dispatch(state.tr.setSelection(sel).scrollIntoView())
-  }
-  const { node } = view.domAtPos(sel.from)
-  const el = node instanceof HTMLElement ? node : node.parentElement
-  el?.scrollIntoView({ block: 'center' })
+  documentPresentation(editor).select(sel, centerCaret)
 }
 
 export function FindPanel({
@@ -179,6 +168,7 @@ export function FindPanel({
   focusReplaceNonce,
   focusGoToNonce,
   layout,
+  measuredPages,
 }: FindPanelProps) {
   const { t } = useI18n()
   const canEdit = editor.isEditable
@@ -223,9 +213,7 @@ export function FindPanel({
 
   const scrollTo = useCallback(
     (range: Range) => {
-      const { node } = editor.view.domAtPos(range.from)
-      const el = node instanceof HTMLElement ? node : node.parentElement
-      el?.scrollIntoView({ block: 'center' })
+      documentPresentation(editor).scrollTo(range.from, range.to)
     },
     [editor],
   )
@@ -468,6 +456,26 @@ export function FindPanel({
   const runGoTo = (dir: 1 | -1, explicit = false) => {
     const lay = layout?.() ?? null
     const caret = editor.state.selection.from
+    const pages = target === 'page' ? measuredPages?.() : undefined
+    if (pages) {
+      const input = explicit ? gotoInput : ''
+      const index = resolveGoToIndex(
+        input,
+        () => Math.max(0, lastAtOrBefore(pages, caret)),
+        pages.length,
+        dir,
+      )
+      if (index === null) return setGotoMiss(true)
+      let page = index
+      if (!input.trim()) {
+        while (page >= 0 && page < pages.length && pages[page] === null) page += dir
+      }
+      const position = pages[page]
+      if (position == null) return setGotoMiss(true)
+      setGotoMiss(false)
+      jumpTo(editor, position, true)
+      return
+    }
     const view = editor.view
     const probe = pagedViewProbe(view)
     if (target === 'section' || target === 'line') probe?.restore()
