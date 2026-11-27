@@ -67,7 +67,10 @@ async function bootstrap(): Promise<void> {
   getOptionalDocsHost()?.onAuthorNameChanged?.(setAuthorName)
   createRoot(document.getElementById('root')!).render(
     <LocaleProvider initial={lang}>
-      <App agentUi={nativeDocsAgentUi} />
+      <App
+        agentUi={nativeDocsAgentUi}
+        projectedBody={import.meta.env.VITE_DOCS_PAGED_BODY === '1'}
+      />
     </LocaleProvider>,
   )
 }

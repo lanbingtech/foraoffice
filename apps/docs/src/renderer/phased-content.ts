@@ -331,7 +331,7 @@ export function setContentPhased(
     }
     return { applied, failure }
   }
-  const appendChunk = () => {
+  const appendChunk = (finishInOnePass = false) => {
     if (my !== token) return
     if (host.isDestroyed()) return finish(false)
     if (previous) {
@@ -346,7 +346,9 @@ export function setContentPhased(
       )
     }
     const start = index
-    const { end, work } = batchFrom(start, budget)
+    const { end, work } = finishInOnePass
+      ? { end: content.length, work: 0 }
+      : batchFrom(start, budget)
     const started = now()
     const result = publish(content.slice(start, end))
     if (!result) return finish(false)
@@ -371,7 +373,9 @@ export function setContentPhased(
   if (host.canMountTail) {
     void host.canMountTail.then((mount) => {
       if (my !== token) return
-      if (mount) schedule(appendChunk)
+      // The dedicated layout renderer has no input or visible frames to protect.
+      // Once the owner has the source, settle the remaining layout in one mount.
+      if (mount) schedule(() => appendChunk(true))
       else finish(false)
     })
   } else schedule(appendChunk)

@@ -15,6 +15,7 @@ import { TRACK_IGNORE } from './editor/revisions'
 
 const noopSubscription = () => () => {}
 const SOURCE_BLOCKS_PER_CHUNK = 50
+const OPENING_VIEWPORT_BUDGET_MS = 2_000
 
 function runLayout(
   port: MessagePort,
@@ -65,12 +66,20 @@ function runLayout(
   let receivedRevision = 0
   let revision = 0
   let stopSource: ((reason: Error) => void) | undefined
+  let tailTimer: number | undefined
   let releaseTail!: (mount: boolean) => void
   const canMountTail = new Promise<boolean>((resolve) => (releaseTail = resolve))
   const edits: Array<Extract<LayoutMessage, { type: 'edit' }>> = []
   const finishSource = (mount: boolean) => {
     stopSource = undefined
-    releaseTail(mount)
+    if (!mount || initialViewportPublished) {
+      window.clearTimeout(tailTimer)
+      releaseTail(mount)
+    } else {
+      // Give the small initial layout a turn before mounting the full tail.
+      // Some documents cannot publish an exact prefix, so always release it.
+      tailTimer = window.setTimeout(() => releaseTail(true), OPENING_VIEWPORT_BUDGET_MS)
+    }
   }
   const fail = (reason: string) => {
     if (failed) return
@@ -219,6 +228,10 @@ function runLayout(
       return
     initialViewportPublished = true
     port.postMessage({ type: 'initial-viewport', revision: 0, content } satisfies LayoutReply)
+    if (tailTimer !== undefined) {
+      window.clearTimeout(tailTimer)
+      releaseTail(true)
+    }
   }
   const reportOpen = (openedEditor: Editor | null) => {
     if (!openedEditor) {

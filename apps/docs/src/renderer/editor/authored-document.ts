@@ -3,6 +3,7 @@ import { Fragment, type Node, type Schema } from '@tiptap/pm/model'
 import { EditorState, Plugin, type PluginSpec, type Transaction } from '@tiptap/pm/state'
 import type { EditorView } from '@tiptap/pm/view'
 import type { PmNode } from './convert'
+import { mountedDocumentPresentation } from './document-presentation'
 import { dispatchDocumentTransaction } from './undo-redo'
 
 const presentation = new WeakSet<Plugin>()
@@ -75,6 +76,8 @@ export class AuthoredEditor extends Editor {
         if (key === 'isDestroyed') return this.isDestroyed
         if (key === 'dispatch' && dispatch) return dispatch
         if (key === 'updateState' && this.disposed) return () => {}
+        const presentation = mountedDocumentPresentation(this)?.editorView
+        if (presentation && Reflect.has(presentation, key)) return Reflect.get(presentation, key)
         return Reflect.get(target, key, receiver)
       },
     })

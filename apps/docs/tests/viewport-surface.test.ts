@@ -4,6 +4,7 @@ import { Schema } from '@tiptap/pm/model'
 import {
   AllSelection,
   EditorState,
+  NodeSelection,
   Plugin,
   TextSelection,
   type Transaction,
@@ -11,6 +12,7 @@ import {
 import { Decoration, DecorationSet, EditorView } from '@tiptap/pm/view'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { columnSplitDecoration, patchSplitNodeViews } from '../src/renderer/editor/column-layout'
+import { documentPresentation } from '../src/renderer/editor/document-presentation'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { setPageGaps } from '../src/renderer/editor/pagination-gaps'
 import {
@@ -127,10 +129,14 @@ function placed(blocks: ViewportContent['blocks']): ViewportContent {
 it('uses the authored table caret for clicks, deletion, and continued input in a projected cell', () => {
   const lead = paragraph('lead')
   const original = paragraph('A')
+  const sibling = paragraph('Adjacent cell')
   const table = schema.node(
     'docTable',
     null,
-    schema.node('docTableRow', null, schema.node('docTableCell', null, original)),
+    schema.node('docTableRow', null, [
+      schema.node('docTableCell', null, original),
+      schema.node('docTableCell', null, sibling),
+    ]),
   )
   const doc = schema.node('doc', null, [lead, table])
   const position = lead.nodeSize + 3
@@ -156,6 +162,10 @@ it('uses the authored table caret for clicks, deletion, and continued input in a
     const para = state.doc.nodeAt(position)!
     const content: ViewportContent = {
       canvas,
+      surrounding: placed([
+        { from: 0, to: lead.nodeSize, box: box(5, 375) },
+        { from: lead.nodeSize, to: state.doc.content.size, box: box(5, 400, 200, 22) },
+      ]),
       blocks: [
         {
           from: lead.nodeSize,
@@ -180,6 +190,12 @@ it('uses the authored table caret for clicks, deletion, and continued input in a
   }
   publish()
   const view = surface.view!
+  const paper = mount.querySelector('[inert]')!
+  expect(paper.getAttribute('contenteditable')).toBe('false')
+  expect(paper.querySelector<HTMLElement>('td:first-child p')?.style.visibility).toBe('hidden')
+  const neighboring = paper.querySelector('td:last-child p')!
+  expect(neighboring.textContent).toBe(sibling.textContent)
+  expect(neighboring.getAttribute('style')).toBeNull()
   expect(view.dom.querySelector('p')?.classList.contains('has-tab-stops')).toBe(true)
   vi.spyOn(view, 'posAtCoords').mockReturnValue({ pos: 1, inside: 0 })
   view.dom.querySelector('p')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
@@ -210,11 +226,80 @@ it('uses the authored table caret for clicks, deletion, and continued input in a
   expect(view.state.doc.textContent).toBe(state.doc.nodeAt(position)?.textContent)
   expect(view.state.selection.from).toBe(state.selection.from - position)
   expect(view.dom.querySelector('p')?.textContent).toBe('甲乙')
+  expect(mount.querySelector('[inert] td:last-child p')).toBe(neighboring)
   expect(requestRange).toHaveBeenLastCalledWith({
     reason: 'selection',
     revision,
     selection: state.selection,
   })
+})
+
+it('uses authored positions when ordinary Docs commands address a projected body', () => {
+  const owner = new Editor({
+    element: null,
+    extensions: editorExtensions,
+    content: {
+      type: 'doc',
+      content: ['outside', 'inside'].map((text) => ({
+        type: 'docParagraph',
+        content: [{ type: 'text', text }],
+      })),
+    },
+  })
+  expect(documentPresentation(owner).dom).toBeUndefined()
+  const mount = document.body.appendChild(document.createElement('div'))
+  const requestRange = vi.fn()
+  const surface = createViewportSurface(mount, {
+    ownerEditor: owner,
+    readSource: () => ({ state: owner.state, revision: 0 }),
+    dispatch: (tr) => owner.view.dispatch(tr),
+    requestRange,
+  })
+  mounted.push(surface)
+  try {
+    const from = owner.state.doc.firstChild!.nodeSize
+    expect(
+      surface.publish({
+        revision: 0,
+        publication: 1,
+        sequence: 0,
+        content: placed([{ from, to: owner.state.doc.content.size, box: box(5, 400) }]),
+      }),
+    ).toBe('applied')
+    const local = surface.view!
+    const coords = { left: 5, right: 5, top: 400, bottom: 412 }
+    const locate = vi.spyOn(local, 'coordsAtPos').mockReturnValue(coords)
+    vi.spyOn(local, 'posAtCoords').mockReturnValue({ pos: 2, inside: 0 })
+    const body = documentPresentation(owner)
+    expect(body.dom).toBe(local.dom)
+    expect(body.boundsAt(from + 2)).toEqual(coords)
+    expect(locate).toHaveBeenCalledWith(2, 1)
+    expect(body.boundsAt(1)).toBeUndefined()
+    expect(body.hitTest({ left: 5, top: 406 })).toEqual({ pos: from + 2, inside: from })
+
+    const selection = TextSelection.create(owner.state.doc, from + 3)
+    body.select(selection, true)
+    expect(owner.state.selection.eq(selection)).toBe(true)
+    expect(local.state.selection.from).toBe(3)
+    expect(requestRange).toHaveBeenLastCalledWith({
+      reason: 'navigation',
+      revision: 0,
+      selection,
+      target: { from: from + 3, to: from + 3, align: 'caret' },
+    })
+    body.scrollTo(1, 3)
+    expect(requestRange).toHaveBeenLastCalledWith({
+      reason: 'navigation',
+      revision: 0,
+      selection,
+      target: { from: 1, to: 3, align: 'node' },
+    })
+    expect(owner.state.selection.eq(selection)).toBe(true)
+  } finally {
+    surface.destroy()
+    expect(documentPresentation(owner).dom).toBeUndefined()
+    owner.destroy()
+  }
 })
 
 it('paints the source transaction chain before accepting the next visible edit', () => {
@@ -542,10 +627,10 @@ describe('viewport surface', () => {
     },
   )
 
-  it('uses Tiptap text serializers for selected source atoms outside the viewport', () => {
+  it('uses Tiptap text serializers for source atoms in both document and local selections', () => {
     const first = paragraph('abc')
     const doc = schema.node('doc', null, [first, schema.nodes.docAnchor.create()])
-    const state = EditorState.create({ doc, selection: new AllSelection(doc) })
+    let state = EditorState.create({ doc, selection: new AllSelection(doc) })
     const surface = createViewportSurface(
       document.body.appendChild(document.createElement('div')),
       {
@@ -566,6 +651,16 @@ describe('viewport surface', () => {
     Object.defineProperty(event, 'clipboardData', { value: { setData } })
     surface.view!.dom.dispatchEvent(event)
     expect(setData).toHaveBeenCalledWith('text/plain', 'abc\n\nsource atom')
+
+    state = state.apply(state.tr.setSelection(NodeSelection.create(doc, first.nodeSize)))
+    surface.publish({
+      revision: 0,
+      publication: 1,
+      sequence: 2,
+      content: placed([{ from: first.nodeSize, to: doc.content.size, box: box(30, 430) }]),
+    })
+    const view = surface.view!
+    expect(view.serializeForClipboard(view.state.selection.content()).text).toBe('source atom')
   })
 
   it('selects and copies the whole document while painting only its visible range', () => {

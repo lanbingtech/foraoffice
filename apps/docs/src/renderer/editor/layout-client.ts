@@ -14,6 +14,7 @@ import {
   type ViewportGeometry,
   type ViewportPageFrame,
   type ViewportReveal,
+  type ViewportRevealScope,
 } from './viewport-layout'
 
 export type LayoutMessage =
@@ -30,7 +31,7 @@ export type LayoutMessage =
       type: 'reveal'
       position: number
       height: number
-      scope?: 'table-cell'
+      scope?: ViewportRevealScope
     })
   | { type: 'edit'; fromRevision: number; toRevision: number; steps: unknown[] }
 
@@ -86,6 +87,8 @@ export type LayoutReply =
   | { type: 'failure'; reason: string }
 
 interface LayoutClientEvents {
+  /** A scroll surface can keep a committed geometry while the same source is remeasured. */
+  retainCommittedViewport?(publication: number): boolean
   source?: {
     extensions: Extensions
     configure?(editor: Editor): void
@@ -144,10 +147,16 @@ export class LayoutClient {
   }
 
   /** Reveal a position from the same source revision as the current layout. */
-  requestReveal(position: number, height: number, revision: number, scope?: 'table-cell'): boolean {
+  requestReveal(
+    position: number,
+    height: number,
+    revision: number,
+    scope?: ViewportRevealScope,
+  ): boolean {
     if (
       !this.displayIsCurrent() ||
       !this.active ||
+      this.active.publication !== this.latestPublication ||
       revision !== this.revision ||
       !Number.isSafeInteger(position) ||
       position < 0 ||
@@ -230,6 +239,7 @@ export class LayoutClient {
     return (
       data.revision === this.revision &&
       data.publication === this.active?.publication &&
+      data.publication === this.latestPublication &&
       data.sequence === this.sequence
     )
   }
@@ -293,6 +303,10 @@ export class LayoutClient {
         if (data.publication <= this.latestPublication) return
         this.latestPublication = data.publication
         this.clearInitialViewport()
+        // Geometry already committed to the foreground is an immutable snapshot.
+        // It remains usable for local scroll until a new snapshot supersedes it.
+        if (this.active?.geometry && this.events.retainCommittedViewport?.(this.active.publication))
+          return
         this.clear()
         return
       case 'viewport':

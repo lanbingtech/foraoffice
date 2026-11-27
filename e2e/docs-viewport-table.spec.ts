@@ -114,11 +114,11 @@ test('background pagination maps split table lines to their authored cells', asy
           port1.postMessage({
             type: 'reveal',
             position: position + 1,
-            height: innerHeight,
+            height: 24,
             publication: publication.publication,
             revision: 0,
             sequence,
-            scope: 'table-cell',
+            scope: 'table-window',
           })
           return answer
         }
@@ -174,8 +174,19 @@ test('background pagination maps split table lines to their authored cells', asy
           },
         ],
         model: { document: { content: [{ type: 'docParagraph' }] } },
+        surrounding: {
+          tablePaint: {
+            position: result.tablePosition,
+            clip: { height: 24 },
+          },
+        },
       },
     })
+    if (result.cell.type !== 'viewport' || !result.cell.content?.surrounding?.tablePaint)
+      throw new Error('The physical table window is unavailable')
+    const painted = result.cell.content.surrounding.tablePaint.paragraphs
+    expect(painted.some((paragraph) => paragraph.position === result.linePosition)).toBe(true)
+    expect(painted.length).toBeLessThan(10)
     expect(result.clippedCell).toMatchObject({ type: 'reveal-unavailable', revision: 0 })
     expect(
       result.frames.every(

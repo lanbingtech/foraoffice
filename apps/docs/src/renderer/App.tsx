@@ -365,6 +365,8 @@ import {
   type TrackChangesOptions,
 } from './editor/track-changes-options'
 import { pagePositions, type PageLayout } from './editor/goto'
+import { documentPresentation } from './editor/document-presentation'
+import { startDocumentViewportSession } from './editor/document-viewport-session'
 import { viewportLayout, type ViewportLayout } from './editor/viewport-layout'
 import type { ViewportLayoutDetails } from './editor/layout-client'
 import {
@@ -863,6 +865,7 @@ export function App({
   onInitialViewport,
   onViewportOpen,
   sourceImport,
+  projectedBody = false,
   agentUi,
   embedded = false,
 }: {
@@ -871,6 +874,7 @@ export function App({
   onInitialViewport?: (value: ViewportLayout, modelEnd: number, paperEnd: number) => void
   onViewportOpen?: (editor: Editor | null) => void
   sourceImport?: FileActionContext['sourceImport']
+  projectedBody?: boolean
   agentUi?: DocsAgentUi
   embedded?: boolean
 } = {}) {
@@ -887,6 +891,15 @@ export function App({
   // subscribe to language switches for re-render; strings all go through module-level t, so memoized callbacks never capture stale closures
   const { lang } = useI18n()
   const [doc, setDoc] = useState<DocState | null>(null)
+  const [body, setBody] = useState<{
+    editor: Editor
+    host: HTMLElement
+    projected: boolean
+    restoreFocus?: boolean
+  } | null>(null)
+  const viewportSession = useRef<ReturnType<typeof startDocumentViewportSession> | null>(null)
+  const preparingBody = useRef<ReturnType<NonNullable<FileActionContext['prepareBody']>>>(null)
+  const nativeBodyOwner = useRef<Editor | null>(null)
   /** a phased open is still streaming the document tail: editor stays read-only */
   const [docLoading, setDocLoading] = useState(false)
   /** true until the pending-open / new-blank boot checks settle; the start screen stays hidden meanwhile */
@@ -1487,7 +1500,7 @@ export function App({
 
   const editorRef = useRef<Editor | null>(null)
   const zoteroControllerRef = useRef<ZoteroDocumentController | null>(null)
-  const editor = useEditor({
+  const nativeEditor = useEditor({
     extensions: editorExtensions,
     content: { type: 'doc', content: [{ type: 'docParagraph' }] },
     onMount: ({ editor: mounted }) => {
@@ -1755,6 +1768,38 @@ export function App({
       forceRender()
     },
   })
+  const editor = body?.editor ?? nativeEditor
+  const mountNativeBody = useCallback(
+    (owner: Editor, host: HTMLElement, restoreFocus = false) => {
+      nativeBodyOwner.current = owner
+      owner.setOptions({ ...nativeEditor.options, element: host })
+      owner.mount(host)
+      setBody({ editor: owner, host, projected: false, restoreFocus })
+    },
+    [nativeEditor],
+  )
+  useLayoutEffect(() => {
+    if (body?.restoreFocus) body.editor.view.focus()
+  }, [body])
+  const restoreNativeBody = useCallback(() => {
+    const session = viewportSession.current
+    if (!session) return
+    viewportSession.current = null
+    const owner = session.takeEditor()
+    if (!owner) session.dispose()
+    else mountNativeBody(owner, document.createElement('div'))
+  }, [mountNativeBody])
+  useEffect(
+    () => () => {
+      preparingBody.current?.discard()
+      preparingBody.current = null
+      viewportSession.current?.dispose()
+      viewportSession.current = null
+      nativeBodyOwner.current?.destroy()
+      nativeBodyOwner.current = null
+    },
+    [],
+  )
   useEffect(() => {
     saveTrackChangesOptions(tcOptions)
     trackChangesOptionsState.current = tcOptions
@@ -2489,6 +2534,97 @@ export function App({
   }, [doc?.parsed, editor, setDocCss, tornDown])
   fileCtxRef.current = {
     sourceImport,
+    prepareBody:
+      projectedBody && !doc && !embedded && !onViewportLayout && window.desktop
+        ? (file) => {
+            const pane = scrollContainerRef.current
+            if (!pane) return null
+            preparingBody.current?.discard()
+            const host = pane.ownerDocument.createElement('div')
+            let activated = false
+            let editingOwner: Editor | undefined
+            let currentPage = 1
+            let totalPages = 1
+            const input = nativeEditor.options.editorProps
+            let offer!: (value: { editor: Editor; activate(): void } | null) => void
+            const ready = new Promise<{ editor: Editor; activate(): void } | null>((resolve) => {
+              offer = resolve
+            })
+            try {
+              const session = startDocumentViewportSession(
+                {
+                  type: 'open',
+                  file,
+                  width: pane.clientWidth,
+                  height: pane.clientHeight,
+                  language: lang,
+                },
+                {
+                  mount: host,
+                  scroller: pane,
+                  extensions: editorExtensions,
+                  configure: (owner) => {
+                    editingOwner = owner
+                    owner.on('update', nativeEditor.options.onUpdate)
+                    owner.on('focus', nativeEditor.options.onFocus)
+                    owner.on('selectionUpdate', nativeEditor.options.onSelectionUpdate)
+                  },
+                  surface: {
+                    attributes: { class: 'doc-page' },
+                    clipboard: {
+                      beforePaste: input.handleDOMEvents?.paste,
+                      clipboardTextParser: input.clipboardTextParser,
+                      handlePaste: input.handlePaste,
+                      transformPasted: input.transformPasted,
+                      transformPastedHTML: nativeEditor.extensionManager.transformPastedHTML(
+                        input.transformPastedHTML,
+                      ),
+                    },
+                    editable: () => editingOwner?.options.editable === true,
+                  },
+                  onReady(owner) {
+                    offer({
+                      editor: owner,
+                      activate() {
+                        activated = true
+                        preparingBody.current = null
+                        viewportSession.current = session
+                        setBody({ editor: owner, host, projected: true })
+                        publishPage(currentPage, totalPages)
+                      },
+                    })
+                  },
+                  onPage(current, total) {
+                    currentPage = current
+                    totalPages = total
+                    if (activated) publishPage(currentPage, totalPages)
+                  },
+                  onFailure(_reason, takeEditor) {
+                    const focused = activated && editingOwner?.view.hasFocus()
+                    const owner = activated ? takeEditor() : undefined
+                    if (owner) {
+                      viewportSession.current = null
+                      mountNativeBody(owner, host, focused === true)
+                    }
+                    offer(null)
+                  },
+                },
+              )
+              const pending = {
+                ready,
+                discard() {
+                  if (preparingBody.current === pending) preparingBody.current = null
+                  session.dispose()
+                  offer(null)
+                },
+              }
+              preparingBody.current = pending
+              return pending
+            } catch {
+              return null
+            }
+          }
+        : undefined,
     commitDocumentState: (operation) => flushSync(operation),
     editor,
     doc,
@@ -4334,6 +4470,7 @@ export function App({
 
   // status-bar page number: real page slicing (same algorithm as the pagination preview). Edits remeasure with debounce; scrolling only relocates
   useEffect(() => {
+    if (body?.projected) return
     if (!doc || !section) {
       publishPage(1, 1)
       setLastPageNo(null)
@@ -6798,6 +6935,7 @@ export function App({
   }, [
     doc,
     docCss,
+    body?.projected,
     onViewportLayout,
     onInitialViewport,
     multipageMode,
@@ -7724,9 +7862,11 @@ export function App({
       let pos: number | null = null
       if (fromKeyboard && editor) {
         pos = editor.state.selection.head
-        const c = editor.view.coordsAtPos(pos)
-        x = c.left
-        y = c.bottom
+        const c = documentPresentation(editor).boundsAt(pos)
+        if (c) {
+          x = c.left
+          y = c.bottom
+        }
       }
       let imageSrc: string | null = null
       if (bubble && editor) {
@@ -7795,7 +7935,7 @@ export function App({
           }
         }
         if (!selectedNode && !fromKeyboard) {
-          const hit = editor.view.posAtCoords({ left: x, top: y })
+          const hit = documentPresentation(editor).hitTest({ left: x, top: y })
           if (hit) {
             pos = hit.pos
             const { from, to } = editor.state.selection
@@ -8758,8 +8898,9 @@ export function App({
     [docsInspection],
   )
   if (runtimeDocumentRef.current) runtimeDocumentRef.current.annotations = docsAnnotations
-  fileCtxRef.current.beforeDocumentReplace = () => {
-    if (window.desktop) window.postMessage('docs:disconnect-layout', '*')
+  fileCtxRef.current.beforeDocumentReplace = (keepPreparedLayout) => {
+    restoreNativeBody()
+    if (window.desktop && !keepPreparedLayout) window.postMessage('docs:disconnect-layout', '*')
     pendingStreamedEdit.current = undefined
     docsCommands.releaseAll()
     docsAnnotations.reset()
@@ -8813,7 +8954,7 @@ export function App({
       pane.removeEventListener('scroll', onScroll)
       if (frame !== undefined) cancelAnimationFrame(frame)
     }
-  }, [editor, readScrollPosition])
+  }, [editor, body?.projected, readScrollPosition])
   useEffect(() => {
     const pane = scrollContainerRef.current
     if (!editor || !pane || !hasRuntimeDocument) return
@@ -8827,7 +8968,7 @@ export function App({
       screenImages.current = undefined
       readiness?.dispose()
     }
-  }, [editor, hasRuntimeDocument, runtimeIdentity, readScrollPosition])
+  }, [editor, body?.projected, hasRuntimeDocument, runtimeIdentity, readScrollPosition])
   useEffect(() => {
     if (runtimeDocumentRef.current) {
       docsAnnotations.activate()
@@ -9847,6 +9988,7 @@ export function App({
               hasDocument={!!doc}
               panelRef={findPanelRef}
               layout={publishedPageLayout}
+              measuredPages={() => viewportSession.current?.pagePositions()}
             />
             {doc && showNav && (
               <NavPane
@@ -10009,7 +10151,16 @@ export function App({
                             }
                           />
                         )}
-                        <EditorContent editor={editor} />
+                        {body?.projected ? (
+                          <div
+                            ref={(element) => {
+                              if (element && body.host.parentElement !== element)
+                                element.replaceChildren(body.host)
+                            }}
+                          />
+                        ) : (
+                          <EditorContent editor={editor} />
+                        )}
                         {/* footnotes already shown per page in page gaps aren't repeated at the end (last page's footnotes still live here) */}
                         <PageFootnotes
                           notes={footnotes}

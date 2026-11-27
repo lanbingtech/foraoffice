@@ -24,6 +24,7 @@ import {
   type PictureFragment,
   type ViewportBounds,
 } from './viewport-fragments'
+import { tablePaintReader, type TablePaint } from './viewport-table-paint'
 
 interface PositionedBlock extends ViewportModelBlock {
   box: LayoutBox
@@ -47,15 +48,21 @@ export interface ViewportGeometry {
   decorations?: ViewportDecorations
 }
 
-export interface ViewportContent {
+interface ViewportWindow {
   canvas: LayoutBox
   blocks: PositionedBlock[]
   decorations?: ViewportDecorations
+  tablePaint?: TablePaint
   model?: {
     document: DocumentJson
     from: number
     to: number
   }
+}
+
+export interface ViewportContent extends ViewportWindow {
+  /** The surrounding window from the same layout as an active cell paragraph. */
+  surrounding?: ViewportWindow
 }
 
 /** A source position and the visible range's origin in canvas coordinates. */
@@ -71,6 +78,8 @@ export interface ViewportPageFrame extends LayoutBox {
   sourceStart: number | null
 }
 
+export type ViewportRevealScope = 'table-cell' | 'table-window'
+
 /** A view-local handle. Only the DOM-free results cross the renderer boundary. */
 export interface ViewportLayout {
   document: PmNode
@@ -83,7 +92,7 @@ export interface ViewportLayout {
   reveal(
     position: number,
     height: number,
-    scope?: 'table-cell',
+    scope?: ViewportRevealScope,
   ): { content: ViewportContent; reveal: ViewportReveal } | undefined
 }
 
@@ -268,6 +277,7 @@ export function viewportLayout(
   firstPage?: Pick<PageFrame, 'left' | 'width'>,
 ): ViewportLayout {
   const document = view.state.doc
+  const paintTable = tablePaintReader(view)
   const live = () => !view.isDestroyed && view.state.doc === document
   let geometry: ViewportGeometry | undefined
   let starts: Array<number | null> | undefined
@@ -441,11 +451,25 @@ export function viewportLayout(
       if (!Number.isFinite(caretTop) || caretTop < 0 || caretTop > measured.canvas.height) return
       const maxTop = Math.max(0, measured.canvas.height - height)
       const top = Math.min(maxTop, Math.max(0, caretTop - height * 0.3))
-      const content =
-        scope === 'table-cell'
-          ? readTableCell(view, document, position, measured, root, scale)
-          : viewportContent(measured, { top, bottom: top + height }, document)
+      const bounds = { top, bottom: top + height }
+      const content = scope
+        ? readTableCell(view, document, position, measured, root, scale)
+        : viewportContent(measured, bounds, document)
       if (!content?.model || position < content.model.from || position > content.model.to) return
+      if (scope === 'table-window') {
+        const surrounding = viewportContent(measured, bounds)
+        // This scope requires a bounded containing table. An unavailable
+        // scene leaves the caller's ordinary document surface in place.
+        if (
+          surrounding.blocks.length !== 1 ||
+          surrounding.blocks[0].from !== content.blocks[0].from
+        )
+          return
+        const table = paintTable(content.blocks[0].from, bounds, root, scale)
+        if (!table) return
+        surrounding.tablePaint = table
+        content.surrounding = surrounding
+      }
       return { content, reveal: { position, top } }
     },
   }

@@ -28,9 +28,14 @@ class TestPort extends EventTarget {
   }
 }
 
-function client(resolution?: MediaQueryList, plugins: readonly Plugin[] = []) {
+function client(
+  resolution?: MediaQueryList,
+  plugins: readonly Plugin[] = [],
+  retainCommittedViewport?: (publication: number) => boolean,
+) {
   const port = new TestPort()
   const events = {
+    retainCommittedViewport,
     layout: vi.fn(),
     viewport: vi.fn(),
     revealUnavailable: vi.fn(),
@@ -167,6 +172,45 @@ describe('the authoritative layout connection', () => {
     port.receive({ type: 'layout', pages: [], publication: 1, revision: 0 })
     layout.request({ top: 80, bottom: 90 })
     expect(port.sent).toHaveLength(2)
+  })
+
+  it('slices committed geometry during same-revision remeasurement and retires it after an edit', () => {
+    const { layout, port, events } = client(undefined, [], (publication) => publication === 1)
+    const canvas = { left: 0, top: 0, width: 80, height: 500 }
+    const placement = { from: 0, to: 6, box: { ...canvas, top: 200, height: 35 } }
+    const geometry = { canvas, blocks: [{ through: 235, placement }] }
+    port.receive({ type: 'layout', pages: [], publication: 1, revision: 0, geometry })
+    expect(layout.requestReveal(2, 80, 0)).toBe(true)
+
+    port.receive({ type: 'invalidated', publication: 2 })
+    expect(events.layout).toHaveBeenCalledTimes(1)
+    port.receive({
+      type: 'viewport',
+      publication: 1,
+      revision: 0,
+      sequence: 1,
+      content: { canvas, blocks: [] },
+    })
+    expect(events.viewport).not.toHaveBeenCalled()
+    expect(layout.requestReveal(2, 80, 0)).toBe(false)
+    layout.request({ top: 190, bottom: 240 })
+    expect(events.viewport).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ publication: 1, content: { canvas, blocks: [placement] } }),
+    )
+    expect(port.sent).toHaveLength(1)
+
+    const schema = new Schema({
+      nodes: { doc: { content: 'paragraph' }, paragraph: { content: 'text*' }, text: {} },
+    })
+    layout.apply([EditorState.create({ schema }).tr.insertText('text', 1)])
+    layout.request({ top: 190, bottom: 240 })
+    expect(events.layout).toHaveBeenLastCalledWith(null, 2)
+    expect(events.viewport).toHaveBeenCalledTimes(1)
+    port.receive({ type: 'layout', pages: [], publication: 3, revision: 1, geometry })
+    expect(layout.requestReveal(2, 80, 1)).toBe(true)
+    port.receive({ type: 'invalidated', publication: 4 })
+    expect(events.layout).toHaveBeenLastCalledWith(null, 4)
+    layout.dispose()
   })
 
   it('uses the measured owner position and discards a reveal superseded by scrolling', () => {
