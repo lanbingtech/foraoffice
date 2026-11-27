@@ -91,7 +91,7 @@ import {
 import { TABLE_TRAILING_SKIP, setLazyMediaHashes } from './editor/extensions'
 import { setStaticAsciiResolver } from './editor/protected-render'
 import { FORMAT_MARKS, serializeMarks } from './editor/caret-marks'
-import { TRACK_IGNORE } from './editor/revisions'
+import { REPLACED_DOCUMENT, TRACK_IGNORE } from './editor/revisions'
 import {
   cancelPhasedContent,
   hasFailedPhasedContent,
@@ -538,6 +538,7 @@ function setOpenedEditorContent(editor: Editor, doc: PmNode): void {
     .chain()
     .setMeta('addToHistory', false)
     .setMeta(TRACK_IGNORE, true)
+    .setMeta(REPLACED_DOCUMENT, true)
     .setMeta(TABLE_TRAILING_SKIP, true)
     .setMeta(PHASED_APPEND, true)
     .setMeta(streamedAppendKey, attempt)
