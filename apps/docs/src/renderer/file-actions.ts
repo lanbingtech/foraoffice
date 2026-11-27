@@ -157,6 +157,7 @@ export interface FileActionContext {
     /** The imported body, in source order and before any layout-derived changes. */
     publish(document: PmNode): void
     canMountTail: Promise<boolean>
+    scheduleTail?: (next: () => void) => void
   }
   /** Publish a replacement or saved baseline and its authored stores before lifecycle completion. */
   commitDocumentState?(operation: () => void): void
@@ -566,6 +567,7 @@ function phasedHostFor(ctx: FileActionContext): PhasedContentHost {
   return {
     owner: editor,
     canMountTail: ctx.sourceImport?.canMountTail,
+    mountTailInOnePass: ctx.sourceImport?.scheduleTail === undefined,
     setContent: (doc) => setOpenedEditorContent(editor, doc),
     appendNodes: (nodes, attempt) => appendStreamedNodes(editor, nodes, attempt),
     appliedAppend: (attempt) => streamedAppendApplied(editor.state, attempt),
@@ -696,7 +698,7 @@ export async function loadFile(
         openingBody = null
       } else {
         source = blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed))
-        setContentPhased(phasedHostFor(ctx), source)
+        setContentPhased(phasedHostFor(ctx), source, ctx.sourceImport?.scheduleTail)
       }
       commentEndpoints(ctx.editor!.view, parsed.blocks)
       resetEditorHistory(ctx.editor!)

@@ -103,7 +103,14 @@ afterEach(() => {
 
 it('opens a verified early viewport only after the complete source and replaces it at the latest visible bounds', async () => {
   const { port, source, session, onReady, onFailure, onPage, scroller, mount } = setup()
-  port.receive({ type: 'initial-viewport', revision: 0, content: firstPage })
+  port.receive({
+    type: 'layout',
+    revision: 0,
+    publication: 1,
+    opening: true,
+    pages: [],
+    initial: firstPage,
+  })
   expect(mount.querySelector('.ProseMirror')).toBeNull()
   source()
   await vi.waitFor(() => expect(onReady).toHaveBeenCalledTimes(1))
@@ -122,7 +129,7 @@ it('opens a verified early viewport only after the complete source and replaces 
   port.receive({
     type: 'layout',
     revision: 0,
-    publication: 1,
+    publication: 2,
     pages: [],
     initial: firstPage,
     pageFrames,
@@ -133,20 +140,20 @@ it('opens a verified early viewport only after the complete source and replaces 
   scroller.scrollTop = 200
   scroller.dispatchEvent(new Event('scroll'))
   expect(port.sent.slice(-2)).toEqual([
-    { type: 'viewport', publication: 1, sequence: 1, bounds: { top: 185, bottom: 285 } },
-    { type: 'viewport', publication: 1, sequence: 2, bounds: { top: 200, bottom: 300 } },
+    { type: 'viewport', publication: 2, sequence: 1, bounds: { top: 185, bottom: 285 } },
+    { type: 'viewport', publication: 2, sequence: 2, bounds: { top: 200, bottom: 300 } },
   ])
   port.receive({
     type: 'viewport',
     revision: 0,
-    publication: 1,
+    publication: 2,
     sequence: 1,
     content: { ...secondPage, blocks: [{ ...secondPage.blocks[0], from: 8 }] },
   })
   expect(mount.textContent).toBe('first')
   expect(onPage).toHaveBeenCalledTimes(1)
   expect(onFailure).not.toHaveBeenCalled()
-  port.receive({ type: 'viewport', revision: 0, publication: 1, sequence: 2, content: secondPage })
+  port.receive({ type: 'viewport', revision: 0, publication: 2, sequence: 2, content: secondPage })
   expect(mount.textContent).toBe('second')
   expect(onPage).toHaveBeenLastCalledWith(3, 3)
   expect(documentPresentation(editor).dom).toBe(view)
@@ -280,12 +287,19 @@ it('reports invalid opening geometry without replacing the retained body', async
   const { port, source, session, configure, onReady, onFailure, mount } = setup()
   const retained = mount.appendChild(document.createElement('p'))
   const geometry = { ...firstPage, blocks: [{ ...firstPage.blocks[0], to: 8 }] }
-  port.receive({ type: 'initial-viewport', revision: 0, content: geometry })
+  port.receive({
+    type: 'layout',
+    revision: 0,
+    publication: 1,
+    opening: true,
+    pages: [],
+    initial: geometry,
+  })
   source()
   await vi.waitFor(() => expect(configure).toHaveBeenCalledTimes(1))
   expect(onFailure).not.toHaveBeenCalled()
   onFailure.mockImplementation((_reason, takeEditor) => expect(takeEditor()).toBeUndefined())
-  port.receive({ type: 'layout', revision: 0, publication: 1, pages: [], initial: geometry })
+  port.receive({ type: 'layout', revision: 0, publication: 2, pages: [], initial: geometry })
   await vi.waitFor(() => expect(onFailure).toHaveBeenCalledTimes(1))
   expect(configure.mock.calls[0][0].isDestroyed).toBe(true)
   expect(onReady).not.toHaveBeenCalled()

@@ -24,6 +24,7 @@ export interface PhasedContentHost {
   owner?: object
   /** Wait for the initial source producer to release or cancel the tail mount. */
   canMountTail?: Promise<boolean>
+  mountTailInOnePass?: boolean
   /** full replace (Tiptap setContent) */
   setContent(doc: PmNode): void
   /** append top-level nodes at the document end, outside undo history */
@@ -287,7 +288,12 @@ export function setContentPhased(
   host.setLoading(true)
   if (my !== token) return
   let index = firstEnd
-  let budget = MAX_APPEND_WORK
+  // A measured background batch has no foreground paint deadline. Use the
+  // same feedback loop with a larger budget than the visible editor.
+  const progressiveLayout = host.canMountTail && host.mountTailInOnePass === false
+  const workLimit = progressiveLayout ? 4_096 : MAX_APPEND_WORK
+  const appendBudgetMs = progressiveLayout ? 96 : PHASE_APPEND_BUDGET_MS
+  let budget = workLimit
   let previous: { finished: number; dispatchMs: number; work: number } | undefined
   const finish = (complete: boolean) => {
     if (my !== token) return
@@ -338,9 +344,9 @@ export function setContentPhased(
       // Layout and painting can happen after dispatch. Size the next append
       // against dispatch work and any delay beyond the intentional timer wait.
       const late = Math.max(0, now() - previous.finished - PAINTED_FRAME_FALLBACK_MS)
-      const scale = PHASE_APPEND_BUDGET_MS / Math.max(0.1, previous.dispatchMs + late)
+      const scale = appendBudgetMs / Math.max(0.1, previous.dispatchMs + late)
       budget = Math.min(
-        MAX_APPEND_WORK,
+        workLimit,
         budget * 2,
         Math.max(ORDINARY_BLOCK_WORK, Math.floor(previous.work * scale)),
       )
@@ -373,9 +379,9 @@ export function setContentPhased(
   if (host.canMountTail) {
     void host.canMountTail.then((mount) => {
       if (my !== token) return
-      // The dedicated layout renderer has no input or visible frames to protect.
-      // Once the owner has the source, settle the remaining layout in one mount.
-      if (mount) schedule(() => appendChunk(true))
+      // A layout-only consumer can mount the whole tail once its source is ready.
+      // Interactive layout consumes bounded batches so demands can run in between.
+      if (mount) schedule(() => appendChunk(host.mountTailInOnePass !== false))
       else finish(false)
     })
   } else schedule(appendChunk)

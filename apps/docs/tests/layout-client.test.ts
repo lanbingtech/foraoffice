@@ -49,7 +49,6 @@ function client(
       ],
       opened: vi.fn<(document: AuthoredDocument) => void>(),
     },
-    initialViewport: vi.fn(),
   }
   const layout = new LayoutClient(port as unknown as MessagePort, events, resolution)
   return { port, events, layout }
@@ -117,26 +116,34 @@ describe('the authoritative layout connection', () => {
     expect(events.failure).not.toHaveBeenCalled()
   })
 
-  it('delivers the initial viewport before a complete publication or any edit', () => {
+  it('keeps opening demand active while an edit retires old paint geometry', () => {
     const { layout, port, events } = client()
-    const content = { canvas: { left: 0, top: 0, width: 80, height: 100 }, blocks: [] }
-    const initial = { type: 'initial-viewport' as const, content, revision: 0 as const }
-    port.receive(initial)
-    port.receive(initial)
-    port.receive({ type: 'layout', pages: [], publication: 1, revision: 0 })
-    port.receive(initial)
-    expect(events.initialViewport.mock.calls).toEqual([[initial], [null]])
-
-    const edited = client()
+    const canvas = { left: 0, top: 0, width: 80, height: 500 }
+    port.receive({
+      type: 'layout',
+      publication: 1,
+      revision: 0,
+      opening: true,
+      pages: [],
+      geometry: { canvas, blocks: [] },
+    })
     const schema = new Schema({
       nodes: { doc: { content: 'paragraph' }, paragraph: { content: 'text*' }, text: {} },
     })
-    edited.port.receive(initial)
-    edited.layout.apply([EditorState.create({ schema }).tr.insertText('text', 1)])
-    edited.port.receive(initial)
-    expect(edited.events.initialViewport.mock.calls).toEqual([[initial], [null]])
+    layout.apply([EditorState.create({ schema }).tr.insertText('text', 1)])
+    const bounds = { top: 420, bottom: 500 }
+    layout.request(bounds)
+    expect(events.viewport).not.toHaveBeenCalled()
+    expect(events.layout).toHaveBeenLastCalledWith(null, 1)
+    layout.requestOpening(bounds)
+    layout.requestOpening(bounds)
+    expect(port.sent.filter(({ type }) => type === 'opening-demand')).toEqual([
+      { type: 'opening-demand', publication: 1, bottom: 660 },
+    ])
+    port.receive({ type: 'layout', publication: 2, revision: 1, pages: [] })
+    layout.requestOpening(bounds)
+    expect(port.sent).toHaveLength(2)
     layout.dispose()
-    edited.layout.dispose()
   })
 
   it('retires published geometry at a display scale change before handling pending messages', () => {

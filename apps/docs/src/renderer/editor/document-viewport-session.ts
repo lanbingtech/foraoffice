@@ -19,7 +19,6 @@ import {
 
 type LayoutOpen = Extract<LayoutMessage, { type: 'open' }>
 type LayoutPublication = Extract<LayoutReply, { type: 'layout' }>
-type InitialViewport = Extract<LayoutReply, { type: 'initial-viewport' }>
 type NavigationTarget = NonNullable<ViewportRangeRequest['target']>
 const FIRST_FRAME_TIMEOUT_MS = 30_000
 
@@ -57,7 +56,6 @@ export function startDocumentViewportSession(
   let authored: AuthoredDocument | undefined
   let surface: ViewportSurface | undefined
   let layout: LayoutPublication | undefined
-  let initial: InitialViewport | undefined
   let navigation: Navigation | undefined
   let latestPacket: ViewportPacket | undefined
   let displayedPublication: number | undefined
@@ -134,6 +132,7 @@ export function startDocumentViewportSession(
     if (bounds.top === next.top && bounds.bottom === next.bottom) return
     if (scrolled && bounds.top !== next.top) navigation = undefined
     bounds = next
+    if (scrolled) client?.requestOpening(bounds)
     requestLatest()
   }
   const onScroll = () => refreshBounds(true)
@@ -183,7 +182,6 @@ export function startDocumentViewportSession(
     surface = undefined
     client?.dispose()
     client = undefined
-    initial = undefined
     layout = undefined
     navigation = undefined
     latestPacket = undefined
@@ -218,7 +216,7 @@ export function startDocumentViewportSession(
     }
   }
 
-  const publish = (packet: ViewportPacket, opening = false) => {
+  const publish = (packet: ViewportPacket) => {
     if (failing || !surface) return
     latestPacket = packet
     let result: ReturnType<ViewportSurface['publish']>
@@ -231,7 +229,7 @@ export function startDocumentViewportSession(
     } finally {
       publishing = false
     }
-    if (result === 'needs-range' && !opening)
+    if (result === 'needs-range' && !layout?.opening)
       fail('The measured viewport did not match the document')
   }
 
@@ -249,11 +247,6 @@ export function startDocumentViewportSession(
       } else {
         requestLatest()
       }
-    } else if (initial) {
-      publish(
-        { revision: initial.revision, publication: 0, sequence: 0, content: initial.content },
-        true,
-      )
     }
   }
 
@@ -327,11 +320,6 @@ export function startDocumentViewportSession(
             fail(String(reason))
           }
         },
-      },
-      initialViewport(publication) {
-        initial = publication ?? undefined
-        if (initial) updateFrame()
-        else if (!layout && authored) surface?.invalidate(0, authored.read().revision)
       },
       layout(publication, stamp) {
         if (stopped) return
