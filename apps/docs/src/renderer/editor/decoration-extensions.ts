@@ -804,6 +804,7 @@ class TabLayoutView {
         class: `doc-tab${leader}${underline}${collapse}${glue}${box}${wrap}`,
         style: fixed ? `width:${t.fixed}px` : `tab-size:${t.cssSize}px`,
       }
+      // inline-rules: allow — map the measured tab to its single-character range.
       decos.push(Decoration.inline(t.pos, t.pos + 1, attrs, { ...attrs, wrap: t.wrap }))
     }
     const previous = roots
