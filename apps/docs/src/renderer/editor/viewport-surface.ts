@@ -519,10 +519,9 @@ export function createViewportSurface(
     commit(source, transaction, projected)
   }
 
-  const adoptCellCaret = (local: EditorView, event: MouseEvent): boolean => {
+  const adoptParkedCaret = (local: EditorView, event: MouseEvent): boolean => {
     if (
       !current?.parked ||
-      current.editing.cellTextblock === undefined ||
       event.button !== 0 ||
       event.shiftKey ||
       event.altKey ||
@@ -935,7 +934,7 @@ export function createViewportSurface(
         ...(beforePaste ? { paste: beforePaste } : {}),
         focus: ownerFocusEvent('focus'),
         blur: ownerFocusEvent('blur'),
-        mousedown: adoptCellCaret,
+        mousedown: adoptParkedCaret,
         beforeinput: historyInput,
         compositionstart: startComposition,
         compositionend: finishComposition,

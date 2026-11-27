@@ -1211,6 +1211,22 @@ describe('viewport surface', () => {
     expect(surface.publish({ publication: 3, revision: 0, sequence: 3, content })).toBe('stale')
   })
 
+  it('moves a parked source caret on a click at the local default position', () => {
+    const { surface, read } = fixture()
+    const content = placed([{ from: 15, to: 20, box: box(30, 1250) }])
+    expect(surface.publish({ publication: 1, revision: 0, sequence: 1, content })).toBe('applied')
+    const view = surface.view!
+    const at = view.state.selection.head
+    const hit = vi.spyOn(view, 'posAtCoords').mockReturnValue({ pos: at, inside: 0 })
+    try {
+      view.dom.querySelector('p')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      expect(read().state.selection.head).toBe(15 + at)
+      expect(read().revision).toBe(0)
+    } finally {
+      hit.mockRestore()
+    }
+  })
+
   it('requests rehydration for parked-caret edits and leaves the full source untouched', () => {
     const { surface, requestRange, dispatch, read } = fixture()
     const initial = read().state.doc
