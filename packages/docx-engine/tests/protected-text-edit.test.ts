@@ -48,6 +48,21 @@ describe('protected visible-text patching', () => {
     expect(patched).not.toContain('Latar Belakang')
   })
 
+  it.each([' ', '\r\n'])(
+    'patches the live page cache when a tracked-deleted tab uses %j before its attributes',
+    async (space) => {
+      const deletedTab = `<w:del${space}w:id="9" w:author="Editor"><w:r><w:tab/></w:r></w:del>`
+      const revised = TOC_ENTRY.replace(
+        '</w:hyperlink>',
+        deletedTab + '<w:r><w:t xml:space="preserve"> </w:t></w:r></w:hyperlink>',
+      )
+      const patched = patchFieldParagraphXml(revised, { right: '1' })
+      expect(patched).toContain(deletedTab)
+      const parsed = await parseDocx(await buildDocx({ bodyXml: patched }))
+      expect(parsed.blocks[0].fieldDisplay?.right).toBe('1')
+    },
+  )
+
   it('pins xml:space preserve when the patched text gains edge spaces', async () => {
     const entry =
       '<w:p><w:pPr><w:pStyle w:val="TOC2"/></w:pPr>' +

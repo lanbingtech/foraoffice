@@ -110,6 +110,7 @@ describe('CommentsPanel editing', () => {
       createElement(CommentsPanel, {
         comments: [{ id: 'c1', author: 'A', text: 'old text', done: false }] as CommentInfo[],
         docNode: editor.state.doc,
+        editorView: editor.view,
         composing: false,
         onSubmitNew: noop,
         onReply: noop,
@@ -156,6 +157,7 @@ describe('CommentsPanel editing', () => {
       createElement(CommentsPanel, {
         comments: [{ id: 'c1', author: 'A', text: 'old text', done: false }] as CommentInfo[],
         docNode: editor.state.doc,
+        editorView: editor.view,
         composing: false,
         onSubmitNew: noop,
         onReply: noop,
@@ -232,6 +234,7 @@ describe('CommentsPanel focus with reply', () => {
       createElement(CommentsPanel, {
         comments: [{ id: 'c1', author: 'A', text: 'root', done: false }] as CommentInfo[],
         docNode: editor.state.doc,
+        editorView: editor.view,
         composing: false,
         onSubmitNew: noop,
         onReply,
@@ -267,6 +270,7 @@ describe('CommentsPanel focus with reply', () => {
       createElement(CommentsPanel, {
         comments: [{ id: 'c1', author: 'A', text: 'root', done: true }] as CommentInfo[],
         docNode: editor.state.doc,
+        editorView: editor.view,
         composing: false,
         onSubmitNew: noop,
         onReply: noop,

@@ -77,6 +77,7 @@ export interface RevisionRange {
 
 /** transactions carrying this meta are never recorded as revisions */
 export const TRACK_IGNORE = 'trackIgnore'
+export const REPLACED_DOCUMENT = 'replacedDocsDocument'
 /** meta: record this transaction's edits under the given author instead of the user */
 export const TRACK_AUTHOR = 'trackAuthor'
 
@@ -1217,6 +1218,11 @@ export const TrackChangesExtension = Extension.create<object, TrackChangesStorag
           },
         },
         appendTransaction: (transactions, oldState, newState) => {
+          if (transactions.some((tr) => tr.getMeta(REPLACED_DOCUMENT))) {
+            pendingIme = null
+            lastCut = null
+            armed = null
+          }
           if (!storage.enabled) {
             pendingIme = null
             return null

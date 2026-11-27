@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { measureBlocks } from '../src/renderer/pagination'
+import { createBlockMeasurer, enterNaturalFlow } from '../src/renderer/pagination-measure'
 
 const rectOf = (top: number, height: number, width = 100) =>
   ({
@@ -25,6 +26,154 @@ function flowOf(specs: Array<{ top: number; height: number; inner: string; tag?:
   }
   return pm
 }
+
+describe('natural-flow measurement state', () => {
+  it('changes only pagination widgets and the margins of page-leading blocks', () => {
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <p id="one">ordinary</p>
+      <div id="two" class="page-gap"></div>
+      <p id="three" class="page-break-lead-trim">
+        <span id="four" class="page-gap-inline"></span>
+      </p>
+      <table><tbody><tr id="five" class="page-gap-inline"><td></td></tr></tbody></table>`
+    const restore = enterNaturalFlow({ dom: root })
+    const marked = () =>
+      Array.from(root.querySelectorAll('.measuring-natural'), (element) => element.id)
+    expect(root.classList.contains('measuring-natural')).toBe(false)
+    expect(marked()).toEqual(['two', 'three', 'four', 'five'])
+    restore()
+    expect(marked()).toEqual([])
+  })
+})
+
+describe('incremental flow measurement', () => {
+  it('retains already measured blocks while resizing the published range', () => {
+    const pm = flowOf([
+      { top: 0, height: 20, inner: 'prefix' },
+      { top: 20, height: 20, inner: 'old last block' },
+      { top: 40, height: 20, inner: 'later block' },
+    ])
+    const reader = createBlockMeasurer(pm)
+    const options = { origin: 0, factor: 1, width: 100, allowReuse: true }
+    try {
+      expect(reader.measure({ ...options, end: 2 }).totalHeight).toBe(40)
+      const expected = measureBlocks(pm, 0, 1)
+      const prefix = vi.spyOn(pm.children[0], 'getBoundingClientRect')
+      expect(reader.measure({ ...options, firstChangedChild: () => 2 })).toEqual(expected)
+      expect(prefix).not.toHaveBeenCalled()
+      expect(reader.measure({ ...options, end: 1 }).totalHeight).toBe(20)
+      expect(reader.measure(options)).toEqual(expected)
+    } finally {
+      reader.dispose()
+    }
+  })
+
+  it.each(['img-wrap-square-left', 'img-wrap-topBottom'])(
+    'reads the full flow when the outer image wrapper has %s',
+    (name) => {
+      const pm = flowOf([
+        { top: 0, height: 20, inner: 'prefix' },
+        { top: 20, height: 40, tag: 'div', inner: '<img class="doc-protected-img">' },
+        { top: 60, height: 20, inner: 'suffix' },
+      ])
+      pm.children[1].className = `doc-protected ${name}`
+      const cached = createBlockMeasurer(pm)
+      try {
+        const options = { origin: 0, factor: 1, width: 100, allowReuse: true }
+        cached.measure(options)
+        const prefix = vi.spyOn(pm.children[0], 'getBoundingClientRect')
+        cached.measure(options)
+        expect(prefix).toHaveBeenCalled()
+      } finally {
+        cached.dispose()
+      }
+    },
+  )
+
+  it('reuses inline-image blocks until the browser reports new intrinsic geometry', () => {
+    const first = { top: 0, height: 20, inner: '<img src="picture.png">' }
+    const second = { top: 20, height: 20, inner: 'neighbour' }
+    const tail = { top: 40, height: 20, inner: 'tail' }
+    const pm = flowOf([first, second, tail])
+    let width = 80
+    const img = pm.querySelector('img')!
+    Object.defineProperty(img, 'naturalWidth', { get: () => width })
+    const cached = createBlockMeasurer(pm)
+    try {
+      const options = { origin: 0, factor: 1, width: 100, allowReuse: true }
+      cached.measure(options)
+      const prefix = vi.spyOn(pm.children[0], 'getBoundingClientRect')
+      pm.children[2].textContent = 'edited tail'
+      const afterEdit = cached.measure(options)
+      expect(prefix).not.toHaveBeenCalled()
+      expect(afterEdit).toEqual(measureBlocks(pm, 0, 1))
+
+      prefix.mockClear()
+      width = 100
+      first.height = 28
+      second.top = 28
+      tail.top = 48
+      const afterImage = cached.measure(options)
+      expect(prefix).toHaveBeenCalled()
+      expect(afterImage).toEqual(measureBlocks(pm, 0, 1))
+    } finally {
+      cached.dispose()
+    }
+  })
+
+  it('remeasures the published range without reading geometry in the newly mounted tail', () => {
+    const pm = flowOf([
+      { top: 0, height: 20, inner: 'first' },
+      { top: 20, height: 40, tag: 'div', inner: '<table><tr><td>cell</td></tr></table>' },
+    ])
+    const expected = measureBlocks(pm, 0, 1)
+    const tail = flowOf([
+      { top: 90, height: 40, inner: 'tail<br class="doc-page-br">' },
+    ]).firstElementChild!
+    const tailRect = vi.spyOn(tail, 'getBoundingClientRect')
+    pm.appendChild(tail)
+
+    expect(measureBlocks(pm, 0, 1, undefined, false, undefined, 2)).toEqual(expected)
+    expect(tailRect).not.toHaveBeenCalled()
+    expect(measureBlocks(pm, 0, 1).blocks).toHaveLength(3)
+  })
+
+  it('measures the changed table and its flow neighbour while keeping an untouched prefix', () => {
+    const pm = flowOf([
+      { top: 0, height: 20, inner: 'first' },
+      { top: 20, height: 20, inner: 'second' },
+      { top: 40, height: 20, inner: 'neighbour' },
+      {
+        top: 60,
+        height: 40,
+        tag: 'div',
+        inner: '<table><tr><td><div class="doc-cell-boxes"></div>cell</td></tr></table>',
+      },
+    ])
+    const cached = createBlockMeasurer(pm)
+    try {
+      const options = { origin: 0, factor: 1, width: 100, allowReuse: true }
+      cached.measure(options)
+      const stable = vi.spyOn(pm.children[0], 'getBoundingClientRect')
+      pm.querySelector('td')!.textContent = 'edited'
+      pm.children[3].getBoundingClientRect = () => rectOf(60, 65)
+      const afterEdit = cached.measure(options)
+      expect(stable).not.toHaveBeenCalled()
+      expect(afterEdit).toEqual(measureBlocks(pm, 0, 1))
+
+      stable.mockClear()
+      cached.measure({ ...options, firstChangedChild: () => 0 })
+      expect(stable).toHaveBeenCalled()
+
+      stable.mockClear()
+      cached.measure({ ...options, width: 110 })
+      expect(stable).toHaveBeenCalled()
+    } finally {
+      cached.dispose()
+    }
+  })
+})
 
 describe('measureBlocks — whole-flow break scan (genoffice#526 bucketing)', () => {
   it('a page-type break in a body paragraph forces the next block to a new page', () => {

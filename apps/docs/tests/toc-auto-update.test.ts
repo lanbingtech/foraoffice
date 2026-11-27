@@ -9,18 +9,32 @@ import { generateTocFieldXml, parseDocx } from '@genoffice/docx-engine'
 import { buildDocx } from '../../../packages/docx-engine/tests/helpers/build-docx'
 import { blocksToPmDoc, pmDocToSavePlan, type PmNode } from '../src/renderer/editor/convert'
 import { editorExtensions } from '../src/renderer/editor/extensions'
-import { applyTocPageDisplays } from '../src/renderer/editor/toc-refresh'
+import {
+  applyTocPageDisplays,
+  tocPageDisplayForBookmarkBlock,
+} from '../src/renderer/editor/toc-refresh'
 
 /** Editors created during the current test; destroyed in afterEach so ProseMirror's
  * DOMObserver timers can't fire after the JSDOM environment is torn down. */
 const liveEditors: Editor[] = []
 
+it('looks up a bookmark only when the entire owning paragraph fits a single page', () => {
+  const cuts = [
+    { start: 0, end: 100, display: 'iii', blank: false },
+    { start: 100, end: 200, display: 'iv', blank: false },
+  ]
+  expect(tocPageDisplayForBookmarkBlock({ top: 80, height: 20 }, cuts)).toBe('iii')
+  expect(tocPageDisplayForBookmarkBlock({ top: 100, height: 20 }, cuts)).toBe('iv')
+  expect(tocPageDisplayForBookmarkBlock({ top: 80, height: 21 }, cuts)).toBeUndefined()
+  expect(tocPageDisplayForBookmarkBlock({ top: 180, height: 40 }, cuts)).toBeUndefined()
+})
+
 afterEach(() => {
   for (const editor of liveEditors.splice(0)) editor.destroy()
 })
 
-async function openBlankDoc() {
-  const source = await buildDocx({ bodyXml: '<w:p><w:r><w:t>Body text</w:t></w:r></w:p>' })
+async function openDoc(bodyXml = '<w:p><w:r><w:t>Body text</w:t></w:r></w:p>') {
+  const source = await buildDocx({ bodyXml })
   const parsed = await parseDocx(source)
   const editor = new Editor({
     element: document.createElement('div'),
@@ -33,7 +47,7 @@ async function openBlankDoc() {
 
 describe('TOC auto page refresh persistence', () => {
   it('saves the refreshed page number of a generated TOC line', async () => {
-    const { editor, parsed } = await openBlankDoc()
+    const { editor, parsed } = await openDoc()
     const [xml] = generateTocFieldXml([{ level: 1, text: 'Chapter One', pageNo: 1 }])
     editor.commands.insertContentAt(0, {
       type: 'docProtected',
@@ -80,7 +94,7 @@ function tocRights(editor: Editor): string[] {
 
 describe('applyTocPageDisplays', () => {
   it('keeps the formatted page string (no Arabic coercion)', async () => {
-    const { editor } = await openBlankDoc()
+    const { editor } = await openDoc()
     editor.commands.insertContentAt(0, tocLineNode('Preface', '2'))
     const tr = editor.state.tr
     const changed = applyTocPageDisplays(
@@ -95,7 +109,7 @@ describe('applyTocPageDisplays', () => {
   })
 
   it('assigns duplicate titles their own pages in document order', async () => {
-    const { editor } = await openBlankDoc()
+    const { editor } = await openDoc()
     editor.commands.insertContentAt(0, [
       tocLineNode('Summary', '1'),
       tocLineNode('Summary', '1'),
@@ -111,7 +125,7 @@ describe('applyTocPageDisplays', () => {
   })
 
   it('skips unmeasured headings and reports no change when values match', async () => {
-    const { editor } = await openBlankDoc()
+    const { editor } = await openDoc()
     editor.commands.insertContentAt(0, tocLineNode('Chapter', '5'))
     const tr = editor.state.tr
     const changed = applyTocPageDisplays(
@@ -125,4 +139,58 @@ describe('applyTocPageDisplays', () => {
     )
     expect(changed).toBe(false)
   })
+})
+
+it('persists imported PAGEREF pages by their bookmark and reserves title order for generated entries', async () => {
+  const entry = (target: string, hyperlink = false, switches = '\\h') => {
+    const content =
+      '<w:r><w:t>Summary</w:t></w:r><w:r><w:tab/></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+      '<w:r><w:instrText xml:space="preserve"> PAGEREF </w:instrText></w:r>' +
+      `<w:r><w:instrText xml:space="preserve">"${target}" ${switches} </w:instrText></w:r>` +
+      '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>4</w:t></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+    return (
+      '<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>' +
+      (hyperlink ? `<w:hyperlink w:anchor="_Clickable">${content}</w:hyperlink>` : content) +
+      '</w:p>'
+    )
+  }
+  const { editor, parsed } = await openDoc(
+    entry('_Measured', true) +
+      entry('_Missing') +
+      entry('_Measured', false, '\\p') +
+      '<w:p><w:bookmarkStart w:id="3" w:name="_Measured"/><w:r><w:t>Ordinary body</w:t></w:r>' +
+      '<w:bookmarkEnd w:id="3"/></w:p>',
+  )
+  expect(parsed.blocks.find((block) => block.hiddenBookmarks?.includes('_Measured'))?.type).toBe(
+    'paragraph',
+  )
+  expect(tocRights(editor)).toEqual(['4', '4', '4'])
+  editor.commands.insertContentAt(editor.state.doc.content.size, [
+    tocLineNode('Summary', '1'),
+    tocLineNode('Summary', '1'),
+  ] as never)
+
+  const tr = editor.state.tr
+  expect(
+    applyTocPageDisplays(
+      editor.state.doc,
+      tr,
+      [
+        { text: 'Summary', level: 1, pos: 0 },
+        { text: 'Summary', level: 1, pos: 10 },
+      ],
+      ['7', '11'],
+      (bookmark) => (bookmark === '_Measured' ? 'ii' : undefined),
+    ),
+  ).toBe(true)
+  editor.view.dispatch(tr)
+  expect(tocRights(editor)).toEqual(['ii', '4', '4', '7', '11'])
+
+  const plan = pmDocToSavePlan(editor.getJSON() as PmNode, parsed.blocks)
+  const archived = plan.saveBlocks.find((b) => b.kind === 'xml' && b.xml.includes('_Measured'))
+  if (archived?.kind !== 'xml') throw new Error('Expected patched imported TOC result')
+  expect(archived.xml).toMatch(/<w:t[^>]*>ii<\/w:t>/)
+  expect(archived.xml).toContain('w:anchor="_Clickable"')
 })

@@ -472,7 +472,7 @@ export function computeSectionedSlicesF2(
       ? 0
       : firstSection
 
-  type ColEntry = { y: number; repeatHeader?: { top: number; height: number } }
+  type ColEntry = { y: number; repeatHeader?: PageSlice['repeatHeader'] }
   type Region = { top: number; height: number; section: number; cols: number; entries: ColEntry[] }
   const pages: Array<{ section: number; regions: Region[]; continued?: true }> = []
   // flow Y where a section began below the top of a page it does not own: its
@@ -591,7 +591,7 @@ export function computeSectionedSlicesF2(
     const page = pages[pages.length - 1]
     page.regions[page.regions.length - 1].entries.push({
       y,
-      ...(headerH > 0 ? { repeatHeader: { top: headerTop, height: headerH } } : {}),
+      ...(headerH > 0 ? { repeatHeader: { block: curBi, top: headerTop, height: headerH } } : {}),
     })
     usedInCol = headerH
   }
@@ -2251,6 +2251,25 @@ function _placeTable(
     }
 
     if (!fits(row.height + notes) || (row.forcedCuts?.length ?? 0) > 0) {
+      // A predecessor's vertically merged cell is absent from this tr's own
+      // split plan. If its ink crosses capacity, keep this otherwise page-sized
+      // row whole; do not add split fill that would recenter/grow the rowspan.
+      // Tall rows and an unsafe row-top retain the existing bounded split path.
+      const available = remain() - notes
+      if (
+        !pageEmpty() &&
+        !row.forcedCuts?.length &&
+        row.height + notes <= contentH - repeatH + 0.01 &&
+        row.precedingSpanInk?.some(([top, bottom]) => top < available && bottom > available) &&
+        !row.precedingSpanInk.some(([top, bottom]) => top < 0 && bottom > 0)
+      ) {
+        chargedNotes -= notes
+        if (turnBeforeRow(ri, repeatH)) {
+          ri = -1
+          continue
+        }
+        chargedNotes += notes
+      }
       const contentEnd =
         row.contentBottom !== undefined ? Math.min(row.contentBottom, row.height) : row.height
       // in-row page break (Word default): without cantSplit and with safe cut points,
@@ -2855,22 +2874,16 @@ export function pageOfY(slices: ReadonlyArray<{ start: number }>, top: number, t
   return pageAt(slices, top + tol) - 1
 }
 
-/**
- * Pages the user can see: an even/odd-section parity blank shares its start with the
- * neighbouring slice and draws no page, so NUMPAGES, the status bar, and the gap
- * header/footer widgets all count only distinct slice starts (up to `upTo` slices).
- */
+/** A same-start continuation shares a page. A zero-height predecessor is a deliberate blank page. */
+export function sliceStartsVisiblePage(slice: PageSlice, previous: PageSlice | undefined): boolean {
+  return !previous || slice.start !== previous.start || previous.end === previous.start
+}
+
+/** Visible pages up to `upTo` slices, shared by NUMPAGES, the status bar and gap widgets. */
 export function visiblePageCount(slices: PageSlice[], upTo = slices.length): number {
   let n = 0
   for (let i = 0; i < Math.min(upTo, slices.length); i++) {
-    // a zero-height predecessor is a deliberate blank page (leading/double w:br,
-    // even/odd parity): the page after it is still its own visible page
-    if (
-      i === 0 ||
-      slices[i].start !== slices[i - 1].start ||
-      slices[i - 1].end === slices[i - 1].start
-    )
-      n++
+    if (sliceStartsVisiblePage(slices[i], slices[i - 1])) n++
   }
   return n
 }

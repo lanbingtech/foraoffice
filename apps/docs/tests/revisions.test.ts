@@ -32,6 +32,8 @@ import {
   gotoRevision,
   rejectAllRevisions,
   rejectCurrentRevision,
+  REPLACED_DOCUMENT,
+  TRACK_IGNORE,
   type TrackChangesStorage,
 } from '../src/renderer/editor/revisions'
 
@@ -1100,6 +1102,30 @@ describe('IME composition deferral', () => {
     editor.destroy()
   })
 
+  it('drops a pending composition when the open document changes', () => {
+    const editor = createEditor([para(text('before'))])
+    try {
+      editor.storage.trackChanges.enabled = true
+      editor.view.dispatch(editor.state.tr.insertText('ni', 2).setMeta('composition', 1))
+      expect(collectRevisions(editor.state.doc)).toHaveLength(0)
+      editor.view.dispatch(
+        editor.state.tr
+          .replaceWith(
+            0,
+            editor.state.doc.content.size,
+            editor.schema.nodeFromJSON(para(text('new file'))),
+          )
+          .setMeta(TRACK_IGNORE, true)
+          .setMeta(REPLACED_DOCUMENT, true),
+      )
+      editor.view.dispatch(editor.state.tr)
+      expect(editor.state.doc.textContent).toBe('new file')
+      expect(collectRevisions(editor.state.doc)).toHaveLength(0)
+    } finally {
+      editor.destroy()
+    }
+  })
+
   it('records the selection a composition replaced as a struck deletion', () => {
     const { editor, end } = composingEditor([para(text('abcd'))])
     editor.view.dispatch(editor.state.tr.insertText('X', 2, 4)) // IME replaces "bc"
@@ -1794,6 +1820,28 @@ describe('moves (cut + paste, drag-drop)', () => {
     expect(ranges.map((r) => r.kind)).toEqual(['del', 'ins'])
     expect(ranges.some((r) => r.moveId)).toBe(false)
     editor.destroy()
+  })
+
+  it('pastes a cut from a replaced document as a plain insertion', () => {
+    const editor = trackedEditor()
+    try {
+      const cut = editor.state.doc.slice(5, 9)
+      editor.view.dispatch(editor.state.tr.delete(5, 9).setMeta('uiEvent', 'cut'))
+      editor.view.dispatch(
+        editor.state.tr
+          .replaceWith(
+            0,
+            editor.state.doc.content.size,
+            editor.schema.nodeFromJSON(para(text('new'))),
+          )
+          .setMeta(REPLACED_DOCUMENT, true)
+          .setMeta(TRACK_IGNORE, true),
+      )
+      editor.view.dispatch(editor.state.tr.insert(1, cut.content).setMeta('uiEvent', 'paste'))
+      expect(collectRevisions(editor.state.doc).map((revision) => revision.kind)).toEqual(['ins'])
+    } finally {
+      editor.destroy()
+    }
   })
 
   it('a cut followed by typing is no longer a pending move', () => {

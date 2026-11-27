@@ -8,6 +8,10 @@ import type { Node as PmNode } from '@tiptap/pm/model'
 import type { EditorView } from '@tiptap/pm/view'
 import { BlockIndex } from '../pagination-index'
 import type { FlowCarry, PageCut } from '../pagination-cuts'
+import { sliceStartsVisiblePage } from '../pagination-slices'
+import { nextLineAnchor, outerTableRows } from '../pagination-lines'
+import { pageGapPositions } from './pagination-gaps'
+import { measureNatural } from './settled-measure'
 import type {
   BlockBox,
   PageSlice,
@@ -53,6 +57,8 @@ export interface PageLayout {
   geoms: SectionGeom[]
   hfHeights: SectionHfHeights[]
   rowSplits: RowSplitPatch[]
+  /** 1-based page at an editor screen Y, using the same boundaries as the status bar. */
+  pageAtScreenY?: (y: number) => number
   /** float-carry spacers of split floating tables (flow displacement, flowOffsetAt) */
   carries: FlowCarry[]
 }
@@ -102,23 +108,6 @@ export function listGoToItems(doc: PmNode, target: GoToTarget): GoToItem[] {
   return items
 }
 
-/** first block of each visible page (parity blanks share a start and draw nothing) */
-export function visiblePageStartBlocks(layout: PageLayout): number[] {
-  const { blocks, slices } = layout
-  if (blocks.length === 0) return []
-  const index = new BlockIndex(blocks)
-  const starts = [0]
-  for (let i = 1; i < slices.length; i++) {
-    const s = slices[i]
-    const prev = slices[i - 1]
-    const visible = s.start !== prev.start || prev.end === prev.start
-    if (!visible) continue
-    const b = index.firstAtTop(s.start)
-    if (b >= 0 && b !== starts[starts.length - 1]) starts.push(b)
-  }
-  return starts
-}
-
 const blockPos = (view: EditorView, block: BlockBox | undefined): number | null => {
   if (!block?.el || !view.dom.contains(block.el)) return null
   try {
@@ -139,16 +128,60 @@ export function blockIndexAtPos(view: EditorView, layout: PageLayout, pos: numbe
   return layout.blocks.findIndex((b) => b.el && b.el.contains(node))
 }
 
-/** 1-based visible page of a block */
-export function pageOfBlock(layout: PageLayout, blockIndex: number): number {
-  const starts = visiblePageStartBlocks(layout)
-  let page = 1
-  for (let i = 1; i < starts.length; i++) if (starts[i] <= blockIndex) page = i + 1
-  return page
+export function pagePositions(view: EditorView, layout: PageLayout): Array<number | null> {
+  const { blocks, slices, cuts } = layout
+  const gaps = pageGapPositions(view.state)
+  let fallbackIndex: BlockIndex | undefined
+  const positions: Array<number | null> = []
+  slices.forEach((slice, i) => {
+    if (!sliceStartsVisiblePage(slice, slices[i - 1])) return
+    const lead = cuts[i]?.lead
+    const anchored = gaps.get(i)
+    if (slice.end === slice.start && i < slices.length - 1) positions.push(null)
+    else if (anchored !== undefined) positions.push(anchored)
+    else if (lead?.kind === 'tail') {
+      // The first cut can precede the first block when it has leading space.
+      // Only later tail cuts navigate to the document end.
+      positions.push(i === 0 ? 0 : view.state.doc.content.size)
+    } else if (lead?.kind === 'block') positions.push(blockPos(view, blocks[lead.block]))
+    else if (lead && i > 0) positions.push(null)
+    else
+      positions.push(
+        blockPos(
+          view,
+          blocks[i === 0 ? 0 : (fallbackIndex ??= new BlockIndex(blocks)).firstAtTop(slice.start)],
+        ),
+      )
+  })
+  return positions
 }
 
-export function pagePositions(view: EditorView, layout: PageLayout): Array<number | null> {
-  return visiblePageStartBlocks(layout).map((i) => blockPos(view, layout.blocks[i]))
+/** A page can start within a block even in a view that draws no page-gap widgets. */
+export function pagePositionWithoutGap(
+  view: EditorView,
+  layout: PageLayout,
+  page: number,
+): number | null {
+  const index = layout.slices.findIndex((slice, i) => {
+    if (sliceStartsVisiblePage(slice, layout.slices[i - 1])) page--
+    return page < 0
+  })
+  const lead = layout.cuts[index]?.lead
+  if (!lead || layout.cuts[index].blank) return null
+  const el = layout.blocks[lead.block]?.el
+  if (!el || !view.dom.contains(el)) return null
+  if (lead.kind === 'row') {
+    const row = outerTableRows(el)[lead.row ?? -1]
+    return row ? view.posAtDOM(row, 0) : null
+  }
+  if (lead.kind !== 'line' && lead.kind !== 'cell') return null
+  const zoom = el.getBoundingClientRect().width / el.offsetWidth
+  if (!Number.isFinite(zoom) || zoom <= 0) return null
+  const anchor = measureNatural(el, () => nextLineAnchor(el, lead.lineOffset ?? 0, zoom))
+  if (!anchor) return null
+  const host = anchor.node instanceof Element ? anchor.node : anchor.node.parentElement
+  if (host?.closest('.doc-nested-table')) return null
+  return view.posAtDOM(anchor.node, anchor.charOffset)
 }
 
 export function sectionPositions(view: EditorView, layout: PageLayout): Array<number | null> {
@@ -229,16 +262,17 @@ export function linePosition(view: EditorView, layout: PageLayout, line: number)
  */
 export function resolveGoToIndex(
   input: string,
-  current: number,
+  current: number | (() => number),
   count: number,
   dir: 1 | -1 = 1,
 ): number | null {
   if (count <= 0) return null
   const s = input.trim()
   const clamp = (i: number) => Math.max(0, Math.min(count - 1, i))
-  if (!s) return clamp(current + dir)
+  const currentIndex = () => (typeof current === 'number' ? current : current())
+  if (!s) return clamp(currentIndex() + dir)
   const rel = /^([+-])(\d+)$/.exec(s)
-  if (rel) return clamp(current + (rel[1] === '+' ? 1 : -1) * Number(rel[2]))
+  if (rel) return clamp(currentIndex() + (rel[1] === '+' ? 1 : -1) * Number(rel[2]))
   if (/^\d+$/.test(s)) return clamp(Number(s) - 1)
   return null
 }

@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import type { PmNode } from '../src/renderer/editor/convert'
 import {
   buildBlockPlan,
+  createBlockPlanReader,
   planBreakFlags,
   type BlockPlan,
   type PlanProps,
@@ -35,6 +36,45 @@ function plansOf(blocks: unknown[], props: PlanProps = PROPS): BlockPlan[] {
   editor.destroy()
   return out
 }
+
+describe('incremental block plans', () => {
+  it('reuses independent plans and matches a full rebuild after a structural edit', () => {
+    const paraEffective = vi.fn(() => undefined)
+    const props = { ...PROPS, paraEffective }
+    const editor = new Editor({
+      element: document.createElement('div'),
+      extensions: editorExtensions,
+      content: {
+        type: 'doc',
+        content: ['first', 'second', 'third', 'fourth'].map((value, docxIndex) =>
+          para([text(value)], { docxIndex }),
+        ),
+      } as never,
+    })
+    try {
+      const read = createBlockPlanReader(props)
+      read(editor.state.doc, editor.view)
+      paraEffective.mockClear()
+      const { state, view } = editor
+      view.dispatch(state.tr.insertText('!', state.doc.child(0).nodeSize + 2))
+      const lookup = read(view.state.doc, view)
+      expect(paraEffective.mock.calls.length).toBeLessThan(4)
+      for (const expected of buildBlockPlan(view.state.doc, PROPS).values())
+        expect(lookup(view.nodeDOM(expected.pos) as HTMLElement)).toEqual(expected)
+
+      const paragraph = view.state.schema.nodes.docParagraph.create(
+        null,
+        view.state.schema.text('new'),
+      )
+      view.dispatch(view.state.tr.insert(0, paragraph))
+      const afterInsert = read(view.state.doc, view)
+      for (const expected of buildBlockPlan(view.state.doc, PROPS).values())
+        expect(afterInsert(view.nodeDOM(expected.pos) as HTMLElement)).toEqual(expected)
+    } finally {
+      editor.destroy()
+    }
+  })
+})
 
 describe('buildBlockPlan: P5 break classification', () => {
   it('a trailing page break pushes the next block, a leading one leads its block', () => {

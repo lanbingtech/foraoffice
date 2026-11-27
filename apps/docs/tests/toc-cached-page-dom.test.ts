@@ -39,4 +39,34 @@ describe('backfillTocPageDom', () => {
     // an unmeasured anchor keeps whatever it shows
     expect(pageText(lines)).toEqual(['17', '18', '20'])
   })
+
+  it('uses the archived PAGEREF for an empty pristine cache with a different hyperlink', () => {
+    const lines = [
+      tocLine('_Toc1', ''),
+      tocLine('_Toc1', '8'),
+      tocLine('_Toc1', ''),
+      tocLine('_Toc1', ''),
+      tocLine('', ''),
+    ]
+    lines[4].removeAttribute('data-toc-anchor')
+    const refs = new Map<number, string | null>([
+      [0, '_Toc2'],
+      [1, '_Toc2'],
+      [2, '_Missing'],
+      [3, null],
+      [4, '_Toc3'],
+    ])
+    lines.forEach((line, index) => {
+      const owner = document.createElement('div')
+      owner.className = 'doc-protected'
+      owner.dataset.idx = String(index)
+      owner.append(line)
+    })
+
+    expect(backfillTocPageDom(lines, (anchor) => live[anchor], false, refs)).toBe(2)
+    expect(pageText(lines)).toEqual(['18', '8', '', '', '19'])
+    expect(backfillTocPageDom(lines, (anchor) => live[anchor], true, refs)).toBe(1)
+    expect(pageText(lines)).toEqual(['18', '18', '', '', '19'])
+    expect(lines[0].getAttribute('data-toc-anchor')).toBe('_Toc1')
+  })
 })

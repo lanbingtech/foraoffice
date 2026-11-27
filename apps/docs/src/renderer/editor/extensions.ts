@@ -12,16 +12,17 @@ import { textParaLineBox } from '../text-layout/para-line-box'
 import { inlineSegments, type InlineRun, type InlineSegments } from '../text-layout/inline-segments'
 import { MultiSelect } from './multi-select'
 import { Editor, Extension, Node } from '@tiptap/core'
+import { attributesRenderedManually } from './manual-html-attributes'
 import { SHAPE_INLINE_WRAP } from './floating-z-order'
 import { selectBoxAt, selectedBoxPlugin } from './selected-box'
 import { drawingChildInteraction } from './drawing-child-interaction'
 import { drawingLineSize } from './drawing-line'
-import { StreamingTailGuardExtension } from './streaming-tail-guard'
+import { appendedStreamedTail, StreamingTailGuardExtension } from './streaming-tail-guard'
 import { wrapGroupCss, type WrapPicture } from './wrap-group'
 import type { ChainedCommands, RawCommands } from '@tiptap/core'
-import { Gapcursor, UndoRedo } from '@tiptap/extensions'
+import { Gapcursor } from '@tiptap/extensions'
 import { DOMSerializer } from '@tiptap/pm/model'
-import type { DOMOutputSpec, Node as PmNode } from '@tiptap/pm/model'
+import type { DOMOutputSpec, Fragment, Node as PmNode } from '@tiptap/pm/model'
 import {
   AllSelection,
   NodeSelection,
@@ -33,7 +34,12 @@ import {
 } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { appendsAtEnd, touchedTopLevelBlocks } from './touched-blocks'
-import { containsNode, localEditBlocks, touchedNeedsRecompute } from './local-edit'
+import {
+  blockDecorationPlugin,
+  containsNode,
+  localEditBlocks,
+  touchedNeedsRecompute,
+} from './local-edit'
 import { BalloonMarkersExtension } from './balloon-markers'
 import { CommentEndpointsExtension } from './comment-endpoints'
 import { installProseMirrorPerf } from './prosemirror-perf'
@@ -98,9 +104,10 @@ import {
   substituteBullet,
   markerFallbackFace,
   SEGOE_UI_SYMBOL_RE,
-  computeListMarkerInfos,
+  appendListMarkerInfos,
   markerTabAdvance,
   type ListItemRef,
+  type ListMarkerState,
 } from './numbering'
 import { symbolFontCovers } from '../font-check'
 import { dropActiveSubEditor, notifySubEditorState, setActiveSubEditor } from './active-editor'
@@ -252,6 +259,7 @@ import { CheckboxToggleExtension } from './checkbox-toggle'
 import { DoubleClickWordExtension } from './dblclick-word'
 import { OutlineViewExtension } from './outline-view'
 import { PageGapNavExtension } from './page-gap-nav'
+import { DocumentUndoRedo } from './undo-redo'
 import { TrailingTableExitExtension } from './trailing-table-exit'
 import { moveBlocks } from './move-block'
 import { tablePositionCss, tableWidthCss, type TableWidthInput } from './table-geometry'
@@ -1248,7 +1256,7 @@ export const DocParagraph = Node.create({
   group: 'block',
   content: 'inline*',
   addAttributes() {
-    return { ...anchorAttrs }
+    return attributesRenderedManually(anchorAttrs)
   },
   parseHTML() {
     // getAttrs null = match with defaults (foreign HTML); data-para restores formatting
@@ -1322,12 +1330,12 @@ export const DocHeading = Node.create({
   group: 'block',
   content: 'inline*',
   addAttributes() {
-    return {
+    return attributesRenderedManually({
       ...anchorAttrs,
       level: { default: 1 },
       /** level from a direct w:outlineLvl on a non-heading style (body formatting) */
       outlineOnly: { default: null as boolean | null },
-    }
+    })
   },
   parseHTML() {
     return [1, 2, 3, 4, 5, 6].map((level) => ({
@@ -1349,12 +1357,12 @@ export const DocListItem = Node.create({
   group: 'block',
   content: 'inline*',
   addAttributes() {
-    return {
+    return attributesRenderedManually({
       ...anchorAttrs,
       kind: { default: 'bullet' as 'bullet' | 'ordered' },
       numId: { default: null as string | null },
       ilvl: { default: 0 },
-    }
+    })
   },
   parseHTML() {
     const ilvlOf = (el: HTMLElement): number => {
@@ -1940,6 +1948,12 @@ function markerParagraphFont(
 }
 
 let markerMeasureCtx: CanvasRenderingContext2D | null | undefined
+let markerFontEpoch = 0
+let observedMarkerFonts: FontFaceSet | undefined
+const onMarkerFontsLoaded = () => {
+  markerFontEpoch++
+}
+
 /** marker advance in twips via canvas metrics; null in DOM-less test envs */
 function measureMarkerTwips(
   text: string,
@@ -1955,6 +1969,13 @@ function measureMarkerTwips(
     }
   }
   if (!markerMeasureCtx) return null
+  // The shared canvas may switch from a fallback to the newly loaded face.
+  const fonts = document.fonts
+  if (fonts !== observedMarkerFonts) {
+    observedMarkerFonts?.removeEventListener('loadingdone', onMarkerFontsLoaded)
+    observedMarkerFonts = fonts
+    fonts?.addEventListener('loadingdone', onMarkerFontsLoaded)
+  }
   const weight = bold ? '600 ' : ''
   markerMeasureCtx.font = `${weight}${(sizePt * 4) / 3}px "${family.replaceAll('"', '')}", Calibri, sans-serif`
   const w = markerMeasureCtx.measureText(text).width
@@ -2186,9 +2207,9 @@ export function anchorLineSpec(line: Record<string, unknown>): DomSpec {
 export const AnchorLineExtension = Extension.create({
   name: 'anchorLine',
   addProseMirrorPlugins() {
-    const build = (doc: PmNode): DecorationSet => {
+    const build = (content: Fragment, from = 0): Decoration[] => {
       const decos: Decoration[] = []
-      doc.descendants((node, pos) => {
+      content.descendants((node, offset) => {
         if (node.type.name !== 'docProtected') return true
         const line = node.attrs.anchorLine as Record<string, unknown> | null
         if (
@@ -2198,7 +2219,7 @@ export const AnchorLineExtension = Extension.create({
         ) {
           decos.push(
             Decoration.widget(
-              pos + node.nodeSize,
+              from + offset + node.nodeSize,
               () => DOMSerializer.renderSpec(document, anchorLineSpec(line) as never).dom,
               { side: -1, key: `anchor-line-${String(node.attrs.docxIndex)}` },
             ),
@@ -2206,31 +2227,14 @@ export const AnchorLineExtension = Extension.create({
         }
         return false
       })
-      return DecorationSet.create(doc, decos)
+      return decos
     }
     return [
-      new Plugin({
-        state: {
-          init: (_, state) => build(state.doc),
-          apply: (tr, old) => {
-            if (!tr.docChanged) return old
-            // a local edit outside every anchored textbox block keeps the widgets
-            const touched = localEditBlocks(tr)
-            if (!touched) return build(tr.doc)
-            const mapped = old.map(tr.mapping, tr.doc)
-            // anchored textbox blocks also live inside table cells
-            return touchedNeedsRecompute(tr, touched, mapped, (node) =>
-              containsNode(node, (n) => n.type.name === 'docProtected'),
-            )
-              ? build(tr.doc)
-              : mapped
-          },
-        },
-        props: {
-          decorations(state) {
-            return this.getState(state)
-          },
-        },
+      blockDecorationPlugin({
+        key: new PluginKey('anchorLine'),
+        build: (doc) => build(doc.content),
+        append: (tr, tail, old) => old.add(tr.doc, build(tail.content, tail.from)),
+        needsRecompute: (node) => containsNode(node, (n) => n.type.name === 'docProtected'),
       }),
     ]
   },
@@ -2254,10 +2258,11 @@ export const RuleOverlayExtension = Extension.create({
   addProseMirrorPlugins() {
     const hasRules = (n: PmNode) =>
       n.type.name === 'docParagraph' && Array.isArray(n.attrs.ruleOverlays)
-    const build = (doc: PmNode): DecorationSet => {
+    const build = (content: Fragment, from = 0): Decoration[] => {
       const decos: Decoration[] = []
-      doc.descendants((node, pos) => {
+      content.descendants((node, offset) => {
         if (!hasRules(node)) return node.type.name !== 'docParagraph'
+        const pos = from + offset
         decos.push(Decoration.node(pos, pos + node.nodeSize, { class: 'doc-p-ruled' }))
         ;(node.attrs.ruleOverlays as RuleOverlay[]).forEach((rule, i) => {
           decos.push(
@@ -2270,29 +2275,14 @@ export const RuleOverlayExtension = Extension.create({
         })
         return false
       })
-      return DecorationSet.create(doc, decos)
+      return decos
     }
     return [
-      new Plugin({
-        state: {
-          init: (_, state) => build(state.doc),
-          apply: (tr, old) => {
-            if (!tr.docChanged) return old
-            const touched = localEditBlocks(tr)
-            if (!touched) return build(tr.doc)
-            const mapped = old.map(tr.mapping, tr.doc)
-            return touchedNeedsRecompute(tr, touched, mapped, (node) =>
-              containsNode(node, hasRules),
-            )
-              ? build(tr.doc)
-              : mapped
-          },
-        },
-        props: {
-          decorations(state) {
-            return this.getState(state)
-          },
-        },
+      blockDecorationPlugin({
+        key: new PluginKey('ruleOverlay'),
+        build: (doc) => build(doc.content),
+        append: (tr, tail, old) => old.add(tr.doc, build(tail.content, tail.from)),
+        needsRecompute: (node) => containsNode(node, hasRules),
       }),
     ]
   },
@@ -2305,11 +2295,24 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
   },
   addProseMirrorPlugins() {
     const storage = this.storage
-    const compute = (doc: PmNode): DecorationSet | null => {
-      if (storage.defs.size === 0) return null
+    interface CachedMarkers {
+      inputs: Readonly<ListNumberingStorage>
+      decos: DecorationSet | null
+      counterState?: ListMarkerState
+      fontEpoch?: number
+    }
+    const compute = (
+      doc: PmNode,
+      content = doc.content,
+      from = 0,
+      old?: CachedMarkers,
+    ): CachedMarkers => {
+      const inputs = old?.inputs ?? { ...storage }
+      if (storage.defs.size === 0) return old ?? { inputs, decos: null }
       const refs: ListItemRef[] = []
       const nodes: Array<{ pos: number; node: PmNode }> = []
-      doc.descendants((node, pos) => {
+      content.descendants((node, offset) => {
+        const pos = from + offset
         if (node.type.name === 'docListItem') {
           const deleted =
             !!node.attrs.paraMarkDel ||
@@ -2333,9 +2336,10 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
         }
         return true
       })
-      if (refs.length === 0) return null
-      const markers = computeListMarkerInfos(refs, storage.defs)
+      if (refs.length === 0) return old ?? { inputs, decos: null }
+      const { markers, state } = appendListMarkerInfos(refs, storage.defs, old?.counterState)
       const decos: Decoration[] = []
+      let fontEpoch = old?.fontEpoch
       markers.forEach((marker, i) => {
         if (marker === null) return
         const styles: string[] = []
@@ -2483,6 +2487,7 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
               (szHalf ?? para.sizeHalf) / 2,
               para.bold,
             )
+            if (markerMeasureCtx) fontEpoch ??= markerFontEpoch
           }
           // lvlJc right/center: the marker's end/middle sits at the marker position,
           // so its box starts earlier by the glyph width (or half of it)
@@ -2528,23 +2533,36 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
         if (styles.length > 0) attrs.style = styles.join(';')
         decos.push(Decoration.node(nodes[i].pos, nodes[i].pos + nodes[i].node.nodeSize, attrs))
       })
-      return DecorationSet.create(doc, decos)
+      return {
+        inputs,
+        decos: old?.decos ? old.decos.add(doc, decos) : DecorationSet.create(doc, decos),
+        counterState: state,
+        fontEpoch,
+      }
     }
 
-    interface CachedMarkers {
-      defs: Map<string, NumberingDef>
-      decos: DecorationSet | null
-    }
     const key = new PluginKey<CachedMarkers>('listNumbering')
     return [
       new Plugin<CachedMarkers>({
         key,
         state: {
-          init: (_config, state) => ({ defs: storage.defs, decos: compute(state.doc) }),
+          init: (_config, state) => compute(state.doc),
           apply(tr, old) {
             // defs is replaced (never mutated) on open/reparse and marker overlay
-            if (old.defs !== storage.defs) return { defs: storage.defs, decos: compute(tr.doc) }
+            if (old.inputs.defs !== storage.defs) return compute(tr.doc)
             if (!tr.docChanged) return old
+            const tail = appendedStreamedTail(tr)
+            if (tail) {
+              const inputs = old.inputs
+              // A full pass refreshes prefix marker geometry after font or style changes.
+              return inputs.styles === storage.styles &&
+                inputs.docDefaults === storage.docDefaults &&
+                inputs.defaultTabTwips === storage.defaultTabTwips &&
+                inputs.indentNotTabStop === storage.indentNotTabStop &&
+                (old.fontEpoch === undefined || old.fontEpoch === markerFontEpoch)
+                ? compute(tr.doc, tail.content, tail.from, old)
+                : compute(tr.doc)
+            }
             // markers depend on the sequence of list items: a local edit that
             // touches no list item (and adds/removes no block) cannot move one
             const touched = localEditBlocks(tr)
@@ -2556,9 +2574,9 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
                 (n.type.name === 'docProtected' && !!n.attrs.strayList)
               const hasList = (node: PmNode) => containsNode(node, isListNode)
               if (!touchedNeedsRecompute(tr, touched, mapped, hasList))
-                return { defs: old.defs, decos: mapped }
+                return { ...old, decos: mapped }
             }
-            return { defs: storage.defs, decos: compute(tr.doc) }
+            return compute(tr.doc)
           },
         },
         props: {
@@ -2571,7 +2589,7 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
   },
 })
 
-const tableCellAttrs = {
+const tableCellAttrs = attributesRenderedManually({
   sourceCell: { default: null, rendered: false },
   sourceProperties: { default: null, rendered: false },
   vAlign: { default: null as string | null },
@@ -2607,7 +2625,7 @@ const tableCellAttrs = {
   color: { default: null as string | null },
   bold: { default: false },
   align: { default: null as string | null },
-}
+})
 
 export function borderWidthPx(b: BorderLine): number {
   return borderDrawnPx(b)
@@ -3030,7 +3048,7 @@ export const DocTable = Node.create({
   selectable: true,
   draggable: true,
   addAttributes() {
-    return {
+    return attributesRenderedManually({
       docxIndex: { default: null as number | null },
       colWidthsPct: { default: null as number[] | null },
       widthPx: { default: null as number | null },
@@ -3088,7 +3106,7 @@ export const DocTable = Node.create({
        *  and hidden text, keyed row:column (they have no node of their own) */
       continuationCells: { default: null as string | null },
       blockRevision: { default: null as Record<string, string> | null },
-    }
+    })
   },
   parseHTML() {
     return [{ tag: 'table.doc-table' }, { tag: 'table' }]
@@ -3306,7 +3324,7 @@ export const DocTableRow = Node.create({
   name: 'docTableRow',
   content: '(docTableCell | docTableHeader)+',
   addAttributes() {
-    return {
+    return attributesRenderedManually({
       sourceRow: { default: null, rendered: false },
       heightTwips: { default: null as number | null },
       heightRule: { default: null as 'atLeast' | 'exact' | null },
@@ -3324,7 +3342,7 @@ export const DocTableRow = Node.create({
       rawTblPrEx: { default: null as string | null },
       /** tracked exception change (tblPrEx w:tblPrExChange) */
       tblPrExChange: { default: null as Record<string, string> | null },
-    }
+    })
   },
   parseHTML() {
     return [{ tag: 'tr' }]
@@ -7335,7 +7353,7 @@ export const textboxSubExtensions = [
   InsMark,
   DelMark,
   TextboxListRenumber,
-  UndoRedo,
+  DocumentUndoRedo,
 ]
 
 // ---- find & replace highlighting ----
@@ -7431,7 +7449,7 @@ export const editorExtensions = [
   CommentMark,
   InsMark,
   DelMark,
-  UndoRedo,
+  DocumentUndoRedo,
   CommentEndpointsExtension,
   MultiSelect,
   SearchHighlightExtension,

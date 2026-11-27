@@ -25,7 +25,6 @@ import {
   sectionGridPitchSpecs,
   sectionPageStartSpecs,
   sectionTopMarginSpecs,
-  wrapWidthSig,
   docGridPitchPt,
   sectionCharSpaceSpecs,
   docCharSpacePt,
@@ -74,6 +73,142 @@ const block = (top: number, height: number, extra?: Partial<BlockBox>): BlockBox
   top,
   height,
   ...extra,
+})
+
+it('keeps a predecessor rowspan line whole when a later row can fit a fresh page without row-height growth', () => {
+  document.body.innerHTML =
+    '<div><table data-rect="0,180"><tbody>' +
+    '<tr data-rect="0,40"><td rowspan="3" style="vertical-align:middle" data-rect="0,180"><p id="span-label" data-rect="95,14" data-ink="95,14">Merged label</p></td><td data-rect="0,40"><p data-rect="5,14" data-ink="5,14">Opening</p></td></tr>' +
+    '<tr data-rect="40,100"><td data-rect="40,100"><p data-rect="40,100" data-ink="40,20;60,20;80,20;100,20;120,20">Later row left</p></td><td data-rect="40,100"><p data-rect="40,100" data-ink="40,20;60,20;80,20;100,20;120,20">Later row right</p></td></tr>' +
+    '<tr data-rect="140,40"><td data-rect="140,40"><p data-rect="145,14" data-ink="145,14">Tail left</p></td><td data-rect="140,40"><p data-rect="145,14" data-ink="145,14">Tail right</p></td></tr>' +
+    '</tbody></table></div>'
+  for (const element of document.querySelectorAll<HTMLElement>('[data-rect]')) {
+    const [y, h] = element.dataset.rect!.split(',').map(Number)
+    element.getBoundingClientRect = () => new DOMRect(0, y, 100, h)
+  }
+  const originalRects = Range.prototype.getClientRects
+  let labelMeasurements = 0
+  Range.prototype.getClientRects = function (this: Range) {
+    const paragraph = this.startContainer.parentElement
+    if (paragraph?.id === 'span-label') labelMeasurements++
+    return (paragraph?.dataset.ink?.split(';').map((pair) => {
+      const [y, h] = pair.split(',').map(Number)
+      return new DOMRect(0, y, 70, h)
+    }) ?? []) as unknown as DOMRectList
+  }
+  try {
+    const table = document.querySelector<HTMLElement>('table')!
+    const b: BlockBox = { top: 0, height: 180, el: table, modernTableHeaders: true }
+    const page = [{ contentHeight: 100, forceBreak: false }]
+    fillLineBoxes([b], page, 1)
+    const out: SliceOutputs = { rowSplits: [], rowFills: [] }
+    const slices = computeSectionedSlicesF2([b], page, 180, out)
+    expect(slices.map((s) => [s.start, s.end])).toEqual([
+      [0, 40],
+      [40, 140],
+      [140, 180],
+    ])
+    expect(out.rowFills).toEqual([])
+    expect(labelMeasurements).toBe(1)
+    // Removing the authored span must retire its constraints, even when the
+    // table's text, total height, width and descendant count stay unchanged.
+    table.querySelector('td')!.setAttribute('rowspan', '1')
+    table.querySelector<HTMLElement>('td')!.getBoundingClientRect = () => new DOMRect(0, 0, 100, 40)
+    const label = table.querySelector<HTMLElement>('#span-label')!
+    label.dataset.ink = '5,14'
+    label.getBoundingClientRect = () => new DOMRect(0, 5, 70, 14)
+    const changed: BlockBox = { top: 0, height: 180, el: table, modernTableHeaders: true }
+    fillLineBoxes([changed], page, 1)
+    expect(
+      computeSectionedSlicesF2([changed], page, 180, { rowSplits: [], rowFills: [] }).map((s) => [
+        s.start,
+        s.end,
+      ]),
+    ).toEqual([
+      [0, 100],
+      [100, 180],
+    ])
+    expect(labelMeasurements).toBe(2)
+  } finally {
+    Range.prototype.getClientRects = originalRects
+    document.body.innerHTML = ''
+  }
+})
+
+it('leaves oversized rows on the existing split path and ignores expired inherited ink', () => {
+  const own = {
+    lines: Array.from({ length: 10 }, (_, i): [number, number] => [i * 20, (i + 1) * 20]),
+    childOf: Array.from({ length: 10 }, () => 0),
+    paraOf: Array.from({ length: 10 }, () => 0),
+    alignDy: 0,
+    alignFrac: 0,
+  }
+  const rows: TableRowBox[] = [{ height: 40 }, { height: 200, cells: [own, own] }]
+  const run = (values: TableRowBox[]) => {
+    const height = values.reduce((sum, row) => sum + row.height, 0)
+    return computeSectionedSlicesF2(
+      [{ top: 0, height, tableRows: values, modernTableHeaders: true }],
+      [{ contentHeight: 100, forceBreak: false }],
+      height,
+      { rowSplits: [], rowFills: [] },
+    )
+  }
+  expect(run(rows).map((s) => [s.start, s.end])).toEqual([
+    [0, 100],
+    [100, 200],
+    [200, 240],
+  ])
+  expect(run([rows[0], { ...rows[1], precedingSpanInk: [[55, 69]] }])).toEqual(run(rows))
+  const small: TableRowBox[] = [
+    { height: 40 },
+    {
+      height: 100,
+      cells: [
+        {
+          ...own,
+          lines: own.lines.slice(0, 5),
+          childOf: own.childOf.slice(0, 5),
+          paraOf: own.paraOf.slice(0, 5),
+        },
+        {
+          ...own,
+          lines: own.lines.slice(0, 5),
+          childOf: own.childOf.slice(0, 5),
+          paraOf: own.paraOf.slice(0, 5),
+        },
+      ],
+    },
+  ]
+  expect(run([small[0], { ...small[1], precedingSpanInk: [[-20, -5]] }])).toEqual(run(small))
+})
+
+it('charges a rowspan-constrained first body row note once when modern headers retract and replay', () => {
+  const cell = {
+    lines: Array.from({ length: 5 }, (_, i): [number, number] => [i * 20, (i + 1) * 20]),
+    childOf: [0, 0, 0, 0, 0],
+    paraOf: [0, 0, 0, 0, 0],
+    alignDy: 0,
+    alignFrac: 0,
+  }
+  const rows: TableRowBox[] = [
+    { height: 40, isHeader: true },
+    { height: 100, notesPx: 10, cells: [cell, cell], precedingSpanInk: [[45, 59]] },
+  ]
+  const slices = computeSectionedSlicesF2(
+    [
+      block(0, 80),
+      block(80, 165, { tableRows: rows, modernTableHeaders: true, footnoteExtraPx: 25 }),
+      block(245, 25),
+    ],
+    [{ contentHeight: 200, forceBreak: false }],
+    270,
+    { rowSplits: [], rowFills: [] },
+  )
+  expect(slices.map((s) => [s.start, s.end])).toEqual([
+    [0, 80],
+    [80, 245],
+    [245, 270],
+  ])
 })
 
 describe('computePageSlices', () => {
@@ -966,31 +1101,6 @@ describe('sectionPageStartSpecs — page-opening sections clear the previous sec
     const specs = sectionPageStartSpecs(blocks, secsList)
     expect(specs.map((sp) => blocks.findIndex((b) => b.el === sp.el))).toEqual([3, 4, 7])
     expect(specs.every((sp) => sp.sectionPageStart)).toBe(true)
-  })
-})
-
-describe('wrapWidthSig — specs that move line breaks re-trigger one pass', () => {
-  const el = (idx: number) => {
-    const e = document.createElement('p')
-    e.dataset.idx = String(idx)
-    return e
-  }
-
-  it('changes when a section-start clear appears, like a wrap width does', () => {
-    const width = { el: el(1), dx: 0, dy: 0, widthPx: 400.2, contentWPx: 380.4 }
-    const clear = { el: el(5), dx: 0, dy: 0, sectionPageStart: true as const }
-    const base = wrapWidthSig([width])
-    expect(wrapWidthSig([width, clear])).not.toBe(base)
-    expect(wrapWidthSig([clear])).not.toBe(wrapWidthSig([]))
-  })
-
-  it('is stable across passes for the same specs', () => {
-    const specs = [
-      { el: el(1), dx: 0, dy: 0, widthPx: 400.2, contentWPx: 380.4 },
-      { el: el(5), dx: 0, dy: 0, sectionPageStart: true as const },
-    ]
-    expect(wrapWidthSig(specs)).toBe(wrapWidthSig(specs.map((s) => ({ ...s }))))
-    expect(wrapWidthSig([{ ...specs[0], widthPx: 400.4 }])).toBe(wrapWidthSig([specs[0]]))
   })
 })
 
@@ -2363,7 +2473,7 @@ describe('computeSectionedSlicesF2 — table row-level page breaks', () => {
     const slices = computeSectionedSlicesF2([b], [{ contentHeight: 200, forceBreak: false }], 340)
     expect(slices.length).toBeGreaterThan(1)
     for (const s of slices.slice(1)) {
-      expect(s.repeatHeader).toEqual({ top: 0, height: 40 })
+      expect(s.repeatHeader).toEqual({ block: 0, top: 0, height: 40 })
     }
     // From page 2 the header takes 40px: rows per page = (200-40)/50 = 3
     expect(slices[1].end - slices[1].start).toBeLessThanOrEqual(160)
@@ -2376,7 +2486,8 @@ describe('computeSectionedSlicesF2 — table row-level page breaks', () => {
     ]
     const b = makeTableBlock(0, rows)
     const slices = computeSectionedSlicesF2([b], [{ contentHeight: 200, forceBreak: false }], 350)
-    for (const s of slices.slice(1)) expect(s.repeatHeader).toEqual({ top: 0, height: 150 })
+    for (const s of slices.slice(1))
+      expect(s.repeatHeader).toEqual({ block: 0, top: 0, height: 150 })
   })
 
   it('tblHeader: header block taller than a full page is not repeated', () => {
@@ -5941,7 +6052,7 @@ describe('computeSectionedSlicesF2 — multi-cell rows split per cell (Word row 
       [0, 200],
       [200, 300],
     ])
-    expect(legacy.slices[1].repeatHeader).toEqual({ top: 130, height: 20 })
+    expect(legacy.slices[1].repeatHeader).toEqual({ block: 1, top: 130, height: 20 })
     // a first row whose cells all break legally splits under the header in modern mode too
     const legal = run(
       [
@@ -5959,7 +6070,7 @@ describe('computeSectionedSlicesF2 — multi-cell rows split per cell (Word row 
       [0, 200],
       [200, 300],
     ])
-    expect(legal.slices[1].repeatHeader).toEqual({ top: 130, height: 20 })
+    expect(legal.slices[1].repeatHeader).toEqual({ block: 1, top: 130, height: 20 })
     // the header is only retracted when the first body row turns the page: a
     // cantSplit first row does the same, a later row leaves the header in place
     const cant = run(
@@ -5972,7 +6083,7 @@ describe('computeSectionedSlicesF2 — multi-cell rows split per cell (Word row 
       true,
     )
     expect(later.slices[0].end).toBe(170)
-    expect(later.slices[1].repeatHeader).toEqual({ top: 130, height: 20 })
+    expect(later.slices[1].repeatHeader).toEqual({ block: 1, top: 130, height: 20 })
   })
 
   it('a cell whose only line (a picture) cannot fit moves the whole row instead of staying empty on the first page', () => {
@@ -6618,7 +6729,7 @@ describe('page-bottom fit: the last line needs only its single-spacing extent (l
   it('applyLeadSpills measures a repeated-header page from the header-shortened bottom', () => {
     const para = block(0, 190, { lineLeadPx: 10 })
     const slices: PageSlice[] = [
-      { start: 0, end: 190, section: 0, repeatHeader: { top: 500, height: 20 } },
+      { start: 0, end: 190, section: 0, repeatHeader: { block: 0, top: 500, height: 20 } },
     ]
     applyLeadSpills(slices, [para], geoms1)
     // the flow bottom is 200 - 20 = 180: the 190 text bottom spills 10

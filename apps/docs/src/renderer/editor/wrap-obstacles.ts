@@ -218,14 +218,20 @@ export function syncWrapObstacles(
   pageLeads?: ReadonlyMap<Element, number>,
   /** header drawings reaching into each page's body: seeded at every page start */
   headerObstaclesOf?: HeaderObstaclesOf,
+  end = pm.children.length,
 ): boolean {
-  const pmRect = pm.getBoundingClientRect()
-  const rel = (r: DOMRect): ObstacleRect => ({
-    left: (r.left - pmRect.left) / factor,
-    right: (r.right - pmRect.left) / factor,
-    top: (r.top - pmRect.top) / factor,
-    bottom: (r.bottom - pmRect.top) / factor,
-  })
+  // Measuring an obstacle needs the displayed paper. With none present,
+  // avoid a display-state layout before the paginator measures natural flow.
+  let paper: DOMRect | undefined
+  const rel = (r: DOMRect): ObstacleRect => {
+    const pmRect = (paper ??= pm.getBoundingClientRect())
+    return {
+      left: (r.left - pmRect.left) / factor,
+      right: (r.right - pmRect.left) / factor,
+      top: (r.top - pmRect.top) / factor,
+      bottom: (r.bottom - pmRect.top) / factor,
+    }
+  }
   const writes: Write[] = []
   const paras: ParaSpec[] = []
   const lineFloats: FloatSpec[] = []
@@ -233,11 +239,14 @@ export function syncWrapObstacles(
   const floats: FloatBox[] = []
   // the canvas padding is the first page's margins; the header rectangles of
   // a page are column px from its body top (the gap widget's bottom edge)
-  const pmCs = headerObstaclesOf ? getComputedStyle(pm) : null
-  const colLeftPm = pmCs ? parseFloat(pmCs.paddingLeft) || 0 : 0
-  const seedHeader = (pageIdx: number, bodyTop: number) => {
-    if (!headerObstaclesOf) return
-    for (const o of headerObstaclesOf(pageIdx)) {
+  let paperStyle: CSSStyleDeclaration | undefined
+  const style = () => (paperStyle ??= getComputedStyle(pm))
+  const seedHeader = (pageIdx: number, bodyTopOf: () => number) => {
+    const obstacles = headerObstaclesOf?.(pageIdx)
+    if (!obstacles?.length) return
+    const colLeftPm = parseFloat(style().paddingLeft) || 0
+    const bodyTop = bodyTopOf()
+    for (const o of obstacles) {
       rects.push({
         left: o.left + colLeftPm,
         right: o.right + colLeftPm,
@@ -249,18 +258,19 @@ export function syncWrapObstacles(
   }
   const gapBottom = (el: Element | null): number | undefined =>
     el && isPageTurn(el) ? rel(el.getBoundingClientRect()).bottom : undefined
-  seedHeader(0, pmCs ? parseFloat(pmCs.paddingTop) || 0 : 0)
+  seedHeader(0, () => parseFloat(style().paddingTop) || 0)
   // a float-carry spacer (page-gap-carry) is flow space on the last portion's
   // page, not a turn: it keeps the obstacles like any other spacer
   let domTurns = 0
   let cutTurns = 0
-  for (const el of Array.from(pm.children) as HTMLElement[]) {
+  for (let i = 0; i < end; i++) {
+    const el = pm.children[i] as HTMLElement
     if (el.classList.contains('page-gap')) {
       if (isPageTurn(el) && !insideFloatTable(el)) {
         domTurns++
         if (!pageLeads) {
           rects = []
-          seedHeader(domTurns, gapBottom(el) ?? 0)
+          seedHeader(domTurns, () => gapBottom(el) ?? 0)
         }
       }
       continue
@@ -278,7 +288,7 @@ export function syncWrapObstacles(
       rects = []
       seedHeader(
         leadPage,
-        gapBottom(el.previousElementSibling) ?? rel(el.getBoundingClientRect()).top,
+        () => gapBottom(el.previousElementSibling) ?? rel(el.getBoundingClientRect()).top,
       )
     }
     if (el.classList.contains('doc-protected-floating')) {

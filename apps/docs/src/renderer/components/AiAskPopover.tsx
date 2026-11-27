@@ -50,7 +50,6 @@ type OpenState = { mode: 'new' } | { mode: 'edit'; qid: string }
 const WIDTH = 340
 const GAP = 8
 const EDGE = 8
-const EST_HEIGHT = 150
 
 type SelectionKind = 'image' | 'chart' | 'table' | 'text'
 
@@ -83,7 +82,7 @@ function selectionKind(editor: Editor): SelectionKind {
 function rangeRect(editor: Editor, from: number, to: number): AnchorRect | null {
   try {
     const a = editor.view.coordsAtPos(from)
-    const b = editor.view.coordsAtPos(to)
+    const b = from === to ? a : editor.view.coordsAtPos(to)
     return {
       left: Math.min(a.left, b.left),
       top: Math.min(a.top, b.top),
@@ -132,17 +131,16 @@ export function AiAskPopover({
   onQueueRemove,
 }: Props): React.JSX.Element | null {
   const { t } = useI18n()
-  const [trigger, setTrigger] = useState<{ left: number; top: number } | null>(null)
   const [open, setOpen] = useState<OpenState | null>(null)
   const [kind, setKind] = useState<SelectionKind>('text')
   const [text, setText] = useState('')
-  const [rect, setRect] = useState<AnchorRect | null>(null)
   const boxRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const openRef = useRef(open)
   openRef.current = open
+  const focusedOpenRef = useRef<OpenState | null>(null)
   const textRef = useRef(text)
   textRef.current = text
   const queueFullRef = useRef(queueFull)
@@ -161,29 +159,25 @@ export function AiAskPopover({
 
   // floating trigger follows the live selection while the editor is focused
   useEffect(() => {
+    const trigger = triggerRef.current
+    if (!trigger) return
     const update = () => {
-      if (openRef.current) {
-        setTrigger(null)
-        return
-      }
       const { empty, to } = editor.state.selection
-      if (empty || !editor.isFocused) {
-        setTrigger(null)
-        return
+      const c = openRef.current || empty || !editor.isFocused ? null : rangeRect(editor, to, to)
+      if (c) {
+        trigger.style.left = `${c.right + 6}px`
+        trigger.style.top = `${c.bottom + 4}px`
       }
-      const c = rangeRect(editor, to, to)
-      if (!c) {
-        setTrigger(null)
-        return
-      }
-      setTrigger({ left: c.right + 6, top: c.bottom + 4 })
+      trigger.hidden = !c
     }
-    const hide = () => setTrigger(null)
+    const hide = () => {
+      trigger.hidden = true
+    }
     update()
     editor.on('selectionUpdate', update)
     editor.on('focus', update)
     editor.on('blur', hide)
-    const scroller = document.querySelector('.editor-scroll')
+    const scroller = editor.view.dom.closest('.editor-scroll')
     scroller?.addEventListener('scroll', update, { passive: true })
     window.addEventListener('resize', update)
     return () => {
@@ -204,33 +198,53 @@ export function AiAskPopover({
       if (!item) return
       setText(item.instruction)
       setOpen({ mode: 'edit', qid: item.qid })
-      setTrigger(null)
     }
     window.addEventListener(AI_QUEUE_ANCHOR_CLICK, onAnchorClick)
     return () => window.removeEventListener(AI_QUEUE_ANCHOR_CLICK, onAnchorClick)
   }, [getItem, queueEnabled])
 
-  // popover position follows scroll/resize; a vanished anchor closes it
-  useLayoutEffect(() => {
-    if (!open) return
-    const update = () => setRect(anchorRect())
-    update()
-    const scroller = document.querySelector('.editor-scroll')
-    scroller?.addEventListener('scroll', update, { passive: true })
-    window.addEventListener('resize', update)
-    return () => {
-      scroller?.removeEventListener('scroll', update)
-      window.removeEventListener('resize', update)
+  const placePopover = useCallback(() => {
+    const box = boxRef.current
+    if (!box) return
+    const rect = anchorRect()
+    if (!rect) {
+      box.style.visibility = 'hidden'
+      return
     }
-  }, [open, anchorRect])
-
-  const positioned = rect !== null
-  useEffect(() => {
-    if (open && positioned) {
+    const height = box.offsetHeight
+    const below = rect.bottom + GAP
+    const above = rect.top - GAP - height
+    const top =
+      below + height <= window.innerHeight - EDGE
+        ? below
+        : above >= EDGE
+          ? above
+          : Math.max(EDGE, window.innerHeight - EDGE - height)
+    const left = Math.min(
+      Math.max(EDGE, (rect.left + rect.right) / 2 - WIDTH / 2),
+      Math.max(EDGE, window.innerWidth - WIDTH - EDGE),
+    )
+    box.style.left = `${left}px`
+    box.style.top = `${top}px`
+    if (box.style.visibility === 'hidden' || focusedOpenRef.current !== openRef.current) {
+      box.style.visibility = ''
+      focusedOpenRef.current = openRef.current
       inputRef.current?.focus()
       inputRef.current?.select()
     }
-  }, [open, positioned])
+  }, [anchorRect])
+  useLayoutEffect(placePopover)
+  // Position changes follow the anchor without committing the editor's React tree.
+  useEffect(() => {
+    if (!open) return
+    const scroller = editor.view.dom.closest('.editor-scroll')
+    scroller?.addEventListener('scroll', placePopover, { passive: true })
+    window.addEventListener('resize', placePopover)
+    return () => {
+      scroller?.removeEventListener('scroll', placePopover)
+      window.removeEventListener('resize', placePopover)
+    }
+  }, [editor, open, placePopover])
 
   const close = useCallback(() => {
     setOpen(null)
@@ -270,7 +284,6 @@ export function AiAskPopover({
     setText('')
     setKind(selectionKind(editor))
     setOpen({ mode: 'new' })
-    setTrigger(null)
     setInactiveSelectionShown(editor, true)
   }
 
@@ -292,25 +305,12 @@ export function AiAskPopover({
     .trim()
 
   let box: React.JSX.Element | null = null
-  if (open && rect) {
-    const height = boxRef.current?.offsetHeight ?? EST_HEIGHT
-    const below = rect.bottom + GAP
-    const above = rect.top - GAP - height
-    const top =
-      below + height <= window.innerHeight - EDGE
-        ? below
-        : above >= EDGE
-          ? above
-          : Math.max(EDGE, window.innerHeight - EDGE - height)
-    const left = Math.min(
-      Math.max(EDGE, (rect.left + rect.right) / 2 - WIDTH / 2),
-      Math.max(EDGE, window.innerWidth - WIDTH - EDGE),
-    )
+  if (open) {
     box = (
       <div
         ref={boxRef}
         className="ai-ask-pop"
-        style={{ left, top, width: WIDTH }}
+        style={{ width: WIDTH, visibility: 'hidden' }}
         role="dialog"
         onKeyDown={(e) => {
           if (e.key === 'Escape') {
@@ -443,11 +443,11 @@ export function AiAskPopover({
 
   return (
     <>
-      {trigger && !open && (
+      {!open && (
         <button
           ref={triggerRef}
           className="ai-ask-trigger"
-          style={{ left: trigger.left, top: trigger.top }}
+          hidden
           // keep the editor focused and the selection alive
           onMouseDown={(e) => e.preventDefault()}
           onClick={openFromSelection}

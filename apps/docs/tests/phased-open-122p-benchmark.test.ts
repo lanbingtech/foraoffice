@@ -25,7 +25,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
-import { PHASED_APPEND } from '../src/renderer/editor/streaming-tail-guard'
+import { PHASED_APPEND, streamedAppendApplied } from '../src/renderer/editor/streaming-tail-guard'
 import { appendStreamedNodes } from '../src/renderer/file-actions'
 import { carryStreamedSamples, fillLineBoxes } from '../src/renderer/pagination-lines'
 import type { BlockBox, SectionGeom } from '../src/renderer/pagination-types'
@@ -82,14 +82,20 @@ function startStreamingOpen(editor: Editor, blocks: number): Array<() => void> {
         .setMeta(PHASED_APPEND, true)
         .setContent(doc as never)
         .run(),
-    appendNodes: (nodes) => appendStreamedNodes(editor, nodes as never),
+    appendNodes: (nodes, attempt) => appendStreamedNodes(editor, nodes, attempt),
+    appliedAppend: (attempt) => streamedAppendApplied(editor.state, attempt),
     isDestroyed: () => editor.isDestroyed,
     resetHistory: () => {},
     setLoading: () => {},
     getDirty: () => false,
-    setDirty: () => {},
   }
-  setContentPhased(host, docOf(blocks) as never, (cb) => chunks.push(cb))
+  // Count the layout work for fixed-size batches independently of jsdom speed.
+  setContentPhased(
+    host,
+    docOf(blocks) as never,
+    (cb) => chunks.push(cb),
+    () => 0,
+  )
   return chunks
 }
 

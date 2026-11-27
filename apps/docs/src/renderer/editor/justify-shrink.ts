@@ -3,9 +3,17 @@ import { Plugin, PluginKey, type EditorState } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { rangeSlot } from '../dom-range'
-import { SettledParagraphCache, noteFloatTransaction } from './settled-measure'
+import {
+  PhasedParagraphMeasurement,
+  SettledParagraphCache,
+  noteFloatTransaction,
+  paragraphDecorationsChanged,
+  type ReuseNoOpWhile,
+} from './settled-measure'
 import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
-import { DOC_CSS_COMMITTED_EVENT, WRAP_WIDTHS_COMMITTED_EVENT } from './cjk-punct-shrink'
+import { DOC_CSS_COMMITTED_EVENT } from './cjk-punct-shrink'
+import { WRAP_WIDTHS_COMMITTED_EVENT, type WrapWidthChanges } from './column-layout'
+import { paragraphEditMeasurement, type ParagraphEditMeasurement } from './paged-view-probe'
 
 /**
  * Word 2013+ (settings compatibilityMode >= 15) justified line breaking pulls
@@ -251,10 +259,14 @@ export function sameLine(
 
 class JustifyShrinkView {
   private lastSig = ''
+  private measuredFrom?: number
   private seenSigs = new Set<string>()
   private frozen = false
   private retryRaf = 0
   private retries = 0
+  private pendingSettlement = false
+  private phasedDoc?: ProseMirrorNode
+  private measurement: PhasedParagraphMeasurement
   private resizeObserver?: ResizeObserver
   private lastDomWidth = -1
   private results = new SettledParagraphCache<MeasuredShrink[]>(
@@ -263,26 +275,42 @@ class JustifyShrinkView {
   )
   private onFontsLoaded = () => {
     this.invalidate()
-    this.measure()
+    this.measurement.request()
   }
   // style-level w:jc arrives with the doc stylesheet after setContent measured
   private onDocCss = () => {
     this.invalidate()
-    this.measure()
+    this.requestLayoutMeasurement()
+  }
+  private onWrapWidths = (event: Event) => {
+    this.measurement.cancel()
+    const { detail } = event as CustomEvent<WrapWidthChanges>
+    if (detail) {
+      this.results.invalidateBlocks(this.view, detail)
+      this.seenSigs.clear()
+      this.frozen = false
+    } else this.invalidate()
+    this.requestLayoutMeasurement()
   }
   private onPhasedSettled = () => {
-    this.invalidate()
-    this.measure()
+    if (!this.pendingSettlement) return
+    this.phasedDoc = this.view.state.doc
+    this.measurement.start()
   }
 
   constructor(
     private view: EditorView,
     private storage: JustifyShrinkStorage,
   ) {
-    this.measure()
+    this.measurement = new PhasedParagraphMeasurement(
+      view,
+      () => this.prepareMeasurement(),
+      () => this.results.discardMeasuredResults(),
+    )
+    this.measurement.request()
     document.fonts?.addEventListener('loadingdone', this.onFontsLoaded)
     document.addEventListener(DOC_CSS_COMMITTED_EVENT, this.onDocCss)
-    document.addEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onDocCss)
+    view.dom.addEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onWrapWidths)
     document.addEventListener(PHASED_CONTENT_SETTLED_EVENT, this.onPhasedSettled)
     if (typeof ResizeObserver !== 'undefined') {
       this.resizeObserver = new ResizeObserver(() => {
@@ -290,7 +318,7 @@ class JustifyShrinkView {
         if (w === this.lastDomWidth) return
         this.lastDomWidth = w
         this.invalidate()
-        this.measure()
+        this.measurement.request()
       })
       this.resizeObserver.observe(view.dom)
     }
@@ -298,6 +326,7 @@ class JustifyShrinkView {
 
   /** layout input changed (resize, fonts): every paragraph re-measures */
   private invalidate() {
+    this.measurement.cancel()
     this.results.clear()
     this.restartConvergence()
   }
@@ -310,22 +339,30 @@ class JustifyShrinkView {
     this.lastSig = ''
   }
 
+  private requestLayoutMeasurement() {
+    if (this.phasedDoc === this.view.state.doc) this.measurement.start()
+    else this.measurement.request()
+  }
+
   update(view: EditorView, prevState: EditorState) {
     if (view.state.doc !== prevState.doc) {
+      this.phasedDoc = undefined
       // untouched paragraphs keep their settled results (keyed on node identity)
       this.restartConvergence()
     } else if (
-      justifyShrinkPluginKey.getState(view.state) === justifyShrinkPluginKey.getState(prevState)
+      justifyShrinkPluginKey.getState(view.state) === justifyShrinkPluginKey.getState(prevState) &&
+      (!this.measurement.pending || !paragraphDecorationsChanged(view.state, prevState))
     ) {
       return
     }
-    this.measure()
+    this.measurement.request()
   }
 
   destroy() {
+    this.measurement.destroy()
     document.fonts?.removeEventListener('loadingdone', this.onFontsLoaded)
     document.removeEventListener(DOC_CSS_COMMITTED_EVENT, this.onDocCss)
-    document.removeEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onDocCss)
+    this.view.dom.removeEventListener(WRAP_WIDTHS_COMMITTED_EVENT, this.onWrapWidths)
     document.removeEventListener(PHASED_CONTENT_SETTLED_EVENT, this.onPhasedSettled)
     this.resizeObserver?.disconnect()
     if (this.retryRaf) cancelAnimationFrame(this.retryRaf)
@@ -334,59 +371,75 @@ class JustifyShrinkView {
   private scheduleRetry() {
     if (this.retryRaf || this.retries >= MEASURE_RETRY_MAX) return
     this.retries++
+    if (this.measurement.retryInFrames()) return
     this.retryRaf = requestAnimationFrame(() => {
       this.retryRaf = 0
-      this.measure()
+      this.measurement.request()
     })
   }
 
-  private measure() {
+  private prepareMeasurement() {
     if (this.retryRaf) {
       cancelAnimationFrame(this.retryRaf)
       this.retryRaf = 0
     }
     const { view } = this
-    // a streamed tail is still landing: measured once, when it has (settled event)
-    if (isPhasedContentPending()) return
+    // A streamed tail is still landing. Start the frame reads once it settles.
+    this.pendingSettlement = isPhasedContentPending()
+    if (this.pendingSettlement) return
     // PDF export parks the editor subtree (.app.pv-exporting); any layout
     // read here would force the parked document to re-lay out per print chunk
     if (view.dom.closest('.app.pv-exporting')) {
       this.retries = 0
-      this.scheduleRetry()
-      return
+      return () => () => this.scheduleRetry()
     }
     const old = justifyShrinkPluginKey.getState(view.state)
     if (!this.storage.enabled && !this.storage.expandBreakLines) {
       if (old && old !== DecorationSet.empty)
-        view.dispatch(
-          view.state.tr.setMeta(justifyShrinkPluginKey, []).setMeta('addToHistory', false),
-        )
+        return () => () =>
+          view.dispatch(
+            view.state.tr.setMeta(justifyShrinkPluginKey, []).setMeta('addToHistory', false),
+          )
       return
     }
-    if (!view.dom.isConnected) {
-      this.scheduleRetry()
-      return
-    }
+    if (!view.dom.isConnected) return () => () => this.scheduleRetry()
 
+    const scope = paragraphEditMeasurement(view)
+    if (this.measuredFrom !== scope?.from) {
+      this.restartConvergence()
+      this.measuredFrom = scope?.from
+    }
     const paras: Array<{ node: ProseMirrorNode; pos: number }> = []
-    view.state.doc.descendants((node, pos) => {
+    const addCandidate = (node: ProseMirrorNode, pos: number) => {
       if (!node.isTextblock) return true
       if (isShrinkCandidate(node)) paras.push({ node, pos })
       return false
-    })
+    }
+    if (scope) addCandidate(scope.node, scope.from)
+    else view.state.doc.descendants(addCandidate)
 
+    const read = this.results.startMeasurePass(
+      view,
+      paras,
+      (para, el, reuseNoOpWhile) => this.measureParagraph(para.node, para.pos, el, reuseNoOpWhile),
+      { trackProposal: this.measurement.pending, independentParagraph: scope?.node },
+    )
+    return (deadline: number) => {
+      const measured = read(deadline)
+      if (measured) return () => this.publishMeasurement(old, measured, scope)
+    }
+  }
+
+  private publishMeasurement(
+    old: DecorationSet | undefined,
+    measuredParas: Array<MeasuredShrink[] | null>,
+    scope?: ParagraphEditMeasurement,
+  ) {
+    this.results.acceptMeasuredResults()
+    const { view } = this
     const shrinks: MeasuredShrink[] = []
-    let measurable = paras.length === 0
-    this.results.beginPass(view)
-    const topLevel = SettledParagraphCache.topLevelDom(view)
-    for (const para of paras) {
-      const measured = this.results.measure(
-        view,
-        para.node,
-        para.pos,
-        (el) => this.measureParagraph(para.node, para.pos, el),
-        topLevel.get(para.node),
-      )
+    let measurable = measuredParas.length === 0
+    for (const measured of measuredParas) {
       if (!measured) continue
       measurable = true
       shrinks.push(...measured)
@@ -409,15 +462,32 @@ class JustifyShrinkView {
     this.lastSig = sig
 
     if (shrinks.length === 0 && (!old || old === DecorationSet.empty)) return
-    const decos = shrinks.map((s) =>
-      Decoration.inline(s.from, s.to, {
-        class: 'doc-jshrink',
-        style: `word-spacing:${-s.perChar}px`,
-      }),
-    )
-    view.dispatch(
-      view.state.tr.setMeta(justifyShrinkPluginKey, decos).setMeta('addToHistory', false),
-    )
+    const decos = shrinks.map((s) => {
+      const style = `word-spacing:${-s.perChar}px`
+      return Decoration.inline(s.from, s.to, { class: 'doc-jshrink', style }, { style })
+    })
+    if (scope) {
+      const previous = old ?? DecorationSet.empty
+      const rendered = previous.find(scope.from + 1, scope.to - 1)
+      if (
+        rendered.length === decos.length &&
+        rendered.every(
+          (d, i) =>
+            d.from === decos[i].from &&
+            d.to === decos[i].to &&
+            d.spec.style === decos[i].spec.style,
+        )
+      )
+        return
+      const next = previous.remove(rendered).add(view.state.doc, decos)
+      view.dispatch(
+        view.state.tr.setMeta(justifyShrinkPluginKey, next.find()).setMeta('addToHistory', false),
+      )
+    } else {
+      view.dispatch(
+        view.state.tr.setMeta(justifyShrinkPluginKey, decos).setMeta('addToHistory', false),
+      )
+    }
   }
 
   /** null = not measurable right now (hidden / not mounted) → retry */
@@ -425,13 +495,19 @@ class JustifyShrinkView {
     node: ProseMirrorNode,
     pos: number,
     el: HTMLElement,
+    reuseNoOpWhile: ReuseNoOpWhile,
   ): MeasuredShrink[] | null {
     const { view } = this
     if (el.offsetWidth === 0) return null
     const rect = el.getBoundingClientRect()
     if (rect.width === 0) return null
     const cs = window.getComputedStyle(el)
-    if (cs.direction === 'rtl' || cs.textAlign !== 'justify') return []
+    const excluded = (style: CSSStyleDeclaration) =>
+      style.direction === 'rtl' || style.textAlign !== 'justify'
+    if (excluded(cs)) {
+      reuseNoOpWhile(excluded)
+      return []
+    }
     // content-box width (layout px): capacity reference for the ragged last
     // line and for break-ended lines, whose rendered extent is their own
     // natural width. Read off the used style, not the integer clientWidth:

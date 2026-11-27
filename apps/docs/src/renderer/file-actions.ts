@@ -14,6 +14,7 @@ import type { Editor } from '@tiptap/core'
 import { commentEndpoints } from './editor/comment-endpoints'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { history } from '@tiptap/pm/history'
+import { Selection, type Transaction } from '@tiptap/pm/state'
 import { modelTextOf, type RedactableNode } from './ai/redact-view'
 import { hasActiveDocumentDraft } from './runtime/draft-landing'
 import {
@@ -67,10 +68,15 @@ import {
 import { hfSaveOptions, type HfSectionState } from './hf-sections'
 import { fetchDocBytes } from './doc-bytes'
 import { parseDocxOffThread } from './parse-off-thread'
-import { PHASED_APPEND } from './editor/streaming-tail-guard'
+import {
+  PHASED_APPEND,
+  appendedStreamedTail,
+  streamedAppendApplied,
+  streamedAppendKey,
+} from './editor/streaming-tail-guard'
 import { docTextLength, docWeight, openTierFor } from './large-document'
 import { documentToMarkdown } from './export-markdown'
-import { docStyleCss } from './doc-style-css'
+import { activeDocStyleCss } from './doc-style-css'
 import { documentTextContext } from './text-layout/document-context'
 import { setNoteNumFmts } from './note-format'
 import type { CompareEntry } from './editor/compare'
@@ -85,9 +91,10 @@ import {
 import { TABLE_TRAILING_SKIP, setLazyMediaHashes } from './editor/extensions'
 import { setStaticAsciiResolver } from './editor/protected-render'
 import { FORMAT_MARKS, serializeMarks } from './editor/caret-marks'
-import { TRACK_IGNORE } from './editor/revisions'
+import { REPLACED_DOCUMENT, TRACK_IGNORE } from './editor/revisions'
 import {
   cancelPhasedContent,
+  hasFailedPhasedContent,
   isPhasedContentPending,
   setContentPhased,
   waitForFullContent,
@@ -501,56 +508,76 @@ function applyDocLayoutSettings(editor: Editor, parsed: ParsedDocFull): void {
 export type LoadFileOutcome = 'ok' | 'canceled' | 'password' | 'failed' | 'superseded'
 
 /** appends a streamed tail chunk at the document end, outside undo history and the AI freshness baseline */
-export function appendStreamedNodes(editor: Editor, nodes: PmNode[]): void {
+export function appendStreamedNodes(editor: Editor, nodes: PmNode[], attempt?: object): void {
   const before = editor.state.doc
-  const tr = editor.state.tr.insert(
-    before.content.size,
-    nodes.map((n) => editor.schema.nodeFromJSON(n)),
-  )
+  const parsed = nodes.map((node) => editor.schema.nodeFromJSON(node))
+  const tr = editor.state.tr.insert(before.content.size, parsed)
   tr.setMeta('addToHistory', false)
   tr.setMeta(PHASED_APPEND, true)
+  if (attempt) {
+    const added = appendedStreamedTail(tr)?.content
+    if (
+      !added ||
+      added.childCount !== parsed.length ||
+      parsed.some((node, i) => !node.eq(added.child(i)))
+    )
+      throw new Error('The editor could not append the streamed source blocks')
+    tr.setMeta(streamedAppendKey, attempt)
+  }
   // forced Track Changes must not record the streamed tail as insertions
   tr.setMeta(TRACK_IGNORE, true)
   tr.setMeta(TABLE_TRAILING_SKIP, true)
   editor.view.dispatch(tr)
-  carryDocSeen(editor, before)
+  // A synchronous observer can edit after the append's model is installed.
+  if (editor.state.doc === tr.doc) carryDocSeen(editor, before)
+}
+
+function setOpenedEditorContent(editor: Editor, doc: PmNode): void {
+  const attempt = {}
+  const mounted = editor
+    .chain()
+    .setMeta('addToHistory', false)
+    .setMeta(TRACK_IGNORE, true)
+    .setMeta(REPLACED_DOCUMENT, true)
+    .setMeta(TABLE_TRAILING_SKIP, true)
+    .setMeta(PHASED_APPEND, true)
+    .setMeta(streamedAppendKey, attempt)
+    .setContent(doc)
+    .command(selectOpenedDocumentStart)
+    .run()
+  if (!mounted || !streamedAppendApplied(editor.state, attempt))
+    throw new Error('The editor refused the document mount')
 }
 
 /** binds the phased content streamer to the editor and App state behind ctx */
 function phasedHostFor(ctx: FileActionContext): PhasedContentHost {
+  const editor = ctx.editor!
   return {
-    // the remount after a refused chunk replaces the whole document: it must
-    // pass the streaming tail guard like the appends do, and like them it is
-    // not an edit to undo
-    setContent: (doc) =>
-      ctx.editor
-        ?.chain()
-        .setMeta('addToHistory', false)
-        .setMeta(TRACK_IGNORE, true)
-        .setMeta(TABLE_TRAILING_SKIP, true)
-        .setMeta(PHASED_APPEND, true)
-        .setContent(doc as never)
-        .run(),
-    appendNodes: (nodes) => {
-      if (ctx.editor) appendStreamedNodes(ctx.editor, nodes)
-    },
-    isDestroyed: () => !ctx.editor || ctx.editor.isDestroyed,
-    resetHistory: () => {
-      if (ctx.editor) resetEditorHistory(ctx.editor)
-    },
+    owner: editor,
+    setContent: (doc) => setOpenedEditorContent(editor, doc),
+    appendNodes: (nodes, attempt) => appendStreamedNodes(editor, nodes, attempt),
+    appliedAppend: (attempt) => streamedAppendApplied(editor.state, attempt),
+    isDestroyed: () => editor.isDestroyed,
+    resetHistory: () => resetEditorHistory(editor),
     setLoading: ctx.setDocLoading,
     getDirty: () => ctx.dirtyRef.current,
-    setDirty: (dirty) => {
-      ctx.dirtyRef.current = dirty
+    onFailure: (error) => {
+      const message = t('appOpenFailed', { error: String(error) })
+      ctx.setStatus(message)
+      showToast(message, 'error')
     },
   }
 }
 
-/** Word parity: a freshly opened or created document starts with the caret at
- *  its beginning — typing must work without a click into the page.
- *  Skipped when something else in this webContents already holds keyboard
- *  focus (e.g. the user clicked into the AI composer while the file parsed). */
-function focusDocumentStart(editor: Editor): void {
+function selectOpenedDocumentStart({ tr }: { tr: Transaction }): boolean {
+  // A wholesale replacement maps the old caret to the new tail. Place it
+  // inside the opened document before the view mounts or appends any content.
+  tr.setSelection(Selection.atStart(tr.doc))
+  return true
+}
+
+/** Make the opened document ready for typing if no other control owns focus. */
+function focusOpenedEditor(editor: Editor): void {
   const startedAt = performance.now()
   const attempt = (): void => {
     if (editor.isDestroyed) return
@@ -560,7 +587,7 @@ function focusDocumentStart(editor: Editor): void {
     // behind the opening screen the editor is display:none and DOM focus
     // silently drops — wait for it to be laid out, then focus once
     if (dom.isConnected && dom.offsetParent !== null) {
-      editor.commands.focus('start', { scrollIntoView: false })
+      editor.view.focus()
       if (document.activeElement !== document.body) return
     }
     if (performance.now() - startedAt < 10_000) requestAnimationFrame(attempt)
@@ -637,7 +664,7 @@ export async function loadFile(
       )
       commentEndpoints(ctx.editor!.view, parsed.blocks)
       resetEditorHistory(ctx.editor!)
-      if (tier !== 'readOnly') focusDocumentStart(ctx.editor!)
+      if (tier !== 'readOnly') focusOpenedEditor(ctx.editor!)
       noteDocumentSwapped()
       ctx.setDoc({
         parsed,
@@ -653,7 +680,7 @@ export async function loadFile(
       // opens files without replacing the current document.
       discardStalePasswordIntents()
       ctx.setAiPanelKey((k) => k + 1)
-      ctx.setDocCss(docStyleCss(parsed))
+      ctx.setDocCss(activeDocStyleCss(parsed))
       ctx.setSection(readSectionSettings(parsed))
       ctx.setSections(readSections(parsed))
       ctx.setSectionDirty(false)
@@ -799,8 +826,6 @@ export async function newFile(ctx: FileActionContext): Promise<boolean | undefin
     await prefetchFaces(collectDocFonts(parsed))
     await loadBundledStandIns(collectDocFonts(parsed))
     if (!currentNew()) return
-    // a tail still streaming for the previous document must never land in this one
-    cancelPhasedContent()
     ctx.beforeDocumentReplace?.()
     if (!currentNew()) return
     commitDocumentState(ctx, () => {
@@ -808,12 +833,15 @@ export async function newFile(ctx: FileActionContext): Promise<boolean | undefin
       ctx.editor!.storage.listNumbering.docDefaults = parsed.docDefaults
       ctx.editor!.storage.listNumbering.defs = parsed.numbering
       applyDocLayoutSettings(ctx.editor!, parsed)
-      ctx.editor!.commands.setContent(
-        blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)) as never,
+      cancelPhasedContent(() =>
+        setOpenedEditorContent(
+          ctx.editor!,
+          blocksToPmDoc(parsed.blocks, readSections(parsed), pmDocOptions(parsed)),
+        ),
       )
       commentEndpoints(ctx.editor!.view, parsed.blocks)
       resetEditorHistory(ctx.editor!)
-      focusDocumentStart(ctx.editor!)
+      focusOpenedEditor(ctx.editor!)
       noteDocumentSwapped()
       ctx.setDoc({
         parsed,
@@ -831,7 +859,7 @@ export async function newFile(ctx: FileActionContext): Promise<boolean | undefin
       // the previous draft (its DocState, including the encrypted flag, is gone)
       discardStalePasswordIntents()
       ctx.setAiPanelKey((k) => k + 1)
-      ctx.setDocCss(docStyleCss(parsed))
+      ctx.setDocCss(activeDocStyleCss(parsed))
       ctx.setSection(readSectionSettings(parsed))
       ctx.setSections(readSections(parsed))
       ctx.setSectionDirty(false)
@@ -1000,7 +1028,7 @@ export async function buildDocBytes(
   if (ctx.settleFontSettings) ctx = await ctx.settleFontSettings()
   if (docGeneration !== generation) return null
   const { doc, editor } = ctx
-  if (!doc || !editor) return null
+  if (!doc || !editor || hasFailedPhasedContent()) return null
   const pmJson = pmOverride ?? (editor.getJSON() as PmNode)
   const plan = pmDocToSavePlan(pmJson, doc.parsed.blocks)
   // chart data edits patch the chart's own zip part, not the body XML
@@ -1138,7 +1166,7 @@ export async function writeRecoveryCopy(ctx: FileActionContext): Promise<void> {
   // an edit during a phased open marks the document dirty while the tail is
   // still streaming: a snapshot now would persist a truncated document. The
   // next tick covers it.
-  if (isPhasedContentPending()) return
+  if (isPhasedContentPending() || hasFailedPhasedContent()) return
   if (!doc.filePath) {
     if (isBlankDocument(editor)) return
     if (editor.view.composing) return
@@ -1392,7 +1420,7 @@ async function saveOnce(
     // a mid-stream save would serialize (and write) a truncated document
     const generation = docGeneration
     const documentHost = getDocsDocumentHost()
-    await waitForFullContent()
+    if (!(await waitForFullContent())) return false
     // the wait ended because another document replaced this one: nothing to write
     if (docGeneration !== generation) return false
     // flush pending in-place table cell / textbox edits into the PM doc first
@@ -1638,7 +1666,7 @@ async function saveOnce(
         chain.run()
         restoreMarksAfterDocRewrite(editor, caretMarks)
       }
-      ctx.setDocCss(docStyleCss(reparsed))
+      ctx.setDocCss(activeDocStyleCss(reparsed))
       ctx.setDoc((prev) =>
         prev
           ? {
@@ -1753,7 +1781,9 @@ export function printDoc(ctx: FileActionContext): void {
   if (!ctx.doc || !canOutputDocument(ctx)) return
   // the print sheet prints the live preview pages: needs the whole document mounted
   if (isPhasedContentPending()) {
-    void waitForFullContent().then(() => printDoc(ctx))
+    void waitForFullContent().then((complete) => {
+      if (complete) printDoc(ctx)
+    })
     return
   }
   if (!document.querySelector('.pagination-preview')) {
@@ -1851,6 +1881,7 @@ function deferExportToPreview(ctx: FileActionContext, outPath?: string): Promise
 let printJobActive = false
 
 export function canOutputDocument(ctx: FileActionContext): boolean {
+  if (hasFailedPhasedContent()) return false
   if (!ctx.editor || !hasActiveDocumentDraft(ctx.editor)) return true
   ctx.setStatus(t('appDocumentDraftPending'))
   return false
@@ -1860,7 +1891,7 @@ export function canOutputDocument(ctx: FileActionContext): boolean {
 export async function exportPdf(ctx: FileActionContext, outPath?: string): Promise<boolean> {
   const { doc } = ctx
   if (!doc || !canOutputDocument(ctx)) return false
-  await waitForFullContent()
+  if (!(await waitForFullContent())) return false
   if (!canOutputDocument(ctx)) return false
   if (printJobActive || ctx.pendingMixedExportRef.current) {
     ctx.setStatus(t('appExportingPdf'))
@@ -2033,7 +2064,7 @@ export async function exportImages(ctx: FileActionContext): Promise<boolean> {
 export async function exportHtml(ctx: FileActionContext, outPath?: string): Promise<boolean> {
   const { doc, editor } = ctx
   if (!doc || !editor || !canOutputDocument(ctx)) return false
-  await waitForFullContent()
+  if (!(await waitForFullContent())) return false
   if (!canOutputDocument(ctx)) return false
   ctx.setStatus(t('appExportingHtml'))
   const root = editor.view.dom as HTMLElement
@@ -2060,7 +2091,7 @@ export async function exportHtml(ctx: FileActionContext, outPath?: string): Prom
 export async function exportMarkdown(ctx: FileActionContext, outPath?: string): Promise<boolean> {
   const { doc, editor } = ctx
   if (!doc || !editor || !canOutputDocument(ctx)) return false
-  await waitForFullContent()
+  if (!(await waitForFullContent())) return false
   if (!canOutputDocument(ctx)) return false
   ctx.setStatus(t('appExportingMarkdown'))
   const { markdown, images } = documentToMarkdown(editor)

@@ -4,6 +4,7 @@
 // properties. Stage 1 runs it in shadow next to the DOM scrape in
 // measureBlocks (invariant I9: plan == scrape for every block).
 import type { Node as PmNode } from '@tiptap/pm/model'
+import type { EditorView } from '@tiptap/pm/view'
 import type { EffectivePPr, ParsedDoc, SectionInfo, TableModel } from '@genoffice/docx-engine'
 import type { BlockBox, BlockMetaOf, RowPlan } from './pagination-types'
 import { outerTableRows } from './pagination-lines'
@@ -16,6 +17,7 @@ import {
   type PageRelVTarget,
 } from './editor/anchor-geometry'
 import type { FloatShiftState } from './editor/pagination-gaps'
+import { topLevelBlockDom } from './editor/settled-measure'
 
 export type { RowPlan } from './pagination-types'
 
@@ -352,7 +354,7 @@ function paraSpaceBeforePt(
   node: PmNode,
   eff: EffectivePPr | undefined,
   prev: PmNode | undefined,
-  index: number,
+  first: boolean,
   props: PlanProps,
 ): number | undefined {
   const a = node.attrs
@@ -363,7 +365,7 @@ function paraSpaceBeforePt(
   else if (eff) pt = eff.spacing.before / 20
   if (pt === undefined) return undefined
   if (auto) {
-    if (index === 0) pt = 0
+    if (first) pt = 0
     else if (prev) {
       const g = listGroup(node, props)
       if (g !== undefined && listGroup(prev, props) === g) pt = 0
@@ -401,158 +403,200 @@ function isBodyLook(node: PmNode): boolean {
   return node.type.name !== 'docHeading' || !!node.attrs.outlineOnly
 }
 
-/** Plans for the document's top-level blocks, keyed by node identity (and position). */
+/** Model facts depend on the block, its preceding flow neighbour, whether
+ * it opens the document, and any applied float shift. Position is a binding. */
+function planBlock(
+  node: PmNode,
+  pos: number,
+  prev: PmNode | undefined,
+  first: boolean,
+  props: PlanProps,
+  shift: FloatShiftState | undefined,
+): BlockPlan {
+  const docxIndex =
+    typeof node.attrs.docxIndex === 'number' ? (node.attrs.docxIndex as number) : undefined
+  const base = {
+    pos,
+    node,
+    ...(docxIndex !== undefined ? { docxIndex } : {}),
+    colBreakBefore: false,
+    colBreakAfter: false,
+    hasCellBreak: false,
+    innerBreakIdx: [] as number[],
+    leadingBreakCut: false,
+    breakOnly: false,
+    hasText: false,
+    leadingBreaks: 0,
+    trailingBreaks: 0,
+    breakCount: 0,
+    hardBreaks: 0,
+  }
+  let plan: BlockPlan
+  if (node.type.name === 'docTable') {
+    const tableGeom = tableGeomOf(node, shift)
+    plan = {
+      ...base,
+      kind: 'table',
+      pageBreakBeforeDirect: false,
+      pageBreakBefore: false,
+      hasCellBreak: hasForcedBreakIn(node),
+      rowPlan: rowPlanOf(node, docxIndex, props),
+      dropAtPageTop: !(
+        first ||
+        (docxIndex !== undefined && props.forcedSectionStarts?.has(docxIndex))
+      ),
+      ...(tableGeom ? { tableGeom } : {}),
+      ...(shift ? { floatShift: shift } : {}),
+    }
+  } else if (isParaNode(node)) {
+    const eff = docxIndex === undefined ? undefined : props.paraEffective(docxIndex)
+    const { breaks, text, picture, hardBreaks } = paraBreaks(node, props.showDeleted)
+    const pageBrs = breaks.filter((b) => b.kind === 'page')
+    const colBrs = breaks.filter((b) => b.kind === 'col')
+    const c = classifyBreaks(pageBrs, false)
+    const direct = !!node.attrs.pageBreakBefore
+    // a column break with nothing before it moves the whole paragraph
+    const leadingCol = colBrs.length === 1 && !colBrs[0].before
+    const pageBreakBefore = direct || inheritedFlag(eff, 'pageBreakBefore')
+    const leadingBr = c.hasText && c.leading > 0 && !c.leadingCut
+    const spaceBeforePt = paraSpaceBeforePt(node, eff, prev, first, props)
+    const forcedLeadSpacePt =
+      pageBreakBefore && props.pageBreakBeforeKeepsSpace && !first && spaceBeforePt
+        ? Math.max(0, Math.round((spaceBeforePt - prevSpaceAfterPt(prev, props)) * 10) / 10)
+        : undefined
+    plan = {
+      ...base,
+      kind: 'para',
+      pageBreakBeforeDirect: direct,
+      pageBreakBefore,
+      breakCount: c.count,
+      hardBreaks,
+      hasText: c.hasText,
+      leadingBreaks: c.leading,
+      trailingBreaks: c.trailing,
+      innerBreakIdx: c.inner,
+      leadingBreakCut: c.leadingCut,
+      breakOnly: c.count > 0 && !text && !picture,
+      colBreakBefore: leadingCol,
+      colBreakAfter: colBrs.length > 0 && !leadingCol,
+      spaceBeforePt,
+      dropAtPageTop: !(
+        first ||
+        pageBreakBefore ||
+        leadingBr ||
+        (docxIndex !== undefined && props.forcedSectionStarts?.has(docxIndex))
+      ),
+      ...(forcedLeadSpacePt !== undefined ? { forcedLeadSpacePt } : {}),
+    }
+  } else {
+    const field = node.attrs.fieldDisplay as { kind?: string } | null
+    const c = classifyBreaks([], field?.kind === 'pageBreak')
+    const direct = !!node.attrs.pageBreakBefore
+    // auto space before collapses on the document's first block like a paragraph's
+    const sb = node.attrs.imageParagraphSpaceBeforeAuto
+      ? first
+        ? 0
+        : props.autoSpacingPt
+      : node.attrs.imageParagraphSpaceBefore != null
+        ? Number(node.attrs.imageParagraphSpaceBefore) / 20
+        : undefined
+    const anchorGeom = anchorGeomOf(node)
+    // only an in-line picture's host carries the paragraph margin itself (doc-img-para)
+    const boxes = node.attrs.textboxes as unknown[] | null
+    const inlinePicture =
+      !(Array.isArray(boxes) && boxes.length > 0) &&
+      node.attrs.blockType === 'image' &&
+      !!node.attrs.imageDataUrl &&
+      !node.attrs.imageWrap
+    plan = {
+      ...base,
+      kind: 'protected',
+      pageBreakBeforeDirect: direct,
+      pageBreakBefore: direct,
+      breakCount: c.count,
+      leadingBreaks: c.leading,
+      trailingBreaks: c.trailing,
+      ...(sb !== undefined ? { spaceBeforePt: Math.round(sb * 10) / 10 } : {}),
+      ...(sb !== undefined && !inlinePicture ? { spaceBeforeInner: true as const } : {}),
+      ...(anchorGeom ? { anchorGeom } : {}),
+      ...(shift ? { floatShift: shift } : {}),
+      dropAtPageTop: !(
+        first ||
+        direct ||
+        (docxIndex !== undefined && props.forcedSectionStarts?.has(docxIndex))
+      ),
+    }
+  }
+  return plan
+}
+
+type PlanBlock = (node: PmNode, pos: number, prev: PmNode | undefined, first: boolean) => BlockPlan
+
+function visitBlockPlans(doc: PmNode, read: PlanBlock, visit: (plan: BlockPlan) => void): void {
+  let prev: PmNode | undefined
+  doc.forEach((node, pos) => {
+    if (isSkippedProtected(node)) return
+    visit(read(node, pos, prev, prev === undefined))
+    // A body-level bookmark marker does not separate the spacing neighbours.
+    if (!node.attrs.invisibleMarker) prev = node
+  })
+}
+
+/** Full model plan (also the reference for incremental planning). */
 export function buildBlockPlan(
   doc: PmNode,
   props: PlanProps,
-  /** the engine's applied float shifts of the current editor state (floatShiftsOf) */
   shiftOf?: (pos: number) => FloatShiftState | undefined,
 ): Map<PmNode, BlockPlan> {
   const plans = new Map<PmNode, BlockPlan>()
-  let prev: PmNode | undefined
-  let index = 0
-  doc.forEach((node, pos) => {
-    if (isSkippedProtected(node)) return
-    const docxIndex =
-      typeof node.attrs.docxIndex === 'number' ? (node.attrs.docxIndex as number) : undefined
-    const base = {
-      pos,
-      node,
-      ...(docxIndex !== undefined ? { docxIndex } : {}),
-      colBreakBefore: false,
-      colBreakAfter: false,
-      hasCellBreak: false,
-      innerBreakIdx: [] as number[],
-      leadingBreakCut: false,
-      breakOnly: false,
-      hasText: false,
-      leadingBreaks: 0,
-      trailingBreaks: 0,
-      breakCount: 0,
-      hardBreaks: 0,
-    }
-    let plan: BlockPlan
-    const shift = shiftOf?.(pos)
-    if (node.type.name === 'docTable') {
-      const tableGeom = tableGeomOf(node, shift)
-      plan = {
-        ...base,
-        kind: 'table',
-        pageBreakBeforeDirect: false,
-        pageBreakBefore: false,
-        hasCellBreak: hasForcedBreakIn(node),
-        rowPlan: rowPlanOf(node, docxIndex, props),
-        dropAtPageTop: !(
-          index === 0 ||
-          (docxIndex !== undefined && props.forcedSectionStarts?.has(docxIndex))
-        ),
-        ...(tableGeom ? { tableGeom } : {}),
-        ...(shift ? { floatShift: shift } : {}),
-      }
-    } else if (isParaNode(node)) {
-      const eff = docxIndex === undefined ? undefined : props.paraEffective(docxIndex)
-      const { breaks, text, picture, hardBreaks } = paraBreaks(node, props.showDeleted)
-      const pageBrs = breaks.filter((b) => b.kind === 'page')
-      const colBrs = breaks.filter((b) => b.kind === 'col')
-      const c = classifyBreaks(pageBrs, false)
-      const direct = !!node.attrs.pageBreakBefore
-      // a column break with nothing before it moves the whole paragraph
-      const leadingCol = colBrs.length === 1 && !colBrs[0].before
-      const pageBreakBefore = direct || inheritedFlag(eff, 'pageBreakBefore')
-      const leadingBr = c.hasText && c.leading > 0 && !c.leadingCut
-      const spaceBeforePt = paraSpaceBeforePt(node, eff, prev, index, props)
-      const forcedLeadSpacePt =
-        pageBreakBefore && props.pageBreakBeforeKeepsSpace && index > 0 && spaceBeforePt
-          ? Math.max(0, Math.round((spaceBeforePt - prevSpaceAfterPt(prev, props)) * 10) / 10)
-          : undefined
-      plan = {
-        ...base,
-        kind: 'para',
-        pageBreakBeforeDirect: direct,
-        pageBreakBefore,
-        breakCount: c.count,
-        hardBreaks,
-        hasText: c.hasText,
-        leadingBreaks: c.leading,
-        trailingBreaks: c.trailing,
-        innerBreakIdx: c.inner,
-        leadingBreakCut: c.leadingCut,
-        breakOnly: c.count > 0 && !text && !picture,
-        colBreakBefore: leadingCol,
-        colBreakAfter: colBrs.length > 0 && !leadingCol,
-        spaceBeforePt,
-        dropAtPageTop: !(
-          index === 0 ||
-          pageBreakBefore ||
-          leadingBr ||
-          (docxIndex !== undefined && props.forcedSectionStarts?.has(docxIndex))
-        ),
-        ...(forcedLeadSpacePt !== undefined ? { forcedLeadSpacePt } : {}),
-      }
-    } else {
-      const field = node.attrs.fieldDisplay as { kind?: string } | null
-      const c = classifyBreaks([], field?.kind === 'pageBreak')
-      const direct = !!node.attrs.pageBreakBefore
-      // auto space before collapses on the document's first block like a paragraph's
-      const sb = node.attrs.imageParagraphSpaceBeforeAuto
-        ? index === 0
-          ? 0
-          : props.autoSpacingPt
-        : node.attrs.imageParagraphSpaceBefore != null
-          ? Number(node.attrs.imageParagraphSpaceBefore) / 20
-          : undefined
-      const anchorGeom = anchorGeomOf(node)
-      // only an in-line picture's host carries the paragraph margin itself (doc-img-para)
-      const boxes = node.attrs.textboxes as unknown[] | null
-      const inlinePicture =
-        !(Array.isArray(boxes) && boxes.length > 0) &&
-        node.attrs.blockType === 'image' &&
-        !!node.attrs.imageDataUrl &&
-        !node.attrs.imageWrap
-      plan = {
-        ...base,
-        kind: 'protected',
-        pageBreakBeforeDirect: direct,
-        pageBreakBefore: direct,
-        breakCount: c.count,
-        leadingBreaks: c.leading,
-        trailingBreaks: c.trailing,
-        ...(sb !== undefined ? { spaceBeforePt: Math.round(sb * 10) / 10 } : {}),
-        ...(sb !== undefined && !inlinePicture ? { spaceBeforeInner: true as const } : {}),
-        ...(anchorGeom ? { anchorGeom } : {}),
-        ...(shift ? { floatShift: shift } : {}),
-        dropAtPageTop: !(
-          index === 0 ||
-          direct ||
-          (docxIndex !== undefined && props.forcedSectionStarts?.has(docxIndex))
-        ),
-      }
-    }
-    plans.set(node, plan)
-    // a body-level bookmark marker is no paragraph: the spacing neighbours are
-    // the blocks around it
-    if (node.attrs.invisibleMarker) return
-    prev = node
-    index++
-  })
+  visitBlockPlans(
+    doc,
+    (node, pos, prev, first) => planBlock(node, pos, prev, first, props, shiftOf?.(pos)),
+    (plan) => plans.set(plan.node, plan),
+  )
   return plans
 }
 
 export type PlanOf = (el: HTMLElement) => BlockPlan | undefined
 
-/** the plan keyed by each block's rendered element (view.nodeDOM), for measureBlocks */
-export function planByElement(
-  doc: PmNode,
-  view: { nodeDOM(pos: number): Node | null },
-  props: PlanProps,
-  shiftOf?: (pos: number) => FloatShiftState | undefined,
-): PlanOf {
-  const byEl = new Map<HTMLElement, BlockPlan>()
-  for (const p of buildBlockPlan(doc, props, shiftOf).values()) {
-    const dom = view.nodeDOM(p.pos)
-    if (dom instanceof HTMLElement) byEl.set(dom, p)
+/** Document-scoped model facts independent of reflows and absolute positions.
+ * New document properties create a new reader. Unchanged ProseMirror nodes
+ * retain their identity, including blocks moved by an insertion. */
+export function createBlockPlanReader(props: PlanProps) {
+  const cache = new WeakMap<
+    PmNode,
+    {
+      prev: PmNode | undefined
+      first: boolean
+      shift: FloatShiftState | undefined
+      plan: BlockPlan
+    }
+  >()
+  return (
+    doc: PmNode,
+    view: Pick<EditorView, 'dom' | 'nodeDOM'>,
+    shiftOf?: (pos: number) => FloatShiftState | undefined,
+  ): PlanOf => {
+    const byEl = new Map<HTMLElement, BlockPlan>()
+    const topLevel = topLevelBlockDom(view)
+    visitBlockPlans(
+      doc,
+      (node, pos, prev, first) => {
+        const shift = shiftOf?.(pos)
+        const entry = cache.get(node)
+        if (entry && entry.prev === prev && entry.first === first && entry.shift === shift)
+          return entry.plan.pos === pos ? entry.plan : { ...entry.plan, pos }
+        const plan = planBlock(node, pos, prev, first, props, shift)
+        cache.set(node, { prev, first, shift, plan })
+        return plan
+      },
+      (plan) => {
+        const dom = topLevel.get(plan.node) ?? view.nodeDOM(plan.pos)
+        if (dom instanceof HTMLElement) byEl.set(dom, plan)
+      },
+    )
+    return (el) => byEl.get(el)
   }
-  return (el) => byEl.get(el)
 }
 
 /** derived BlockBox flags of a plan (the engine's vocabulary) */

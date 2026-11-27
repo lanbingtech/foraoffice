@@ -82,6 +82,7 @@ describe('field paragraph display model', () => {
       right: '2',
       level: 1,
       anchor: '_Toc1',
+      pageRefBookmark: '_Toc1',
       leader: 'dot',
       rightTabTwips: 9350,
     })
@@ -99,6 +100,54 @@ describe('field paragraph display model', () => {
         right: '12',
       })
     }
+  })
+
+  it('uses the page field instruction when its result contains a tab', async () => {
+    const body = TOC_ENTRY_PARAGRAPH.replace('PAGEREF _Toc1', 'PAGEREF _Exact').replace(
+      '<w:r><w:t>2</w:t></w:r>',
+      '<w:r><w:tab/></w:r><w:r><w:t>2</w:t></w:r>',
+    )
+    const doc = await parseDocx(await buildDocx({ bodyXml: body }))
+    expect(doc.blocks[0].fieldDisplay).toMatchObject({
+      kind: 'tocLine',
+      right: '2',
+      anchor: '_Toc1',
+      pageRefBookmark: '_Exact',
+    })
+  })
+
+  it('uses the PAGEREF whose result supplies the page number when the title also has a PAGEREF', async () => {
+    const titlePageField =
+      '<w:fldSimple w:instr="PAGEREF _Title"><w:r><w:t>Preface</w:t></w:r></w:fldSimple>'
+    const body = TOC_ENTRY_PARAGRAPH.replace(/<w:r><w:t>[^<]+<\/w:t><\/w:r>/, titlePageField)
+    const doc = await parseDocx(await buildDocx({ bodyXml: body }))
+    expect(doc.blocks[0].fieldDisplay).toMatchObject({
+      kind: 'tocLine',
+      left: 'Preface',
+      right: '2',
+      pageRefBookmark: '_Toc1',
+    })
+  })
+
+  it.each([
+    [
+      'complex',
+      '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+        '<w:r><w:instrText> REF _Suffix </w:instrText></w:r>' +
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>B</w:t></w:r>' +
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+    ],
+    ['simple', '<w:fldSimple w:instr="REF _Suffix"><w:r><w:t>B</w:t></w:r></w:fldSimple>'],
+  ])('keeps the cache when the PAGEREF instruction contains a %s field', async (_kind, nested) => {
+    const body = TOC_ENTRY_PARAGRAPH.replace(
+      /(<w:instrText[^>]*> PAGEREF [^<]*<\/w:instrText><\/w:r>)/,
+      (_, instructionRun) => instructionRun + nested,
+    ).replace('<w:r><w:t>2</w:t></w:r>', '<w:r><w:tab/></w:r><w:r><w:t>2</w:t></w:r>')
+    const doc = await parseDocx(await buildDocx({ bodyXml: body }))
+    expect(doc.blocks[0].fieldDisplay).toMatchObject({
+      right: '2',
+      pageRefBookmark: null,
+    })
   })
 
   it('a TOC entry carries the leader of its page-number tab (direct stop, else the style)', async () => {

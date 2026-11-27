@@ -1,0 +1,1519 @@
+import { readLayoutProbe, type Activity } from './docs-performance-layout-probe'
+import { test, expect, type Page } from '@playwright/test'
+import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
+import { readFile, writeFile, mkdir, mkdtemp, realpath, readdir } from 'node:fs/promises'
+import { cpus, platform, release, totalmem } from 'node:os'
+import { join, resolve } from 'node:path'
+import JSZip from 'jszip'
+import { PDFDocument } from 'pdf-lib'
+import {
+  buildPerformanceFixture,
+  documentOracle,
+  type DocumentOracle,
+} from './docs-performance-fixture'
+import { collectPlatformFonts } from './docs-performance-fonts'
+import { captureFailureEvidence } from './docs-performance-evidence'
+import {
+  mainStoryOracle,
+  expectedTextboxStories,
+  verifyTextboxStories,
+} from './docs-performance-stories'
+import type { createDocumentStoryDiagnostic } from '../apps/docs/src/renderer/document-story-diagnostic'
+import { createPerformanceFocusGuard } from './docs-performance-focus'
+import {
+  calibrateNativeViewport,
+  observeViewport,
+  type RecordedViewportObservation,
+} from './docs-performance-viewport-observe'
+import { summarizeViewportEvidence, viewportActions } from './docs-performance-viewport'
+import { buildDocx } from '../packages/docx-engine/tests/helpers/build-docx'
+import { readEditFingerprint } from './docs-performance-edit-fingerprint'
+import { observeFirstVisibleSource } from './docs-performance-first-visible'
+import { runWindowsNativeIme, type NativeImeRequest } from './windows-native-ime'
+import { capturePrintSourceSnapshot } from './docs-performance-print-snapshot'
+import { projectPrintedTocLeaders } from './docs-performance-toc'
+import {
+  projectPrintedTextboxes,
+  sourcePrintChains,
+  sourceHeaderFooterChains,
+} from './docs-performance-pdf-source'
+import { readPositionedPdf, verifyPositionedPdf, pdfExportBudget } from './docs-performance-pdf'
+import {
+  documentZoom,
+  expectedInsertion,
+  verifySavedContent,
+  verifyKeyboardTextEdit,
+  verifyNativeCompositionEvents,
+  type NativeCompositionEvent,
+} from './docs-performance-oracle'
+import {
+  launchPerformanceHost,
+  type PerformanceHost,
+  type PerformanceSession,
+} from './docs-performance-host'
+import {
+  assertExternalArtifacts,
+  compareDiagnosticPerformanceReports,
+  summarizeScenario,
+  withDeadline,
+  retainRunCondition,
+  type PerformanceObservation,
+  type PerformancePdfGeometry,
+} from './docs-performance-result'
+
+type ProbeWindow = Window & {
+  __docsLayoutActivity?: { snapshot(): Activity }
+  __pageDebug?: {
+    slices?: unknown[]
+    sourceStories?: ReturnType<typeof createDocumentStoryDiagnostic>['snapshot']
+  }
+  performanceReady?: boolean
+  docsEditor?: unknown
+  performanceProbe?: {
+    started: number
+    activity: boolean
+    input: NativeCompositionEvent[]
+    longTasks: Array<{ start: number; duration: number }>
+    frames: Array<{ at: number; gap: number }>
+  }
+}
+
+const sha = (data: Uint8Array | string) => createHash('sha256').update(data).digest('hex')
+const now = () => Number(process.hrtime.bigint()) / 1_000_000
+const repository = resolve(__dirname, '..')
+
+async function installProbe(page: Page) {
+  await page.evaluate(() => {
+    const win = window as ProbeWindow
+    if (win.performanceProbe) return
+    win.performanceProbe = {
+      started: performance.now(),
+      activity: false,
+      input: [],
+      longTasks: [],
+      frames: [],
+    }
+    const probe = win.performanceProbe
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries())
+        probe.longTasks.push({ start: entry.startTime, duration: entry.duration })
+    }).observe({ type: 'longtask', buffered: true })
+    let last = performance.now()
+    const frame = (at: number) => {
+      if (probe.activity) probe.frames.push({ at, gap: at - last })
+      last = at
+      requestAnimationFrame(frame)
+    }
+    requestAnimationFrame(frame)
+    const input = (event: Event) => {
+      const type =
+        event.type === 'keydown'
+          ? 'Enter keydown'
+          : event.type === 'beforeinput'
+            ? (event as InputEvent).inputType
+            : event.type
+      if (event.type === 'keydown' && (event as KeyboardEvent).key !== 'Enter') return
+      const item: NativeCompositionEvent = {
+        type,
+        at: performance.now(),
+        trusted: event.isTrusted,
+        data: (event as CompositionEvent).data,
+        mainEditor:
+          event.target instanceof Element && !!event.target.closest('.ProseMirror.doc-page'),
+      }
+      probe.input.push(item)
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          item.twoFrameCallbacksMs = performance.now() - item.at
+        }),
+      )
+    }
+    document.addEventListener('beforeinput', input, true)
+    document.addEventListener('keydown', input, true)
+    document.addEventListener('compositionstart', input, true)
+    document.addEventListener('compositionupdate', input, true)
+    document.addEventListener('compositionend', input, true)
+  })
+}
+
+async function waitForLayout(
+  page: Page,
+  { tail, minimumBodyImages }: Pick<DocumentOracle, 'tail' | 'minimumBodyImages'>,
+  timeout = 180_000,
+  newerThan = -1,
+  measurementStart = now(),
+  textRuns: string[] = [],
+) {
+  const deadline = Date.now() + timeout
+  const milestonesMs: Record<string, number> = {}
+  let lastProbe: unknown
+  let previous = ''
+  let unchangedSince = 0
+  while (Date.now() < deadline) {
+    const state = await withDeadline(
+      page.evaluate(readLayoutProbe, { end: tail, textRuns, minimumBodyImages }),
+      Math.max(1, deadline - Date.now()),
+      'layout probe',
+    ).catch((error: unknown) => {
+      if (error instanceof Error) Object.assign(error, { lastProbe })
+      throw error
+    })
+    if (state.activity?.errors.length)
+      throw new Error(`Pagination failed: ${state.activity.errors.join('; ')}`)
+    const a = state.activity
+    const idle =
+      !!a &&
+      a.version === 1 &&
+      a.generation > newerThan &&
+      a.owners > 0 &&
+      !a.contentPending &&
+      a.pending === 0 &&
+      a.active === 0 &&
+      a.fontProbes === 0
+    lastProbe = { ...state, diagnosticIdle: idle }
+    if (a && a.generation > newerThan) {
+      if (state.complete && !a.contentPending)
+        milestonesMs['complete-content-observed'] ??= now() - measurementStart
+      if (state.complete && state.imagesReady)
+        milestonesMs['complete-media-observed'] ??= now() - measurementStart
+      if (state.fonts?.status === 'loaded' && state.fonts.count > 0)
+        milestonesMs['fonts-loaded-observed'] ??= now() - measurementStart
+      if (idle) milestonesMs['no-pending-layout-observed'] ??= now() - measurementStart
+    }
+    const valid =
+      idle &&
+      state.complete &&
+      state.visible &&
+      state.imagesReady &&
+      state.fonts?.status === 'loaded' &&
+      state.fonts.count > 0 &&
+      (state.pages ?? 0) > 0
+    if (valid && state.signature === previous) {
+      if (Date.now() - unchangedSince >= 250) {
+        state.environment.zoom = await page.locator('.ProseMirror').first().evaluate(documentZoom)
+        return { ...state, milestonesMs }
+      }
+    } else {
+      previous = state.signature
+      unchangedSince = Date.now()
+    }
+    await page.waitForTimeout(50)
+  }
+  throw Object.assign(
+    new Error('Document completeness, pending layout, fonts/images and geometry did not settle'),
+    { lastProbe },
+  )
+}
+
+async function firstDiagnosticIdle(page: Page, started: number, newerThan = -1) {
+  const deadline = Date.now() + 180_000
+  while (Date.now() < deadline) {
+    const activity = await withDeadline(
+      page.evaluate(() => (window as ProbeWindow).__docsLayoutActivity?.snapshot()),
+      Math.max(1, deadline - Date.now()),
+      'pending-work observation',
+    )
+    if (!activity || activity.version !== 1)
+      throw new Error('Current layout activity diagnostics are missing')
+    if (activity.errors.length) throw new Error(activity.errors.join('; '))
+    if (
+      activity.generation > newerThan &&
+      activity.owners > 0 &&
+      !activity.contentPending &&
+      activity.pending === 0 &&
+      activity.active === 0 &&
+      activity.fontProbes === 0
+    )
+      return now() - started
+    await page.waitForTimeout(25)
+  }
+  throw new Error('Pending layout work did not become idle')
+}
+
+async function firstVisibleContent(page: Page, head: string, newerThan: number) {
+  const observed = await page.waitForFunction(
+    observeFirstVisibleSource,
+    { head, newerThan },
+    { timeout: 180_000, polling: 50 },
+  )
+  const visibility = await observed.jsonValue()
+  await observed.dispose()
+  const started = now()
+  const image = await page.screenshot({ type: 'jpeg', quality: 60 })
+  return { image, screenshotMs: now() - started, visibility }
+}
+
+async function verifyRenderedStories(page: Page, documentXml: string, artifact: string) {
+  const state = await withDeadline(
+    page.evaluate(() => {
+      const win = window as ProbeWindow
+      const sources = win.__pageDebug?.sourceStories?.()
+      const activity = win.__docsLayoutActivity?.snapshot()
+      const pm = document.querySelector('.editor-scroll .ProseMirror')
+      const boxes = [...(pm?.querySelectorAll<HTMLElement>('.doc-textbox') ?? [])]
+        .filter((box) => !box.closest('.page-gap,.page-repeat-header'))
+        .map((box) => {
+          const owner = box.closest<HTMLElement>('[data-idx]')?.dataset.idx
+          const ordinal = box.dataset.sourceTxbxIndex
+          const rect = box.getBoundingClientRect()
+          const style = getComputedStyle(box)
+          return {
+            docxIndex: owner !== undefined && /^\d+$/.test(owner) ? Number(owner) : null,
+            txbxIndex: ordinal !== undefined && /^\d+$/.test(ordinal) ? Number(ordinal) : undefined,
+            shapeId: box.dataset.sourceShapeId,
+            text: box.textContent ?? '',
+            laidOut:
+              rect.width > 0 &&
+              rect.height > 0 &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden',
+            rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+          }
+        })
+      return { sources, activity, boxes }
+    }),
+    30_000,
+    'source-bound textbox fidelity',
+  )
+  // Raw source/story evidence belongs only to the configured external fidelity artifacts.
+  await writeFile(artifact, JSON.stringify(state, null, 2))
+  const sources = state.sources
+  if (
+    !sources ||
+    sources.version !== 1 ||
+    sources.disposed ||
+    !Number.isInteger(sources.documentGeneration) ||
+    sources.layoutGeneration !== state.activity?.generation
+  )
+    throw new Error(
+      'Current source-story diagnostics are missing, disposed or generation-mismatched',
+    )
+  const expected = expectedTextboxStories(
+    documentXml,
+    sources.blocks.filter((block) => block.textboxes.length > 0),
+  )
+  verifyTextboxStories(expected, state.boxes)
+  return {
+    documentGeneration: sources.documentGeneration,
+    layoutGeneration: sources.layoutGeneration,
+    textStories: expected.length,
+    renderedTextStories: state.boxes.filter((box) => box.text.trim()).length,
+  }
+}
+
+async function chooseText(page: Page, kind: 'paragraph' | 'table', fraction: number) {
+  return page.evaluate(
+    ({ kind, fraction }) => {
+      const pm = document.querySelector<HTMLElement>('.ProseMirror')
+      if (!pm?.isContentEditable) throw new Error('Current document is not editable')
+      const targetSelector =
+        kind === 'table'
+          ? 'td p:not(.page-gap *):not(.page-repeat-header *),th p:not(.page-gap *):not(.page-repeat-header *)'
+          : ':scope > p'
+      const allCandidates = [...pm.querySelectorAll<HTMLElement>(targetSelector)]
+      const candidates = allCandidates.filter(
+        (p) => (p.textContent?.trim().length ?? 0) >= 12 && !p.closest('[contenteditable="false"]'),
+      )
+      const target =
+        candidates[Math.min(candidates.length - 1, Math.floor(candidates.length * fraction))]
+      if (!target) throw new Error(`No editable ${kind} text candidate`)
+      target.scrollIntoView({ block: 'center' })
+      const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT)
+      const node = walker.nextNode()
+      if (!node?.textContent) throw new Error('Selected paragraph has no text')
+      const range = document.createRange()
+      range.setStart(node, Math.min(2, node.textContent.length))
+      range.collapse(true)
+      const selection = window.getSelection()
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+      pm.focus()
+      return {
+        targetText: target.textContent ?? '',
+        targetSelector,
+        targetIndex: allCandidates.indexOf(target),
+        insertOffset: node.textContent
+          .slice(0, Math.min(2, node.textContent.length))
+          .replace(/\s+/g, '').length,
+        precedingCharacter: Array.from(
+          node.textContent.slice(0, Math.min(2, node.textContent.length)),
+        ).at(-1),
+      }
+    },
+    { kind, fraction },
+  )
+}
+
+async function waitForPdf(file: string) {
+  await expect
+    .poll(
+      async () => {
+        try {
+          return (await PDFDocument.load(await readFile(file))).getPageCount()
+        } catch {
+          return 0
+        }
+      },
+      { timeout: 180_000 },
+    )
+    .toBeGreaterThan(0)
+  return PDFDocument.load(await readFile(file))
+}
+
+async function treeDigest(root: string): Promise<string> {
+  const entries = await readdir(root, { withFileTypes: true })
+  const hashes: string[] = []
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name)))
+    hashes.push(
+      `${entry.name}:${entry.isDirectory() ? await treeDigest(join(root, entry.name)) : sha(await readFile(join(root, entry.name)))}`,
+    )
+  return sha(hashes.join('\n'))
+}
+
+test('production document performance and correctness evidence', async () => {
+  test.skip(
+    !process.env.FORAOFFICE_PERF_HOST,
+    'Opt-in performance run; use docs-performance.config.ts',
+  )
+  const host = process.env.FORAOFFICE_PERF_HOST as PerformanceHost
+  const smoke = process.env.FORAOFFICE_PERF_SMOKE === '1'
+  const corePilot = process.env.FORAOFFICE_PERF_CORE_PILOT === '1'
+  if (corePilot && (host !== 'qt' || !smoke || process.env.FORAOFFICE_PERF_BEFORE))
+    throw new Error('The Qt core pilot requires Qt smoke mode and cannot use formal comparisons')
+  const label = process.env.FORAOFFICE_PERF_LABEL!
+  const artifactRoot = await realpath(process.env.FORAOFFICE_PERF_ARTIFACTS!)
+  assertExternalArtifacts(await realpath(repository), artifactRoot)
+  const root = await mkdtemp(
+    join(artifactRoot, `${label.replace(/[^a-zA-Z0-9_-]/g, '_')}-${host}-`),
+  )
+  const sdk = resolve(
+    process.env.FORAOFFICE_DOCS_PACKAGE_ROOT ?? join(repository, 'apps/docs/out/sdk'),
+  )
+  const build = JSON.parse(await readFile(join(sdk, 'build-info.json'), 'utf8'))
+  const bytes = process.env.FORAOFFICE_PERF_DOCX
+    ? await readFile(process.env.FORAOFFICE_PERF_DOCX)
+    : await buildPerformanceFixture(Number(process.env.FORAOFFICE_PERF_SCALE ?? 1))
+  const oracle = await documentOracle(bytes)
+  const sourceXml = await (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string')
+  const mainStory = mainStoryOracle(sourceXml)
+  let workingOracle = oracle
+  const nativeImeRequested =
+    !corePilot && host === 'qt' && process.env.FORAOFFICE_PERF_NATIVE_IME === '1'
+  const primerText = 'Performance runtime primer'
+  const primer = await buildDocx({ bodyXml: `<w:p><w:r><w:t>${primerText}</w:t></w:r></w:p>` })
+  const tail = oracle.tail
+  const samples = smoke ? 1 : 30
+  const nativeSamples = samples === 1 ? 2 : samples // Smoke also exercises actual undo between native compositions.
+  const opens = smoke ? 1 : 10
+  const launches = smoke ? 1 : 5
+  const edits = [
+    'paragraph-start',
+    'paragraph-middle',
+    'paragraph-end',
+    'table',
+    'enter',
+    'delete',
+    'composition',
+  ] as const
+  const requirements: Record<string, number> = {
+    'process-start-to-visible-observation': 5,
+    'process-start-to-layout-verified-observation': 5,
+    'process-start-to-first-diagnostic-idle-observation': 5,
+    'fresh-process-primed-sample-open-to-visible-observation': 5,
+    'fresh-process-primed-sample-open-to-layout-verified-observation': 5,
+    'fresh-process-primed-sample-open-to-first-diagnostic-idle-observation': 5,
+    'hot-open-to-layout-verified-observation': 10,
+    'hot-open-to-visible-observation': 10,
+    'hot-open-to-first-diagnostic-idle-observation': 10,
+    'wheel-visible-observation': 30,
+    ...Object.fromEntries(
+      edits.flatMap((name) => [
+        [`${name}-visible-observation`, 30],
+        [`${name}-layout-verified-observation`, 30],
+        [`${name}-first-diagnostic-idle-observation`, 30],
+      ]),
+    ),
+    ...(host === 'qt'
+      ? {
+          'native-ime-commit-helper-and-layout-observation': 30,
+          'native-ime-cancel-helper-and-layout-observation': 30,
+          'native-ime-current-update-two-frame-callback-diagnostic': 30,
+        }
+      : {}),
+  }
+  const runs: Record<string, PerformanceObservation[]> = Object.fromEntries(
+    Object.keys(requirements).map((name) => [name, []]),
+  )
+  const details: Array<Record<string, unknown>> = []
+  const viewportObservations: RecordedViewportObservation[] = []
+  let existingCorrectnessVerified = false
+  const errors: string[] = []
+  const blockingTasks: number[] = []
+  const pendingScreenshots: Array<{ path: string; image: Buffer }> = []
+  const push = (name: string, value: number) =>
+    (runs[name] ??= []).push({ ok: true, durationMs: value })
+  const electronApp = resolve(
+    process.env.FORAOFFICE_PERF_ELECTRON_APP ?? join(repository, 'apps/docs'),
+  )
+  const productDigests = {
+    sdk: await treeDigest(sdk),
+    executable: host === 'qt' ? sha(await readFile(process.env.FORAOFFICE_QT_HOST!)) : null,
+    electronMain: host === 'electron' ? await treeDigest(join(electronApp, 'out/main')) : null,
+    electronRenderer:
+      host === 'electron' ? await treeDigest(join(electronApp, 'out/renderer')) : null,
+  }
+  const metadata = {
+    schema: 1,
+    wholeRunLimitMs: test.info().timeout,
+    host,
+    label,
+    ...(corePilot ? { corePilot: true } : {}),
+    headless: host === 'browser',
+    harnessCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repository,
+      encoding: 'utf8',
+    }).trim(),
+    harnessDirty: !!execFileSync('git', ['status', '--porcelain'], {
+      cwd: repository,
+      encoding: 'utf8',
+    }).trim(),
+    productBuild: build,
+    productDigests,
+    fixture: {
+      sha256: sha(bytes),
+      bytes: bytes.length,
+      tailSha256: sha(tail),
+      private: !!process.env.FORAOFFICE_PERF_DOCX,
+      archivalTextRuns: oracle.textRuns.length,
+      orderedMainStoryRuns: mainStory.textRuns.length,
+      minimumBodyImages: oracle.minimumBodyImages,
+      sections: JSON.parse(oracle.sections),
+    },
+    machine: {
+      platform: platform(),
+      release: release(),
+      cpu: cpus()[0]?.model,
+      logicalProcessors: cpus().length,
+      memoryBytes: totalmem(),
+    },
+    cachePolicy:
+      'fresh application profile per process; OS cache uncontrolled; hot opens reuse one process',
+    timingBoundary:
+      'fresh process loads a tiny primer, then verified foreground before measured sample open; process-start metrics include primer/activation; separate sample-open metrics; matching source-block geometry must intersect pane and viewport (scroll/rect recorded), polls50ms then JPEG; observation upper bounds, not INP or complete cold-start latency',
+    editFingerprintMethod:
+      'authored DOM text and root paragraph count; exclude only page-gap/repeat widgets and doc-toc-line generated doc-toc-page; localized target check during input, full exact authored edit/undo checks outside active rAF/longtask recording',
+    focusPolicy:
+      'Windows Qt/Electron exact native HWND/start identity and foreground/focus verified at grouped phase endpoints; all hosts reject intervals with DOM blur or visibility loss; non-Windows Electron and headless browser use DOM focus only; activation/native inspection excluded from sample-input timing',
+    diagnostics:
+      'internal pagination activity v1 and lazy source-story/cell diagnostics v1; same product instrumentation required on both sides',
+    sourceStoryMethod:
+      'independent WML main flow; unresolved AlternateContent main projections must agree; post-timing source-bound textbox text/geometry; all archival alternatives preserved separately; no complete Requires-profile conformance claim',
+    compositionMethod:
+      'CDP Input.imeSetComposition followed by Input.insertText; composition events recorded; not an OS IME benchmark',
+    nativeImeMethod: {
+      requested: nativeImeRequested,
+      method:
+        'Qt only, explicit opt-in FORAOFFICE_PERF_NATIVE_IME=1; guarded owned OS SCANCODE ceshi/commit/cancel, fresh main-editor composition sequence and exact model/edit verification; end trust recorded; helper+validation inclusive observations and renderer two-rAF diagnostics are not presentation latency; candidate pixels/visual reference attached separately',
+    },
+    printConditions:
+      'product preview and real PDF export; entire document; default original paper/section geometry; source-cell/body/textbox/HF baseline+full-advance chains and exact page count; semantic proof with separate paint evidence; print emulation removed before export',
+  }
+  let condition: Record<string, unknown> | undefined
+  let platformFonts: Awaited<ReturnType<typeof collectPlatformFonts>> | undefined
+  let correctness: (PerformancePdfGeometry & Record<string, unknown>) | undefined
+  let formalEvidenceIncomplete: boolean
+  let currentScenario = 'process-start-to-layout-verified-observation'
+  let session: PerformanceSession | undefined
+  let focus: ReturnType<typeof createPerformanceFocusGuard> | undefined
+  let document = ''
+  const nativeImeEvidence: unknown[] = []
+  let nativeImeCondition: Record<string, unknown> | undefined
+  const nativeImeAcceptance: Record<string, unknown> = {
+    status: 'not-executed',
+    requested: nativeImeRequested,
+    candidatePixels:
+      'external source-bound visual evidence required; UIA metadata alone is not pixel proof',
+  }
+  const nativeAction = async (request: NativeImeRequest) => {
+    try {
+      const evidence = await runWindowsNativeIme(request)
+      nativeImeEvidence.push(evidence)
+      await writeFile(
+        join(root, 'native-ime-evidence.json'),
+        JSON.stringify(nativeImeEvidence, null, 2),
+      )
+      if (evidence.inputObservation) {
+        const actual = evidence.inputObservation.before
+        nativeImeCondition = retainRunCondition(nativeImeCondition, {
+          observationSource: actual.source,
+          keyboardLayout: evidence.before.profile.keyboardLayout,
+          languageId: evidence.before.profile.languageId,
+          provider: {
+            name: actual.provider.name,
+            image: actual.provider.image,
+            company: actual.provider.company,
+          },
+          mode: {
+            name: actual.mode.name,
+            automationId: actual.mode.automationId,
+            className: actual.mode.className,
+          },
+        })
+      }
+      return evidence
+    } catch (error) {
+      nativeImeEvidence.push({
+        action: request.action,
+        error: String(error),
+        stdout: error && typeof error === 'object' && 'stdout' in error ? error.stdout : undefined,
+      })
+      try {
+        await writeFile(
+          join(root, 'native-ime-evidence.json'),
+          JSON.stringify(nativeImeEvidence, null, 2),
+        )
+      } catch (persistence) {
+        throw new AggregateError(
+          [error, persistence],
+          'Native action and evidence persistence failed',
+          { cause: persistence },
+        )
+      }
+      throw error
+    }
+  }
+  const recordCondition = async (
+    page: Page,
+    state: Awaited<ReturnType<typeof waitForLayout>>,
+    engine: Record<string, unknown>,
+    phase: string,
+  ) => {
+    platformFonts = await collectPlatformFonts(page)
+    const observed = {
+      host,
+      headless: metadata.headless,
+      fixture: metadata.fixture,
+      machine: metadata.machine,
+      cachePolicy: metadata.cachePolicy,
+      timingBoundary: metadata.timingBoundary,
+      focusPolicy: metadata.focusPolicy,
+      editFingerprintMethod: metadata.editFingerprintMethod,
+      diagnostics: metadata.diagnostics,
+      sourceStoryMethod: metadata.sourceStoryMethod,
+      compositionMethod: metadata.compositionMethod,
+      nativeImeMethod: metadata.nativeImeMethod,
+      printConditions: metadata.printConditions,
+      conditionPolicy:
+        'reject stable environment/actual font identity drift after every unchanged fresh/hot open; font query outside measured intervals',
+      fontReadiness: state.fonts?.status,
+      platformFonts: { provenance: platformFonts.provenance, identities: platformFonts.identities },
+      environment: state.environment,
+      engine,
+    }
+    details.push({
+      operation: 'comparison-condition',
+      phase,
+      ...observed,
+      actualFontQueryParents: platformFonts.queriedParents,
+    })
+    condition = retainRunCondition(condition, observed)
+  }
+  try {
+    for (let launch = 0; launch < launches; launch++) {
+      const workspace = join(root, `launch-${launch}`)
+      await mkdir(workspace)
+      document = join(workspace, 'Benchmark.docx')
+      await writeFile(document, bytes)
+      const initialDocument = join(workspace, 'Primer.docx')
+      await writeFile(initialDocument, primer)
+      const started = now()
+      session = await launchPerformanceHost({
+        kind: host,
+        workspace,
+        document,
+        initialDocument,
+        sdk,
+        electronApp,
+        qtExecutable: resolve(process.env.FORAOFFICE_QT_HOST ?? join(root, 'missing-qt-host.exe')),
+      })
+      session.page.on('pageerror', (error) => errors.push(error.message))
+      errors.push(...(await session.page.pageErrors()).map((error) => error.message))
+      await installProbe(session.page)
+      focus = createPerformanceFocusGuard(host, session.page, session.nativeProcessId, session)
+      details.push({ launch, operation: 'foreground-control', observations: focus.observations })
+      await focus.begin()
+      const prepared = await waitForLayout(
+        session.page,
+        { tail: primerText, minimumBodyImages: 0 },
+        180_000,
+        -1,
+        started,
+        [primerText.replace(/\s+/g, '')],
+      )
+      await focus.end()
+      const primerGeneration = prepared.activity!.generation
+      await focus.begin()
+      const sampleStarted = now()
+      const opened = await withDeadline(session.open(), 180_000, 'fresh-process primed sample open')
+      const apiReturnMs = now() - sampleStarted
+      if (opened === false) throw new Error('Fresh-process sample open returned false')
+      const first = await firstVisibleContent(
+        session.page,
+        mainStory.paragraphs.find((p) => p.text)!.text.slice(0, 32),
+        primerGeneration,
+      )
+      const screenshot = { path: join(workspace, 'first-visible.jpg'), image: first.image }
+      pendingScreenshots.push(screenshot)
+      push('process-start-to-visible-observation', now() - started)
+      push('fresh-process-primed-sample-open-to-visible-observation', now() - sampleStarted)
+      const firstIdleMs = await firstDiagnosticIdle(session.page, started, primerGeneration)
+      push('process-start-to-first-diagnostic-idle-observation', firstIdleMs)
+      push(
+        'fresh-process-primed-sample-open-to-first-diagnostic-idle-observation',
+        firstIdleMs - (sampleStarted - started),
+      )
+      const verificationStarted = now()
+      const state = await waitForLayout(
+        session.page,
+        oracle,
+        180_000,
+        primerGeneration,
+        started,
+        mainStory.textRuns,
+      )
+      push('process-start-to-layout-verified-observation', now() - started)
+      push('fresh-process-primed-sample-open-to-layout-verified-observation', now() - sampleStarted)
+      const verificationMs = now() - verificationStarted
+      await focus.end()
+      const stories = await verifyRenderedStories(
+        session.page,
+        sourceXml,
+        join(workspace, 'source-stories.json'),
+      )
+      const writeStarted = now()
+      await writeFile(screenshot.path, screenshot.image)
+      pendingScreenshots.splice(pendingScreenshots.indexOf(screenshot), 1)
+      details.push({
+        launch,
+        engine: session.evidence,
+        state,
+        stories,
+        firstVisibleSource: first.visibility,
+        sampleOpenApiReturnMs: opened === null ? null : apiReturnMs,
+        primerPreparationMs: sampleStarted - started,
+        components: {
+          firstIdleMs,
+          screenshotMs: first.screenshotMs,
+          verificationMs,
+          fileWriteMs: now() - writeStarted,
+          aggregateIncludesScreenshotAndVerification: true,
+        },
+      })
+      await recordCondition(session.page, state, session.evidence, `launch-${launch}`)
+      if (launch + 1 < launches) {
+        await session.close()
+        session = undefined
+      }
+    }
+    const live = session!
+    currentScenario = 'hot-open-to-layout-verified-observation'
+    await focus!.begin()
+    for (let i = 0; i < opens; i++) {
+      const generation = await live.page.evaluate(
+        () => (window as ProbeWindow).__docsLayoutActivity!.snapshot().generation,
+      )
+      await focus!.check()
+      const started = now()
+      const opened = await withDeadline(live.open(), 180_000, 'document open')
+      const apiReturnMs = now() - started
+      if (opened === false) throw new Error('Document open returned false')
+      const first = await firstVisibleContent(
+        live.page,
+        mainStory.paragraphs.find((p) => p.text)!.text.slice(0, 32),
+        generation,
+      )
+      const screenshot = { path: join(root, `hot-open-${i}-first-visible.jpg`), image: first.image }
+      pendingScreenshots.push(screenshot)
+      push('hot-open-to-visible-observation', now() - started)
+      const firstIdleMs = await firstDiagnosticIdle(live.page, started, generation)
+      push('hot-open-to-first-diagnostic-idle-observation', firstIdleMs)
+      const state = await waitForLayout(
+        live.page,
+        oracle,
+        180_000,
+        generation,
+        started,
+        mainStory.textRuns,
+      )
+      push('hot-open-to-layout-verified-observation', now() - started)
+      await focus!.check()
+      const stories = await verifyRenderedStories(
+        live.page,
+        sourceXml,
+        join(root, `hot-open-${i}-stories.json`),
+      )
+      const writeStarted = now()
+      await writeFile(screenshot.path, screenshot.image)
+      pendingScreenshots.splice(pendingScreenshots.indexOf(screenshot), 1)
+      details.push({
+        operation: 'hot-open',
+        index: i,
+        apiReturnMs: opened === null ? null : apiReturnMs,
+        firstIdleMs,
+        firstVisibleSource: first.visibility,
+        screenshotMs: first.screenshotMs,
+        screenshotWriteMs: now() - writeStarted,
+        state,
+        stories,
+      })
+      await recordCondition(live.page, state, live.evidence, `hot-open-${i}`)
+    }
+    await focus!.end()
+    for (const scenario of edits) {
+      await focus!.begin()
+      for (let i = 0; i < samples; i++) {
+        currentScenario = `${scenario}-layout-verified-observation`
+        const fraction =
+          scenario === 'paragraph-start' ? 0 : scenario === 'paragraph-end' ? 0.99 : 0.5
+        const before = await chooseText(
+          live.page,
+          scenario === 'table' ? 'table' : 'paragraph',
+          fraction,
+        )
+        await waitForLayout(live.page, oracle)
+        const mainEditor = live.page.locator('.ProseMirror.doc-page').first()
+        const beforeEdit = await mainEditor.evaluate(readEditFingerprint)
+        const editTarget = mainEditor.locator(before.targetSelector).nth(before.targetIndex)
+        const beforeTarget = await editTarget.evaluate(readEditFingerprint)
+        await focus!.check()
+        const inputIndex = await live.page.evaluate(() => {
+          const probe = (window as ProbeWindow).performanceProbe!
+          probe.activity = true
+          probe.frames.length = 0
+          probe.longTasks.length = 0
+          return probe.input.length
+        })
+        const started = now()
+        if (scenario === 'enter') await live.page.keyboard.press('Enter')
+        else if (scenario === 'delete') await live.page.keyboard.press('Backspace')
+        else if (scenario === 'composition') {
+          const cdp = await live.page.context().newCDPSession(live.page)
+          try {
+            await cdp.send('Input.imeSetComposition', {
+              text: '测试',
+              selectionStart: 2,
+              selectionEnd: 2,
+            })
+            await cdp.send('Input.insertText', { text: '测试' })
+          } finally {
+            await cdp.detach()
+          }
+        } else await live.page.keyboard.insertText('测')
+        if (scenario === 'enter')
+          await expect
+            .poll(() =>
+              live.page
+                .locator('.ProseMirror')
+                .first()
+                .evaluate((pm) => pm.querySelectorAll(':scope > p').length),
+            )
+            .toBe(beforeEdit.paragraphs + 1)
+        else
+          await expect
+            .poll(() => editTarget.evaluate(readEditFingerprint))
+            .not.toEqual(beforeTarget)
+        const screenshotStarted = now()
+        let screenshotMs = 0
+        const [firstIdleMs, screenshot] = await Promise.all([
+          firstDiagnosticIdle(live.page, started),
+          live.page.screenshot({ type: 'jpeg', quality: 60 }).then((image) => {
+            screenshotMs = now() - screenshotStarted
+            push(`${scenario}-visible-observation`, now() - started)
+            return image
+          }),
+        ])
+        push(`${scenario}-first-diagnostic-idle-observation`, firstIdleMs)
+        const probe = await live.page.evaluate((index) => {
+          const probe = (window as ProbeWindow).performanceProbe!
+          probe.activity = false
+          return {
+            input: probe.input.slice(index),
+            frames: probe.frames.splice(0),
+            longTasks: probe.longTasks.splice(0),
+          }
+        }, inputIndex)
+        const verificationStarted = now()
+        const state = await waitForLayout(live.page, oracle, 180_000, -1, started)
+        push(`${scenario}-layout-verified-observation`, now() - started)
+        const afterEdit = await mainEditor.evaluate(readEditFingerprint)
+        if (scenario === 'enter') expect(afterEdit.text).toBe(beforeEdit.text)
+        else {
+          expect(afterEdit.paragraphs).toBe(beforeEdit.paragraphs)
+          verifyKeyboardTextEdit(
+            beforeEdit.text,
+            afterEdit.text,
+            scenario === 'delete' ? null : scenario === 'composition' ? '测试' : '测',
+            before.precedingCharacter,
+          )
+        }
+        await focus!.check()
+        if (!probe.input.length)
+          throw new Error(`No current input/keydown attribution for ${scenario}`)
+        if (scenario === 'enter' && !probe.input.some((event) => event.type === 'Enter keydown'))
+          throw new Error('Enter event was not observed for the current action')
+        if (
+          scenario === 'composition' &&
+          !probe.input.some((event) => event.type === 'insertCompositionText')
+        )
+          throw new Error('Current composition update was not observed')
+        details.push({
+          scenario,
+          index: i,
+          screenshotSha256: sha(screenshot),
+          state,
+          probe,
+          components: {
+            firstIdleMs,
+            screenshotMs,
+            verificationMs: now() - verificationStarted,
+            aggregateIncludesScreenshotAndVerification: true,
+          },
+        })
+        blockingTasks.push(...probe.longTasks.map((entry) => entry.duration))
+        await live.page.keyboard.press('ControlOrMeta+z')
+        await expect.poll(() => mainEditor.evaluate(readEditFingerprint)).toEqual(beforeEdit)
+        await expect
+          .poll(() =>
+            live.page
+              .locator('.ProseMirror')
+              .first()
+              .evaluate((pm) => pm.querySelectorAll(':scope > p').length),
+          )
+          .toBe(beforeEdit.paragraphs)
+        await waitForLayout(live.page, oracle)
+      }
+      await focus!.end()
+    }
+    await focus!.begin()
+    for (let i = 0; i < samples; i++) {
+      currentScenario = 'wheel-visible-observation'
+      const scroller = live.page.locator('.editor-scroll')
+      await focus!.check()
+      await scroller.hover()
+      const before = await scroller.evaluate((element) => element.scrollTop)
+      const maximum = await scroller.evaluate(
+        (element) => element.scrollHeight - element.clientHeight,
+      )
+      await live.page.evaluate(() => {
+        const probe = (window as ProbeWindow).performanceProbe!
+        probe.activity = true
+        probe.frames.length = 0
+        probe.longTasks.length = 0
+      })
+      const started = now()
+      await live.page.mouse.wheel(0, before + 700 >= maximum ? -600 : 600)
+      await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).not.toBe(before)
+      await live.page.screenshot({ type: 'jpeg', quality: 60 })
+      push('wheel-visible-observation', now() - started)
+      await firstDiagnosticIdle(live.page, started)
+      const probe = await live.page.evaluate(() => {
+        const probe = (window as ProbeWindow).performanceProbe!
+        probe.activity = false
+        return { frames: probe.frames.splice(0), longTasks: probe.longTasks.splice(0) }
+      })
+      await waitForLayout(live.page, oracle)
+      await focus!.check()
+      details.push({ scenario: 'wheel', index: i, probe })
+      blockingTasks.push(...probe.longTasks.map((entry) => entry.duration))
+    }
+    await focus!.end()
+    if (corePilot) {
+      details.push({
+        operation: 'qt-core-pilot',
+        status: 'completed',
+        exercised: ['fresh-open', 'hot-open', ...edits, 'wheel'],
+        omitted: ['native-os-ime', 'save', 'pdf', 'normal-drag', 'fast-drag', 'go-to'],
+        eligibleForFormalComparison: false,
+      })
+      return
+    }
+    if (nativeImeRequested) {
+      nativeImeAcceptance.status = 'input-phase-incomplete'
+      await focus!.begin()
+      const initial = await nativeAction({
+        action: 'inspect',
+        targetProcessId: live.nativeProcessId!,
+      })
+      if (!initial.before.foregroundOwned || !initial.before.focusOwned)
+        throw new Error('Native IME phase has no owned foreground/focus')
+      const requested = {
+        ...initial.before.owner,
+        keyboardLayout: initial.before.profile.keyboardLayout,
+        observationSource: 'os-tray-uia' as const,
+      }
+      const model = () =>
+        live.page.evaluate(() => {
+          const editor = (
+            window as unknown as {
+              docsEditor?: {
+                inspection: { snapshot(): { documentId: string; revision: number; text: string } }
+              }
+            }
+          ).docsEditor
+          if (!editor) throw new Error('Qt public inspection endpoint is missing')
+          const snapshot = editor.inspection.snapshot()
+          if (!snapshot.documentId || typeof snapshot.text !== 'string')
+            throw new Error('Qt model identity/text is missing')
+          return {
+            documentId: snapshot.documentId,
+            revision: snapshot.revision,
+            text: snapshot.text,
+          }
+        })
+      const mark = () =>
+        live.page.evaluate(() => ({
+          index: (window as ProbeWindow).performanceProbe!.input.length,
+          since: performance.now(),
+        }))
+      const eventsSince = (index: number) =>
+        live.page.evaluate(
+          (index) => (window as ProbeWindow).performanceProbe!.input.slice(index),
+          index,
+        )
+      for (let i = 0; i < nativeSamples; i++) {
+        currentScenario = 'native-ime-commit-helper-and-layout-observation'
+        const target = await chooseText(live.page, 'paragraph', 0)
+        const before = await model()
+        const beforeFingerprint = await live.page
+          .locator('.ProseMirror.doc-page')
+          .first()
+          .evaluate(readEditFingerprint)
+        await focus!.check()
+        const commitMark = await mark()
+        await nativeAction({ ...requested, action: 'type', text: 'ceshi' })
+        await expect
+          .poll(async () =>
+            (await eventsSince(commitMark.index)).some(
+              (event) => event.type === 'compositionupdate' && event.trusted && event.mainEditor,
+            ),
+          )
+          .toBe(true)
+        if (i === 0)
+          await nativeAction({
+            action: 'inspect',
+            targetProcessId: live.nativeProcessId!,
+            includeCandidates: true,
+          })
+        const commitStarted = now()
+        await nativeAction({ ...requested, action: 'commit' })
+        await waitForLayout(live.page, oracle)
+        const committed = await model()
+        if (committed.documentId !== before.documentId)
+          throw new Error('Native IME document identity changed')
+        verifyKeyboardTextEdit(before.text, committed.text, '测试')
+        const committedFingerprint = await live.page
+          .locator('.ProseMirror.doc-page')
+          .first()
+          .evaluate(readEditFingerprint)
+        verifyKeyboardTextEdit(beforeFingerprint.text, committedFingerprint.text, '测试')
+        expect(committedFingerprint.paragraphs).toBe(beforeFingerprint.paragraphs)
+        const commitEvents = await eventsSince(commitMark.index)
+        const commitProof = verifyNativeCompositionEvents(commitEvents, commitMark.since, '测试')
+        await focus!.check()
+        push('native-ime-commit-helper-and-layout-observation', now() - commitStarted)
+        push(
+          'native-ime-current-update-two-frame-callback-diagnostic',
+          commitProof.lastUpdateTwoFrameCallbacksMs,
+        )
+        currentScenario = 'native-ime-cancel-helper-and-layout-observation'
+        const cancelMark = await mark()
+        await nativeAction({ ...requested, action: 'type', text: 'ceshi' })
+        await expect
+          .poll(async () =>
+            (await eventsSince(cancelMark.index)).some(
+              (event) => event.type === 'compositionupdate' && event.trusted && event.mainEditor,
+            ),
+          )
+          .toBe(true)
+        const cancelStarted = now()
+        await nativeAction({ ...requested, action: 'cancel' })
+        await waitForLayout(live.page, oracle)
+        const cancelled = await model()
+        if (cancelled.documentId !== committed.documentId || cancelled.text !== committed.text)
+          throw new Error('Native composition cancel changed committed model content')
+        expect(
+          await live.page.locator('.ProseMirror.doc-page').first().evaluate(readEditFingerprint),
+        ).toEqual(committedFingerprint)
+        const cancelEvents = await eventsSince(cancelMark.index)
+        const cancelProof = verifyNativeCompositionEvents(cancelEvents, cancelMark.since, null)
+        await focus!.check()
+        push('native-ime-cancel-helper-and-layout-observation', now() - cancelStarted)
+        details.push({
+          scenario: 'native-ime',
+          index: i,
+          commitEvents,
+          cancelEvents,
+          commitProof,
+          cancelProof,
+          beforeModelSha256: sha(before.text),
+          committedModelSha256: sha(committed.text),
+          cancelledModelSha256: sha(cancelled.text),
+        })
+        if (i + 1 < nativeSamples) {
+          await live.page.keyboard.press('ControlOrMeta+z')
+          await expect.poll(async () => (await model()).text).toBe(before.text)
+          await waitForLayout(live.page, oracle)
+          expect(
+            await live.page.locator('.ProseMirror.doc-page').first().evaluate(readEditFingerprint),
+          ).toEqual(beforeFingerprint)
+        } else {
+          workingOracle = expectedInsertion(
+            workingOracle,
+            target.targetText,
+            target.insertOffset,
+            '测试',
+          )
+        }
+      }
+      await focus!.end()
+      nativeImeAcceptance.status = 'commit-cancel-verified-persistence-pending'
+      nativeImeAcceptance.validCommitCancelSamples = nativeSamples
+    }
+    currentScenario = 'save-print'
+    const saveMarker = 'PERFORMANCE-SAVE-CHECK'
+    await focus!.begin()
+    const saveTarget = await chooseText(live.page, 'paragraph', 0)
+    const expected = expectedInsertion(
+      workingOracle,
+      saveTarget.targetText,
+      saveTarget.insertOffset,
+      saveMarker,
+    )
+    await live.page.keyboard.insertText(saveMarker)
+    await waitForLayout(live.page, oracle)
+    const observedTocPages = await live.page.evaluate(() =>
+      [...window.document.querySelectorAll('.ProseMirror.doc-page .doc-toc-line[data-toc-anchor]')]
+        .filter((line) => !line.closest('.page-gap,.page-repeat-header'))
+        .map((line) => ({
+          anchor: line.getAttribute('data-toc-anchor'),
+          page: line.querySelector('.doc-toc-page')?.textContent,
+        })),
+    )
+    await writeFile(join(root, 'pre-save-toc-dom.json'), JSON.stringify(observedTocPages, null, 2))
+    await withDeadline(live.save(), 180_000, 'document save acknowledgement')
+    await expect
+      .poll(
+        async () => {
+          const archive = await JSZip.loadAsync(await readFile(document))
+          return (await archive.file('word/document.xml')!.async('string')).includes(saveMarker)
+        },
+        { timeout: 180_000 },
+      )
+      .toBe(true)
+    const original = await JSZip.loadAsync(bytes)
+    const savedBytes = await readFile(document)
+    const saved = await JSZip.loadAsync(savedBytes)
+    const preservedParts = Object.keys(original.files).filter(
+      (name) => /^word\/(media|embeddings)\//.test(name) && !original.files[name].dir,
+    )
+    const preservedStoryParts = Object.keys(original.files).filter((name) =>
+      /^word\/(header\d+|footer\d+|footnotes|endnotes)\.xml$/.test(name),
+    )
+    for (const name of [...preservedParts, ...preservedStoryParts]) {
+      const part = saved.file(name)
+      if (
+        !part ||
+        sha(await part.async('uint8array')) !== sha(await original.files[name].async('uint8array'))
+      )
+        throw new Error(`Saved original resource differs: ${name}`)
+    }
+    const savedOracle = await documentOracle(savedBytes, { sourceXml, observedTocPages })
+    verifySavedContent(expected, savedOracle)
+    const savedXml = await saved.file('word/document.xml')!.async('string')
+    const savedMainStory = mainStoryOracle(savedXml)
+    currentScenario = 'save-reopen'
+    const generation = await live.page.evaluate(
+      () => (window as ProbeWindow).__docsLayoutActivity!.snapshot().generation,
+    )
+    if ((await withDeadline(live.open(), 180_000, 'saved document reopen')) === false)
+      throw new Error('Saved document reopen returned false')
+    const reopened = await waitForLayout(
+      live.page,
+      { tail: savedMainStory.tail, minimumBodyImages: oracle.minimumBodyImages },
+      180_000,
+      generation,
+      now(),
+      savedMainStory.textRuns,
+    )
+    await verifyRenderedStories(live.page, savedXml, join(root, 'reopened-source-stories.json'))
+    expect(await live.page.locator('.ProseMirror').first().textContent()).toContain(saveMarker)
+    await focus!.end()
+    if (nativeImeRequested) nativeImeAcceptance.status = 'commit-cancel-save-reopen-verified'
+    currentScenario = 'save-print'
+    const pageStatus = live.page.locator('.status-page')
+    const reopenedStatus = await pageStatus.innerText()
+    const visiblePages = Number(reopenedStatus.match(/\d+/g)?.at(-1))
+    await writeFile(
+      join(root, 'reopened-page-count.json'),
+      JSON.stringify({ status: reopenedStatus, layoutSlices: reopened.pages }, null, 2),
+    )
+    // Source geometry/output verification is untimed. Use the product preview,
+    // the same preview used by its native PDF export, before reading exact identities.
+    await withDeadline(
+      live.page.evaluate(() => {
+        const open = (window as unknown as { __openPagePreview?: () => void }).__openPagePreview
+        if (!open) throw new Error('Product page-preview callback is missing')
+        open()
+      }),
+      10_000,
+      'product page preview',
+    )
+    await live.page.waitForFunction(
+      () => {
+        const diagnostic = (
+          window as unknown as {
+            __previewDebug?: { sourceCells?: () => { modelCurrent: boolean } }
+          }
+        ).__previewDebug?.sourceCells?.()
+        return !!window.document.querySelector('.pv-page') && diagnostic?.modelCurrent === true
+      },
+      undefined,
+      { polling: 50, timeout: 180_000 },
+    )
+    let printSource: ReturnType<typeof capturePrintSourceSnapshot>
+    try {
+      await live.page.emulateMedia({ media: 'print' })
+      printSource = await withDeadline(
+        live.page.evaluate(capturePrintSourceSnapshot),
+        60_000,
+        'print source snapshot',
+      )
+      await writeFile(
+        join(root, 'print-source-snapshot.json'),
+        JSON.stringify(printSource, null, 2),
+      )
+    } finally {
+      // Remove emulation; pinning screen would also override native printToPDF.
+      await live.page.emulateMedia({ media: null })
+    }
+    const printChains = sourcePrintChains(
+      savedXml,
+      printSource.source.tables,
+      printSource.bindings.blocks,
+      { numberingXml: await saved.file('word/numbering.xml')?.async('string') },
+    )
+    const storyParts = Object.fromEntries(
+      await Promise.all(
+        preservedStoryParts.map(
+          async (name) => [name, await saved.file(name)!.async('string')] as const,
+        ),
+      ),
+    )
+    Object.assign(
+      printChains,
+      sourceHeaderFooterChains(
+        savedXml,
+        (await saved.file('word/settings.xml')?.async('string')) ?? '',
+        (await saved.file('word/_rels/document.xml.rels')?.async('string')) ?? '',
+        storyParts,
+        printSource.pageSections,
+      ),
+    )
+    const budget = pdfExportBudget(printSource.snapshot.pages)
+    await writeFile(join(root, 'print-budget.json'), JSON.stringify(budget, null, 2))
+    const pdf = await withDeadline(live.exportPdf(budget.timeoutMs), budget.timeoutMs, 'PDF export')
+    const printed = await waitForPdf(pdf)
+    // Capture the post-print status for diagnostics. Media emulation can leave
+    // the editor behind the preview mid-layout, so the gate uses the settled reopen.
+    const statusAfterPrint = await pageStatus.innerText()
+    const positioned = await readPositionedPdf(await readFile(pdf))
+    const projected = projectPrintedTextboxes(printChains, printSource.textboxClips)
+    const toc = projectPrintedTocLeaders(savedXml, projected.chains, printSource.tocLeaders)
+    const printProof = verifyPositionedPdf(toc.chains, printSource.snapshot, positioned, host)
+    await writeFile(
+      join(root, 'positioned-pdf-proof.json'),
+      JSON.stringify(
+        {
+          method:
+            'independent source chains; exact baseline and full horizontal advance ownership; separate paint evidence required',
+          clippedTextboxes: projected.clippedTextboxes,
+          authoredTocLeaders: Object.keys(toc.leaders).length,
+          pageCountObservations: {
+            reopenedStatus,
+            statusAfterPrint,
+            visiblePages,
+            layoutSlices: reopened.pages,
+            pdf: printed.getPageCount(),
+          },
+          ...printProof,
+        },
+        null,
+        2,
+      ),
+    )
+    if (printed.getPageCount() !== visiblePages || printed.getPageCount() !== reopened.pages)
+      throw new Error(
+        `PDF pages differ from the complete reopened editor (PDF ${printed.getPageCount()}, status ${visiblePages}, reopened slices ${reopened.pages})`,
+      )
+    correctness = {
+      savedEdit: true,
+      reopenedEdit: true,
+      originalResourcesPreserved: preservedParts.length,
+      originalStoryPartsPreserved: preservedStoryParts.length,
+      printedEdit: true,
+      pdfPages: printed.getPageCount(),
+      layoutPages: reopened.pages,
+      visiblePages,
+      pageSizesPoints: printed.getPages().map((page) => page.getSize()),
+      printSourceChains: printProof.sourceChains,
+      printTextboxClipping: projected.clippedTextboxes,
+    }
+    details.push({
+      operation: 'save-print',
+      savedSha256: sha(await readFile(document)),
+      pdfSha256: sha(await readFile(pdf)),
+      ...correctness,
+    })
+    if (errors.length) throw new Error(`Renderer errors: ${errors.join('; ')}`)
+    existingCorrectnessVerified = true
+    currentScenario = 'viewport-interaction-diagnostics'
+    const hasNativeViewportInput = process.platform === 'win32' && host !== 'browser'
+    const savedLayoutOracle = {
+      tail: savedMainStory.tail,
+      minimumBodyImages: oracle.minimumBodyImages,
+    }
+    const preview = live.page.locator('.pagination-preview')
+    let diagnosticSetupError: unknown
+    try {
+      if (await preview.count())
+        await preview.getByRole('button', { name: 'Close', exact: true }).click({ timeout: 3000 })
+      await waitForLayout(live.page, savedLayoutOracle, 180_000, -1, now(), savedMainStory.textRuns)
+    } catch (error) {
+      diagnosticSetupError = error
+    }
+    for (const phase of ['settled', 'progressive'] as const) {
+      for (const action of viewportActions) {
+        const screenshot = join(root, `viewport-${phase}-${action}.jpg`)
+        let record: RecordedViewportObservation = {
+          phase,
+          action,
+          input: hasNativeViewportInput ? 'windows-native' : 'playwright-diagnostic',
+          observation: 'unavailable',
+        }
+        let focusBegun = false
+        try {
+          if (diagnosticSetupError) throw diagnosticSetupError
+          if (!hasNativeViewportInput && action !== 'go-to')
+            throw new Error('A native scrollbar input channel is unavailable')
+          const focusStart = await focus!.begin()
+          focusBegun = true
+          const owner =
+            typeof focusStart.native === 'string' ? undefined : focusStart.native.before.owner
+          if (hasNativeViewportInput && !owner) throw new Error('Missing native viewport owner')
+          if (phase === 'settled') {
+            await live.page.keyboard.press(
+              process.platform === 'darwin' ? 'Meta+Home' : 'Control+Home',
+            )
+            const scroller = live.page.locator('.editor-scroll')
+            await scroller.hover({ timeout: 3000 })
+            await live.page.mouse.wheel(0, -100_000_000)
+            await expect
+              .poll(() => scroller.evaluate((element) => element.scrollTop), { timeout: 3000 })
+              .toBe(0)
+          }
+          const origin = owner ? await calibrateNativeViewport(live.page, owner) : undefined
+          const capture = (previousGeneration?: number) =>
+            observeViewport({
+              page: live.page,
+              phase,
+              action,
+              owner,
+              origin,
+              previousGeneration,
+              screenshot,
+            })
+          if (phase === 'settled') {
+            record = await capture()
+          } else {
+            const previousGeneration = await live.page.evaluate(
+              () => (window as ProbeWindow).__docsLayoutActivity!.snapshot().generation,
+            )
+            // Both the open and its observer must finish before another input or focus check.
+            const [opened, observed] = await Promise.allSettled([
+              live.open(),
+              (async () => {
+                const progressive = await live.page.waitForFunction(
+                  (previous) => {
+                    const activity = (window as ProbeWindow).__docsLayoutActivity?.snapshot()
+                    return (
+                      !!activity &&
+                      activity.generation > previous &&
+                      (activity.contentPending || activity.pending > 0 || activity.active > 0) &&
+                      !!window.document.querySelector(
+                        '.editor-scroll .ProseMirror[contenteditable="true"]',
+                      )
+                    )
+                  },
+                  previousGeneration,
+                  { polling: 30, timeout: 30_000 },
+                )
+                await progressive.dispose()
+                return capture(previousGeneration)
+              })(),
+            ])
+            if (observed.status === 'fulfilled') record = observed.value
+            else record.reason = String(observed.reason)
+            try {
+              if (opened.status === 'rejected') throw opened.reason
+              if (opened.value === false)
+                throw new Error('Viewport diagnostic reopen returned false')
+              await waitForLayout(
+                live.page,
+                savedLayoutOracle,
+                180_000,
+                previousGeneration,
+                now(),
+                savedMainStory.textRuns,
+              )
+            } catch (error) {
+              diagnosticSetupError = error
+              throw error
+            }
+          }
+        } catch (error) {
+          record.reason = [record.reason, String(error)].filter(Boolean).join('\n')
+          if (record.observation === 'captured') record.observation = 'failed'
+        } finally {
+          viewportObservations.push(record)
+          if (record.reason?.includes('Windows rejected benchmark input release'))
+            diagnosticSetupError = new Error(
+              'Native input release failed; no later gestures were sent',
+            )
+          if (focusBegun) {
+            try {
+              await focus!.end()
+            } catch (error) {
+              record.reason = [record.reason, String(error)].filter(Boolean).join('\n')
+              if (record.observation === 'captured') record.observation = 'failed'
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    errors.push(String(error))
+    if (runs[currentScenario]) runs[currentScenario].push({ ok: false, error: String(error) })
+    if (session) {
+      try {
+        errors.push(...(await captureFailureEvidence(session.page, root, currentScenario, error)))
+        if (!platformFonts) {
+          try {
+            const fonts = await withDeadline(
+              collectPlatformFonts(session.page),
+              30_000,
+              'post-failure platform fonts',
+            )
+            await writeFile(
+              join(root, 'failure-platform-fonts.json'),
+              JSON.stringify(
+                { phase: 'diagnostic only; complete-document gate failed', ...fonts },
+                null,
+                2,
+              ),
+            )
+          } catch (fontError) {
+            errors.push(`Post-failure platform-font evidence unavailable: ${String(fontError)}`)
+          }
+        }
+      } catch (diagnostic) {
+        errors.push(`Failure context unavailable: ${String(diagnostic)}`)
+      }
+    }
+    throw error
+  } finally {
+    for (const screenshot of pendingScreenshots) {
+      try {
+        await writeFile(screenshot.path, screenshot.image)
+      } catch (error) {
+        errors.push(`First-visible evidence persistence failed: ${String(error)}`)
+      }
+    }
+    try {
+      await session?.close()
+    } catch (error) {
+      errors.push(`Cleanup failed: ${String(error)}`)
+    }
+    const summaries = Object.fromEntries(
+      Object.entries(runs).map(([name, observations]) => [
+        name,
+        summarizeScenario(observations, requirements[name]),
+      ]),
+    )
+    const viewport = summarizeViewportEvidence(viewportObservations)
+    const existingScenariosStatus =
+      existingCorrectnessVerified &&
+      Object.values(summaries).every((summary) => summary.status === 'complete')
+        ? 'complete'
+        : 'incomplete'
+    const report = {
+      metadata,
+      condition: condition
+        ? { ...condition, nativeImeProfile: nativeImeCondition ?? 'not-executed' }
+        : undefined,
+      correctness,
+      acceptance: {
+        scope: corePilot
+          ? 'Qt core smoke observes opens, edits and wheel scrolling; see the omitted scenarios in details'
+          : 'automated scenario sampling only; ticket acceptance requires the reviewed three-host A/A evidence',
+        nativeOsIme: nativeImeAcceptance,
+        viewport,
+        nativeOfficeComparison: 'not measured',
+      },
+      mainThreadBlocking: {
+        scope:
+          'ordinary keyboard/CDP/wheel intervals including automation, screenshots and lightweight pending-work polling; native OS phase recorded separately; full structural validation excluded; no product-only attribution',
+        maxMs: blockingTasks.length ? Math.max(...blockingTasks) : 0,
+        over50ms: blockingTasks.filter((value) => value > 50).length,
+        nativeReference: 'not measured',
+      },
+      status:
+        existingScenariosStatus !== 'complete' ||
+        errors.length ||
+        Object.values(viewport.scenarios).some(
+          (scenario) => scenario.formalSamples < scenario.required,
+        )
+          ? 'incomplete'
+          : 'complete',
+      existingScenariosStatus,
+      summaries,
+      observations: runs,
+      viewportObservations,
+      details,
+      errors,
+    }
+    await writeFile(join(root, 'results.json'), JSON.stringify(report, null, 2))
+    if (process.env.FORAOFFICE_PERF_BEFORE && existingScenariosStatus === 'complete') {
+      const before = JSON.parse(await readFile(process.env.FORAOFFICE_PERF_BEFORE, 'utf8'))
+      await writeFile(
+        join(root, 'comparison.json'),
+        JSON.stringify(
+          {
+            before: before.metadata,
+            after: metadata,
+            ...compareDiagnosticPerformanceReports(before, report),
+            interpretation:
+              'Signed changes only; compare A/A noise and correctness before judging improvement or regression.',
+          },
+          null,
+          2,
+        ),
+      )
+    }
+    console.log(`Docs performance evidence: ${root}`)
+    formalEvidenceIncomplete =
+      report.status === 'incomplete' && (!smoke || !!process.env.FORAOFFICE_PERF_BEFORE)
+  }
+  if (formalEvidenceIncomplete)
+    throw new Error('Formal performance evidence is incomplete; see results.json')
+})

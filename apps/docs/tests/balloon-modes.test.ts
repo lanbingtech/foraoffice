@@ -2,7 +2,7 @@
  * Show Markup → Balloons: which annotations the margin layer builds and which
  * inline widgets the editor shows in each of Word's three modes.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Editor } from '@tiptap/core'
 import type { CommentInfo } from '@genoffice/docx-engine'
 import { editorExtensions } from '../src/renderer/editor/extensions'
@@ -87,6 +87,22 @@ describe('Show Markup → Balloons', () => {
     revisionDisplayState.balloonsActive = false
     inlineCommentState.tags = new Map()
     localStorage.clear()
+  })
+
+  it('clears obsolete markup without reading a paper rectangle when nothing is anchored', () => {
+    const wrap = document.createElement('div')
+    wrap.className = 'page-wrap has-markup-area'
+    wrap.innerHTML = '<div class="page-margin-annotations"></div><div class="doc-page">Body</div>'
+    const pm = wrap.lastElementChild as HTMLElement
+    const wrapRead = vi.spyOn(wrap, 'getBoundingClientRect')
+    const paperRead = vi.spyOn(pm, 'getBoundingClientRect')
+
+    syncMarginAnnotations(wrap, pm, [], 1)
+
+    expect(wrapRead).not.toHaveBeenCalled()
+    expect(paperRead).not.toHaveBeenCalled()
+    expect(wrap.querySelector('.page-margin-annotations')).toBeNull()
+    expect(wrap.classList.contains('has-markup-area')).toBe(false)
   })
 
   it('Show Revisions in Balloons: Deleted + Formatted + comment balloons, deletion marker inline', () => {

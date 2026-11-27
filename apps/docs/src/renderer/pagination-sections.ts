@@ -622,18 +622,6 @@ export function sectionPageStartSpecs(
   return [...openers].map((el) => ({ el, dx: 0, dy: 0, sectionPageStart: true }))
 }
 
-/** edge-triggered: the pass whose wrap widths or section-start clears differ
- *  from the last pass's follows up once with them in the DOM */
-export function wrapWidthSig(specs: ColumnBlockPlacement[]): string {
-  return specs
-    .map((s) =>
-      s.sectionPageStart
-        ? `clear:${s.el.dataset.idx ?? '?'}`
-        : `${Math.round(s.widthPx ?? -1)}:${Math.round(s.contentWPx ?? -1)}`,
-    )
-    .join(',')
-}
-
 /**
  * Per-block docGrid pitch for documents whose sections disagree on the typed
  * line grid (mixed pitches, or typed + untyped): each block carries its own
@@ -979,6 +967,7 @@ export function liveSectionsForDocument(
   sections: SectionInfo[],
   doc: ProseMirrorNode,
   trackedDeleted?: Set<number>,
+  isUnmounted?: (index: number) => boolean,
 ): SectionInfo[] {
   const present: Array<{ docxIndex: number }> = []
   const removed = new Set(trackedDeleted)
@@ -996,7 +985,10 @@ export function liveSectionsForDocument(
     present.push({ docxIndex: index })
     if (node.attrs.sectionBoundary === false) removed.add(index)
   })
-  return liveSections(sections, present as BlockBox[], undefined, removed, pending)
+  const awaiting = isUnmounted
+    ? new Set(sections.filter((s) => isUnmounted(s.lastBlockIndex)).map((s) => s.lastBlockIndex))
+    : undefined
+  return liveSections(sections, present as BlockBox[], awaiting, removed, pending)
 }
 
 /** Match a derived live section to its authoritative entry, including merged originals. */

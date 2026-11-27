@@ -30,7 +30,7 @@ import type { EditorView } from '@tiptap/pm/view'
 import type { Mark as PmMark, Node as PmNode } from '@tiptap/pm/model'
 import { getLang, t } from '../i18n/locale'
 import { collectRevisions } from './revisions'
-import { absoluteDate, authorInitials, authorInk } from './comment-card'
+import { absoluteDate, authorInitials, authorInk, showCommentAnchors } from './comment-card'
 import { balloonRevKinds, currentBalloonMode } from './revision-view'
 import { trackChangesOptionsState } from './track-changes-options'
 import { commentEndpoints } from './comment-endpoints'
@@ -114,17 +114,8 @@ function makeBalloonIcon(c: CommentInfo, on: boolean, onJump: () => void): HTMLE
   return btn
 }
 
-function flashEls(targets: HTMLElement[]): void {
-  targets[0]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  for (const t of targets) {
-    t.classList.remove('doc-comment-flash')
-    void t.offsetWidth
-    t.classList.add('doc-comment-flash')
-  }
-}
-
 function flashAnchors(pm: HTMLElement, id: string): void {
-  flashEls(
+  showCommentAnchors(
     [...pm.querySelectorAll<HTMLElement>('.doc-comment')].filter((s) =>
       (s.dataset.commentIds ?? '').split(' ').includes(id),
     ),
@@ -763,6 +754,10 @@ export interface AnchorBlock {
   originalXml?: string | null
 }
 
+export function hasRevisionAnchors(block: HTMLElement): boolean {
+  return block.matches(REV_SELECTOR) || block.querySelector(REV_SELECTOR) !== null
+}
+
 export function syncMarginAnnotations(
   wrap: HTMLElement,
   pm: HTMLElement,
@@ -775,8 +770,12 @@ export function syncMarginAnnotations(
   firstPage?: { left: number; width: number },
 ): void {
   const f = zoomFactor
-  const wrapRect = wrap.getBoundingClientRect()
-  const pmRect = pm.getBoundingClientRect()
+  let initial: { wrapRect: DOMRect; pmRect: DOMRect } | undefined
+  const initialGeometry = () =>
+    (initial ??= {
+      wrapRect: wrap.getBoundingClientRect(),
+      pmRect: pm.getBoundingClientRect(),
+    })
   const simple = !!wrap.closest('.rev-display-simple')
   const opts = trackChangesOptionsState.current
   const balloons = currentBalloonMode(wrap)
@@ -802,18 +801,23 @@ export function syncMarginAnnotations(
         }
       }
       for (const r of el.getClientRects()) {
-        if (r.height > 0)
+        if (r.height > 0) {
+          const { wrapRect } = initialGeometry()
           segs.push({ top: (r.top - wrapRect.top) / f, bottom: (r.bottom - wrapRect.top) / f, pos })
+        }
       }
     }
   }
   // one bubble per open top-level thread that has an anchor range in the body
+  const threads = inline ? [] : comments.filter((comment) => !comment.parentId && !comment.done)
   const anchorOf = new Map<string, DOMRect>()
-  for (const span of pm.querySelectorAll<HTMLElement>('.doc-comment')) {
-    const rect = [...span.getClientRects()].filter((r) => r.height > 0).at(-1)
-    if (!rect) continue
-    for (const id of (span.dataset.commentIds ?? '').split(' ')) {
-      if (id) anchorOf.set(id, rect)
+  if (threads.length) {
+    for (const span of pm.querySelectorAll<HTMLElement>('.doc-comment')) {
+      const rect = [...span.getClientRects()].filter((r) => r.height > 0).at(-1)
+      if (!rect) continue
+      for (const id of (span.dataset.commentIds ?? '').split(' ')) {
+        if (id) anchorOf.set(id, rect)
+      }
     }
   }
   type Placed = {
@@ -833,15 +837,18 @@ export function syncMarginAnnotations(
     onCommentDelete: handlers?.onCommentDelete,
     onCommentCollapse: handlers?.onCommentCollapse,
   }
-  const endpoints = view ? commentEndpoints(view, blocks) : new Map<string, number>()
+  const endpoints = view && threads.length ? commentEndpoints(view, blocks) : undefined
   const localThread = (
     c: CommentInfo,
     rect: DOMRect,
     blockAnchor: HTMLElement | null,
     textAnchor = blockAnchor === null,
   ) => {
+    const { wrapRect } = initialGeometry()
     // block-anchored threads have no .doc-comment span: flash the block itself
-    const flash = blockAnchor ? () => flashEls([blockAnchor]) : () => flashAnchors(pm, c.id)
+    const flash = blockAnchor
+      ? () => showCommentAnchors([blockAnchor])
+      : () => flashAnchors(pm, c.id)
     const top = (rect.top - wrapRect.top) / f
     const selected = flags.focus === c.id || flags.popup === c.id
     icons.push({
@@ -877,9 +884,8 @@ export function syncMarginAnnotations(
       },
     })
   }
-  for (const c of comments) {
-    if (inline || c.parentId || c.done) continue
-    const endpoint = endpoints.get(c.id)
+  for (const c of threads) {
+    const endpoint = endpoints?.get(c.id)
     if (endpoint !== undefined && view) {
       const point = view.coordsAtPos(endpoint, -1)
       const anchor = view.domAtPos(endpoint, -1).node
@@ -915,7 +921,7 @@ export function syncMarginAnnotations(
     for (const r of collectRevisions(view.state.doc)) {
       if (r.kind !== 'rowDel' && r.kind !== 'cellDel') continue
       const p = anchorPointFor(view, pm, r.from)
-      if (p) segs.push(hiddenLineSeg(p, wrapRect, f, r.from))
+      if (p) segs.push(hiddenLineSeg(p, initialGeometry().wrapRect, f, r.from))
     }
   }
   if (view && (simple || revKinds.size > 0)) {
@@ -924,6 +930,7 @@ export function syncMarginAnnotations(
       if (!hiddenDel && !revKinds.has(g.kind)) continue
       const p = anchorPointFor(view, pm, g.from)
       if (!p) continue
+      const { wrapRect } = initialGeometry()
       if (hiddenDel) segs.push(hiddenLineSeg(p, wrapRect, f, g.from))
       if (simple || !revKinds.has(g.kind)) continue
       placed.push({
@@ -943,6 +950,7 @@ export function syncMarginAnnotations(
     clearMarginAnnotations(wrap)
     return
   }
+  const { wrapRect, pmRect } = initialGeometry()
 
   let layer = wrap.querySelector(':scope > .page-margin-annotations') as HTMLElement | null
   if (!layer) {

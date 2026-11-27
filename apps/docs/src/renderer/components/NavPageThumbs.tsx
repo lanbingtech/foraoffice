@@ -4,6 +4,7 @@ import { pagePaperEdges, pageReaderShadow, type PageCut } from '../pagination-cu
 import type { Editor } from '@tiptap/core'
 import { TextSelection } from '@tiptap/pm/state'
 import { useI18n } from '../i18n/locale'
+import type { ViewportPage } from '../viewport-page'
 
 /** page paper edges in unzoomed canvas px, measured from the live page gaps */
 export interface ThumbPage {
@@ -121,100 +122,124 @@ export function pageIndexAtY(pages: ThumbPage[], y: number): number {
   return idx
 }
 
+/** Group at snapshot time so a newly visible thumbnail never searches the whole canvas. */
+function blocksByPage(snap: ThumbSnapshot): ThumbBlock[][] {
+  const result = snap.pages.map((): ThumbBlock[] => [])
+  const pages = snap.pages.map((page, index) => ({ ...page, index })).sort((a, b) => a.top - b.top)
+  let end = -Infinity
+  const maxEnds = pages.map((page) => (end = Math.max(end, page.top + page.height)))
+  for (const block of snap.blocks) {
+    let lo = 0
+    let hi = pages.length
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (maxEnds[mid] <= block.top) lo = mid + 1
+      else hi = mid
+    }
+    const bottom = block.top + block.height
+    for (let i = lo; i < pages.length && pages[i].top < bottom; i++) {
+      const page = pages[i]
+      if (page.top + page.height > block.top) result[page.index].push(block)
+    }
+  }
+  return result
+}
+
 function Thumb({
   snap,
   index,
   scale,
-  active,
+  blocks,
   hit,
   onPick,
 }: {
   snap: ThumbSnapshot
   index: number
   scale: number
-  active: boolean
+  blocks: ThumbBlock[]
   hit: boolean
   onPick: (index: number) => void
 }) {
   const { t } = useI18n()
   const hostRef = useRef<HTMLButtonElement>(null)
-  const pageRef = useRef<HTMLDivElement>(null)
-  const [visible, setVisible] = useState(false)
+  const previewRef = useRef<HTMLDivElement | null>(null)
+  const drawRef = useRef<(root: HTMLDivElement) => void>(() => {})
+  const transformRef = useRef('')
   const page = snap.pages[index]
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    transformRef.current = `scale(${scale})`
+    if (previewRef.current) previewRef.current.style.transform = transformRef.current
+  }, [scale])
+  useLayoutEffect(() => {
+    const drawContents = (root: HTMLDivElement) => {
+      const owner = root.ownerDocument
+      root.style.cssText = snap.vars
+      root.style.width = `${snap.pageW}px`
+      root.style.height = `${page.height}px`
+      root.style.transform = transformRef.current
+      root.replaceChildren()
+      for (const b of blocks) {
+        const slot = owner.createElement('div')
+        slot.className = 'nav-thumb-slot'
+        slot.style.top = `${b.top - page.top}px`
+        slot.style.left = `${b.left}px`
+        slot.style.width = `${b.width}px`
+        const clone = b.el.cloneNode(true) as HTMLElement
+        // The slot includes the block's margins and transforms.
+        clone.style.margin = '0'
+        clone.style.transform = 'none'
+        clone.removeAttribute('contenteditable')
+        slot.appendChild(clone)
+        root.appendChild(slot)
+      }
+    }
+    drawRef.current = drawContents
+    if (previewRef.current) drawContents(previewRef.current)
+  }, [snap, page, blocks])
+  useLayoutEffect(() => {
     const host = hostRef.current
     if (!host) return
+    const owner = host.ownerDocument
+    const removePreview = () => {
+      previewRef.current?.remove()
+      previewRef.current = null
+    }
     const io = new IntersectionObserver(
-      (entries) => setVisible(entries.some((e) => e.isIntersecting)),
+      (entries) => {
+        if (!entries.at(-1)?.isIntersecting) {
+          removePreview()
+          return
+        }
+        if (previewRef.current) return
+        const root = owner.createElement('div')
+        root.className = 'nav-thumb-page doc-page ProseMirror'
+        root.setAttribute('aria-hidden', 'true')
+        drawRef.current(root)
+        host.prepend(root)
+        previewRef.current = root
+      },
       { root: host.closest('.nav-body'), rootMargin: '200px 0px' },
     )
     io.observe(host)
-    return () => io.disconnect()
-  }, [])
-
-  useLayoutEffect(() => {
-    const root = pageRef.current
-    if (!root || !visible) return
-    root.replaceChildren()
-    const bottom = page.top + page.height
-    for (const b of snap.blocks) {
-      if (b.top >= bottom || b.top + b.height <= page.top) continue
-      const slot = document.createElement('div')
-      slot.className = 'nav-thumb-slot'
-      slot.style.top = `${b.top - page.top}px`
-      slot.style.left = `${b.left}px`
-      slot.style.width = `${b.width}px`
-      const clone = b.el.cloneNode(true) as HTMLElement
-      // the slot already sits where the block's margins and transforms put it
-      clone.style.margin = '0'
-      clone.style.transform = 'none'
-      clone.removeAttribute('contenteditable')
-      slot.appendChild(clone)
-      root.appendChild(slot)
+    return () => {
+      io.disconnect()
+      removePreview()
     }
-    return () => root.replaceChildren()
-  }, [snap, page, visible])
-
-  useEffect(() => {
-    if (active) hostRef.current?.scrollIntoView({ block: 'nearest' })
-  }, [active])
+  }, [])
 
   return (
     <button
       ref={hostRef}
       type="button"
-      className={`nav-thumb${active ? ' on' : ''}${hit ? ' hit' : ''}`}
+      className={`nav-thumb${hit ? ' hit' : ''}`}
       style={{ width: snap.pageW * scale, height: page.height * scale }}
       aria-label={t('appNavPage', { n: index + 1 })}
-      aria-current={active ? 'page' : undefined}
       onClick={() => onPick(index)}
     >
-      {visible && (
-        <div
-          ref={pageRef}
-          className="nav-thumb-page doc-page ProseMirror"
-          style={{
-            width: snap.pageW,
-            height: page.height,
-            transform: `scale(${scale})`,
-            ...styleVars(snap.vars),
-          }}
-          aria-hidden
-        />
-      )}
       <span className="nav-thumb-num">{index + 1}</span>
     </button>
   )
-}
-
-function styleVars(vars: string): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const decl of vars.split(';')) {
-    const i = decl.indexOf(':')
-    if (i > 0) out[decl.slice(0, i).trim()] = decl.slice(i + 1).trim()
-  }
-  return out
 }
 
 export function NavPageThumbs({
@@ -222,7 +247,7 @@ export function NavPageThumbs({
   zoom,
   width,
   layoutVersion,
-  currentPage,
+  viewportPage,
   hitPositions,
   cuts,
 }: {
@@ -233,13 +258,14 @@ export function NavPageThumbs({
   layoutVersion: number
   /** the current pass's page cuts (page edges); the gap widgets are the fallback */
   cuts?: () => readonly PageCut[] | undefined
-  /** 1-based visible page under the viewport middle (status bar page) */
-  currentPage: number
+  viewportPage: ViewportPage
   /** search hit positions: when non-null the tab lists only pages with a hit */
   hitPositions: number[] | null
 }) {
   const { t } = useI18n()
   const [snap, setSnap] = useState<ThumbSnapshot | null>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  const activeButtonRef = useRef<Element | undefined>(undefined)
   // pagination lands after the document change: the page-wrap grows or shrinks with its gaps
   const [wrapHeight, setWrapHeight] = useState(0)
   useEffect(() => {
@@ -278,6 +304,39 @@ export function NavPageThumbs({
     return set
   }, [snap, hitPositions, editor, zoom])
 
+  const groupedBlocks = useMemo(() => (snap ? blocksByPage(snap) : []), [snap])
+  const indices = useMemo(
+    () => snap?.pages.map((_, i) => i).filter((i) => !hitPages || hitPages.has(i)) ?? [],
+    [snap, hitPages],
+  )
+  useLayoutEffect(() => {
+    const list = listRef.current
+    if (!list) {
+      activeButtonRef.current = undefined
+      return
+    }
+    const buttons = new Map(
+      Array.from(list.children, (button, index) => [indices[index] + 1, button] as const),
+    )
+    return viewportPage.observe(({ current }) => {
+      const next = buttons.get(current)
+      const previous = activeButtonRef.current
+      const changed = previous !== next
+      if (changed) {
+        previous?.classList.remove('on')
+        previous?.removeAttribute('aria-current')
+        activeButtonRef.current = next
+      }
+      if (!next) return
+      // React can update the search-hit class on a list refresh.
+      if (!next.classList.contains('on')) next.classList.add('on')
+      if (changed) {
+        next.setAttribute('aria-current', 'page')
+        next.scrollIntoView({ block: 'nearest' })
+      }
+    })
+  }, [indices, viewportPage])
+
   const pick = (index: number) => {
     if (!snap) return
     const view = editor.view
@@ -310,17 +369,16 @@ export function NavPageThumbs({
 
   if (!snap) return <div className="nav-empty">{t('appNavPagesPending')}</div>
   const scale = Math.max(0.05, Math.min(width - THUMB_GUTTER * 2, THUMB_MAX_W) / snap.pageW)
-  const indices = snap.pages.map((_, i) => i).filter((i) => !hitPages || hitPages.has(i))
   if (indices.length === 0) return <div className="nav-empty">{t('appNavNoResults')}</div>
   return (
-    <div className="nav-pages">
+    <div className="nav-pages" ref={listRef}>
       {indices.map((i) => (
         <Thumb
           key={i}
           snap={snap}
           index={i}
           scale={scale}
-          active={currentPage === i + 1}
+          blocks={groupedBlocks[i]}
           hit={!!hitPages?.has(i)}
           onPick={pick}
         />

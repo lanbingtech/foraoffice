@@ -392,20 +392,35 @@ function bulletInfo(text: string, level: NumberingLevel): ListMarkerInfo {
   return { text, symbolChar: toSymbolPua(level.lvlText), symbolFont: font }
 }
 
+/** Counter state after a prefix, reusable with the same numbering definitions. */
+export interface ListMarkerState {
+  readonly counters: ReadonlyMap<string, readonly number[]>
+  readonly overrideApplied: ReadonlySet<string>
+}
+
+const EMPTY_MARKER_STATE: ListMarkerState = { counters: new Map(), overrideApplied: new Set() }
+
 /**
- * Word numbering semantics: counters accumulate document-wide per abstractNum
- * (plain paragraphs in between don't break the sequence); when a level appears,
- * its deeper levels reset; startOverride applies the first time that numId uses
- * the level. Returns a marker array the same length as items; items without a
- * definition return null (CSS fallback handles them).
+ * Continue Word numbering after an optional prefix. Counters accumulate per
+ * abstractNum, a level resets its deeper levels, and startOverride applies
+ * the first time that numId uses its level. The input state remains reusable.
  */
-export function computeListMarkerInfos(
-  items: ListItemRef[],
-  defs: Map<string, NumberingDef>,
-): (ListMarkerInfo | null)[] {
-  const counters = new Map<string, number[]>()
-  const overrideApplied = new Set<string>()
-  return items.map((item) => {
+export function appendListMarkerInfos(
+  items: readonly ListItemRef[],
+  defs: ReadonlyMap<string, NumberingDef>,
+  previous: ListMarkerState = EMPTY_MARKER_STATE,
+): { markers: (ListMarkerInfo | null)[]; state: ListMarkerState } {
+  const changedCounters = new Map<string, number[]>()
+  let overrideApplied: Set<string> | undefined
+  const startingOverride = (def: NumberingDef, level: number, deleted: boolean | undefined) => {
+    const value = def.startOverrides[level]
+    if (value === undefined) return undefined
+    const key = `${def.numId}:${level}`
+    if ((overrideApplied ?? previous.overrideApplied).has(key)) return undefined
+    if (!deleted) (overrideApplied ??= new Set(previous.overrideApplied)).add(key)
+    return value
+  }
+  const markers = items.map((item) => {
     const def = item.numId !== null ? defs.get(item.numId) : undefined
     if (!def) return null
     const lvl = Math.max(0, item.ilvl)
@@ -431,28 +446,18 @@ export function computeListMarkerInfos(
       return bulletInfo(glyph, level)
     }
 
-    const live = counters.get(def.abstractNumId) ?? []
-    const c = item.deleted ? [...live] : live
-    if (!item.deleted) counters.set(def.abstractNumId, c)
-    const applied = item.deleted ? new Set(overrideApplied) : overrideApplied
+    const changed = changedCounters.get(def.abstractNumId)
+    const live = changed ?? previous.counters.get(def.abstractNumId) ?? []
+    const c = !item.deleted && changed ? changed : [...live]
+    if (!item.deleted && !changed) changedCounters.set(def.abstractNumId, c)
     // Word: an item at level L instantiates untouched shallower levels at
     // their start value, so a later explicit item there increments past it
     // ("1.1 Objetivos" before any level-0 item makes the first level-0 "2.")
     for (let a = 0; a < lvl; a++) {
       if (c[a] !== undefined) continue
-      const aKey = `${def.numId}:${a}`
-      if (def.startOverrides[a] !== undefined && !applied.has(aKey)) {
-        applied.add(aKey)
-        c[a] = def.startOverrides[a]
-      } else c[a] = def.levels[a]?.start ?? 1
+      c[a] = startingOverride(def, a, item.deleted) ?? def.levels[a]?.start ?? 1
     }
-    const overrideKey = `${def.numId}:${lvl}`
-    if (def.startOverrides[lvl] !== undefined && !applied.has(overrideKey)) {
-      applied.add(overrideKey)
-      c[lvl] = def.startOverrides[lvl]
-    } else {
-      c[lvl] = (c[lvl] ?? level.start - 1) + 1
-    }
+    c[lvl] = startingOverride(def, lvl, item.deleted) ?? (c[lvl] ?? level.start - 1) + 1
     c.length = lvl + 1
 
     const marker = level.lvlText.replace(/%(\d)/g, (_, d: string) => {
@@ -467,6 +472,26 @@ export function computeListMarkerInfos(
     // nothing) so renderer counter fallbacks don't kick in on the null
     return { text: marker, value: c[lvl] }
   })
+  if (changedCounters.size === 0) return { markers, state: previous }
+
+  let counters: ReadonlyMap<string, readonly number[]> = changedCounters
+  if (previous.counters.size > 0) {
+    const merged = new Map(previous.counters)
+    for (const [key, values] of changedCounters) merged.set(key, values)
+    counters = merged
+  }
+  return {
+    markers,
+    state: { counters, overrideApplied: overrideApplied ?? previous.overrideApplied },
+  }
+}
+
+/** One entry per item, with null for undefined numbering (the editor uses its CSS fallback). */
+export function computeListMarkerInfos(
+  items: ListItemRef[],
+  defs: Map<string, NumberingDef>,
+): (ListMarkerInfo | null)[] {
+  return appendListMarkerInfos(items, defs).markers
 }
 
 /** Per item: the counter value its own level shows (1 for bullets and unresolved items) */

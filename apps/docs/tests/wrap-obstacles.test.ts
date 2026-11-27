@@ -1,8 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { Editor } from '@tiptap/core'
+import { editorExtensions } from '../src/renderer/editor/extensions'
 import {
   bandGapRows,
   floatStacks,
   placeLine,
+  syncWrapObstacles,
   type FloatBox,
   type ObstacleRect,
 } from '../src/renderer/editor/wrap-obstacles'
@@ -16,6 +19,37 @@ const box = (left: number, width: number, top: number, height: number): Obstacle
   right: left + width + 12,
   top,
   bottom: top + height,
+})
+
+it('keeps pagination in the same measurement state when no wrap obstacles exist', () => {
+  const editor = new Editor({
+    element: document.createElement('div'),
+    extensions: editorExtensions,
+    content: '<p>Text on one page</p><p>Text on the next page</p>',
+  })
+  try {
+    const { dom } = editor.view
+    const pageLead = dom.children[1]
+    const rootRect = vi.spyOn(dom, 'getBoundingClientRect')
+    const pageRect = vi.spyOn(pageLead, 'getBoundingClientRect')
+    const headerObstacles = vi.fn(() => [])
+    expect(
+      syncWrapObstacles(
+        dom,
+        1,
+        editor.view,
+        undefined,
+        undefined,
+        new Map([[pageLead, 1]]),
+        headerObstacles,
+      ),
+    ).toBe(false)
+    expect(headerObstacles.mock.calls).toHaveLength(2)
+    expect(rootRect).not.toHaveBeenCalled()
+    expect(pageRect).not.toHaveBeenCalled()
+  } finally {
+    editor.destroy()
+  }
 })
 
 describe('placeLine (Word probe 2026-10-13)', () => {

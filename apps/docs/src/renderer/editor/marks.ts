@@ -1,5 +1,6 @@
 // Modified for ForaOffice: separate authored spacing from compatibility rendering.
 import { Extension, Mark, combineTransactionSteps, getChangedRanges } from '@tiptap/core'
+import { attributesRenderedManually } from './manual-html-attributes'
 import { runFaceDecls } from '../text-layout/run-faces'
 import type { Mark as PmMark } from '@tiptap/pm/model'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
@@ -614,7 +615,7 @@ function textStyleAttrsFromDom(el: HTMLElement): Record<string, unknown> | false
 export const TextStyleMark = Mark.create({
   name: 'docTextStyle',
   addAttributes() {
-    return {
+    return attributesRenderedManually({
       color: { default: null as string | null },
       sizeHalfPoints: { default: null as number | null },
       font: { default: null as string | null },
@@ -692,7 +693,7 @@ export const TextStyleMark = Mark.create({
       csItalic: { default: null as boolean | null, rendered: false },
       // JSON of the table-style run properties (convert.ts tableStyleRunAttr); display only
       tblRun: { default: null as string | null, rendered: false },
-    }
+    })
   },
   parseHTML() {
     return [

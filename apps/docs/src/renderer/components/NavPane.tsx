@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { useDismissablePopover } from '@genoffice/ui/editor'
 import type { PageCut } from '../pagination-cuts'
+import type { ViewportPage } from '../viewport-page'
 import type { Editor } from '@tiptap/core'
 import type { Node as PmNode } from '@tiptap/pm/model'
 import { TextSelection, type Transaction } from '@tiptap/pm/state'
@@ -136,7 +137,8 @@ export function NavPane({
   editor,
   doc,
   zoom,
-  pageInfo,
+  pageTotal,
+  viewportPage,
   onClose,
   cuts,
 }: {
@@ -144,7 +146,8 @@ export function NavPane({
   doc: PmNode
   /** canvas zoom factor (1 = 100%) */
   zoom: number
-  pageInfo: { current: number; total: number }
+  pageTotal: number
+  viewportPage: ViewportPage
   /** the current pass's page cuts for the thumbnails (page edges) */
   cuts?: () => readonly PageCut[] | undefined
   onClose: () => void
@@ -463,7 +466,7 @@ export function NavPane({
 
   // ---- resize ----
   const [layoutVersion, setLayoutVersion] = useState(0)
-  useEffect(() => setLayoutVersion((v) => v + 1), [doc, pageInfo.total])
+  useEffect(() => setLayoutVersion((v) => v + 1), [doc, pageTotal])
 
   const tabs: Array<{ id: NavTab; label: string }> = [
     { id: 'headings', label: t('appNavTabHeadings') },
@@ -605,7 +608,7 @@ export function NavPane({
             zoom={zoom}
             width={width}
             layoutVersion={layoutVersion}
-            currentPage={pageInfo.current}
+            viewportPage={viewportPage}
             cuts={cuts}
             hitPositions={hitPositions}
           />

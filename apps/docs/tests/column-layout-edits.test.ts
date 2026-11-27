@@ -48,6 +48,123 @@ function expectPageFrame(el: Element) {
 }
 
 describe('column and mixed-paper layout between an edit and the next pagination pass', () => {
+  it('retains inherited wrapping widths while changing only page placement', () => {
+    const editor = openEditor(['paragraph in a narrow section'])
+    const el = editor.view.dom.firstElementChild as HTMLElement
+    const observer = new MutationObserver(() => {})
+    observer.observe(el, { attributeFilter: ['style'], attributeOldValue: true })
+    try {
+      setColumnLayout(editor.view, [
+        {
+          el,
+          widthPx: contentWidth,
+          contentWPx: contentWidth,
+          marginLeftPx: 75.6,
+          marginRightPx: 75.6,
+          pageDx,
+          dx: 0,
+          dy: 16,
+        },
+      ])
+      const mutations = observer.takeRecords()
+      expect(mutations).toHaveLength(1)
+      expect(mutations[0].oldValue).toContain('--doc-content-w: 642.53px')
+      expect(el.style.getPropertyValue('--doc-content-w')).toBe('642.53px')
+      expect(el.style.getPropertyValue('--col-dy')).toBe('16px')
+    } finally {
+      observer.disconnect()
+    }
+  })
+
+  it('preserves authored grid opt-outs when a frame is added and cleared', () => {
+    const editor = openEditor(['paragraph with explicit grid opt-out'])
+    editor.view.dispatch(
+      editor.state.tr.setNodeMarkup(0, undefined, {
+        ...editor.state.doc.firstChild!.attrs,
+        snapToGrid: false,
+      }),
+    )
+    const el = editor.view.dom.firstElementChild as HTMLElement
+    expect(el.classList.contains('doc-nosnap')).toBe(true)
+    setColumnLayout(editor.view, [{ el, contentWPx: contentWidth, dx: 0, dy: 8 }])
+    expect(el.style.getPropertyValue('--doc-grid-pitch')).toBe('0.0001px')
+    setColumnLayout(editor.view, [])
+    expect(el.style.getPropertyValue('--doc-grid-pitch')).toBe('0.0001px')
+    expect(el.style.getPropertyValue('--doc-content-w')).toBe('')
+  })
+
+  it('reapplies a frame when ProseMirror redraws the block without a document edit', () => {
+    const editor = openEditor(['paragraph to redraw'])
+    const before = editor.view.dom.firstElementChild
+    const view = editor.view as unknown as {
+      docView: { dirty: number; children: Array<{ dirty: number }> }
+    }
+    const state = editor.state
+    // Match a node marked dirty by the DOM observer before a same-state redraw.
+    view.docView.dirty = 1
+    view.docView.children[0].dirty = 3
+    editor.view.updateState(state)
+    expect(editor.view.dom.firstElementChild).not.toBe(before)
+    expectPageFrame(editor.view.dom.firstElementChild!)
+  })
+
+  it('publishes and clears a frame for a floating picture’s anchor-line widget', () => {
+    const editor = openEditor()
+    editor.commands.setContent({
+      type: 'doc',
+      content: [
+        {
+          type: 'docProtected',
+          attrs: { docxIndex: 0, imageWrap: 'square-left', anchorLine: { indentLeft: 100 } },
+        },
+        { type: 'docParagraph', content: [{ type: 'text', text: 'text below the picture' }] },
+      ],
+    })
+    const el = editor.view.dom.querySelector<HTMLElement>('.doc-anchor-line')!
+    expect(el?.parentElement).toBe(editor.view.dom)
+    setColumnLayout(editor.view, [{ el, widthPx: 320, dx: 40, dy: 0 }])
+    expect(el.style.getPropertyValue('--col-w')).toBe('320px')
+    expect(el.classList.contains('doc-col-block')).toBe(true)
+    setColumnLayout(editor.view, [])
+    expect(el.style.getPropertyValue('--col-w')).toBe('')
+    expect(el.classList.contains('doc-col-block')).toBe(false)
+  })
+
+  it('reports the blocks whose text geometry actually changed', () => {
+    const editor = openEditor()
+    const [first, second] = Array.from(editor.view.dom.children) as HTMLElement[]
+    const spec = (el: HTMLElement, widthPx = contentWidth) => ({
+      el,
+      widthPx,
+      contentWPx: contentWidth,
+      marginLeftPx: 75.6,
+      marginRightPx: 75.6,
+      pageDx,
+      dx: 0,
+      dy: 0,
+    })
+
+    expect(setColumnLayout(editor.view, [spec(first), { ...spec(second), dy: 16 }])).toEqual(
+      new Set(),
+    )
+    expect(setColumnLayout(editor.view, [spec(first), spec(second, contentWidth + 0.25)])).toEqual(
+      new Set([second]),
+    )
+    expect(
+      setColumnLayout(editor.view, [
+        spec(first),
+        { ...spec(second, contentWidth + 0.25), charSpacePt: -0.25 },
+      ]),
+    ).toEqual(new Set([second]))
+    expect(
+      setColumnLayout(editor.view, [
+        spec(first),
+        { ...spec(second, contentWidth + 0.25), charSpacePt: -0.25, sectionPageStart: true },
+      ]),
+    ).toEqual(new Set([second]))
+    expect(setColumnLayout(editor.view, [spec(first)])).toEqual(new Set([second]))
+  })
+
   it.each([0, 5, 15])('keeps both paragraph frames when Enter splits at offset %i', (offset) => {
     const editor = openEditor()
     for (const el of Array.from(editor.view.dom.children)) expectPageFrame(el)

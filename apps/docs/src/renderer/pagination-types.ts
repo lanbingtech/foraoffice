@@ -235,6 +235,9 @@ export interface RowPlan {
 export interface TableRowBox {
   /** row height (px) */
   height: number
+  /** Ink of cells started in earlier rows whose authored rowspan covers this
+   * row; offsets are relative to this row's top. Sampled once at the owner. */
+  precedingSpanInk?: Array<[number, number]>
   /** cantSplit: the row cannot be broken internally (whole row stays on one page) */
   cantSplit?: boolean
   /** tblHeader: the row is a header row, repeated at the top of the next page after a break */
@@ -289,12 +292,19 @@ export interface RowCellBox {
   alignFrac: number
 }
 
+interface RepeatedTableHeader {
+  /** Index of the source table in the same pagination snapshot as the cut. */
+  block: number
+  top: number
+  height: number
+}
+
 /** One column of a multi-column page: a content range in the continuous flow (in-column break semantics match pages) */
 export interface PageColumn {
   start: number
   end: number
   /** table continued into the column: header-row range repeated at column top (virtual coordinates) */
-  repeatHeader?: { top: number; height: number }
+  repeatHeader?: RepeatedTableHeader
   /** spilled leading of the column's last line (px), see PageSlice.leadSpill */
   leadSpill?: number
 }
@@ -320,9 +330,9 @@ export interface PageSlice {
   /**
    * tblHeader repetition: this page starts mid-table, so the source table's header
    * rows must render first. top/height is the header rows' range in the continuous
-   * flow (virtual coordinates); the preview clones and crops accordingly.
+   * flow (virtual coordinates), and block identifies the table to repeat.
    */
-  repeatHeader?: { top: number; height: number }
+  repeatHeader?: RepeatedTableHeader
   /** px the page's clip window opens above `start` (a lifted block hanging
    *  into the top margin, capped at the margin) */
   liftTop?: number

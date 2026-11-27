@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 import { paraFrameCss, textFlowCss } from '../src/renderer/editor/para-frame'
+import { hasCoupledWrapGeometry } from '../src/renderer/editor/settled-measure'
 
 function paraEl(attrs: Record<string, unknown>): HTMLParagraphElement {
   const editor = new Editor({
@@ -24,6 +25,17 @@ function paraEl(attrs: Record<string, unknown>): HTMLParagraphElement {
 }
 
 describe('w:framePr paragraph frames', () => {
+  it('recognizes a height-only frame floating alongside adjacent paragraphs', () => {
+    const root = document.createElement('div')
+    const frame = { hTwips: 600, floatSide: 'left', hSpaceTwips: 120 }
+    const p = paraEl({ frameBox: JSON.stringify(frame) })
+    root.append(p)
+
+    expect(p.style.cssFloat).toBe('left')
+    expect(p.classList.contains('doc-para-frame-float')).toBe(false)
+    expect(hasCoupledWrapGeometry({ dom: root })).toBe(true)
+  })
+
   it('a page-anchored wrap-around frame floats at its x minus the section margin', () => {
     const frame = {
       wTwips: 2851,

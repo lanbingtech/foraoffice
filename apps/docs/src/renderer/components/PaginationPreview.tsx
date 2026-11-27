@@ -91,6 +91,8 @@ import {
   wordArtSvgMarkup,
 } from '../editor/hf-dom'
 import { HeaderFooterArea } from './HeaderFooterArea'
+import { createPrintSourceDiagnostic } from '../print-source-diagnostic'
+import { disposeOwnedDiagnostic } from '../document-story-diagnostic'
 
 const twipsToPx = (twips: number) => (twips / 1440) * 96
 
@@ -515,13 +517,11 @@ export interface CloneChild {
  */
 const CLONE_PRUNE_BUDGET = 150_000
 /**
- * Blocks under-count a document whose blocks are individually huge (page-long
- * tables, heavily run-split paragraphs): a 112-page report of 869 blocks but
- * 87k elements stayed under the block budget, so the preview carried 9.7 M
- * nodes and each chunked printToPDF took minutes. Elements are what Blink
- * pays for, so they get their own budget.
+ * Blocks under-count documents with densely nested content such as tables.
+ * In a 39-page Qt print probe (227,214 estimated cloned elements), pruning
+ * reduced the preview DOM from 343,496 to 65,849 elements.
  */
-const CLONE_PRUNE_ELEMENT_BUDGET = 2_000_000
+const CLONE_PRUNE_ELEMENT_BUDGET = 200_000
 /** window slack around a page (px): keeps neighbours whose floats/overflow bleed into the page */
 const CLONE_PRUNE_PAD = 2000
 
@@ -541,13 +541,31 @@ function cloneBlockHtml(el: HTMLElement): string {
     return el.outerHTML
   }
   const tmp = el.cloneNode(true) as HTMLElement
+  stripPreviewTableWidgets(tmp)
+  return tmp.outerHTML
+}
+
+function stripPreviewTableWidgets(tmp: HTMLElement): void {
   for (const tr of Array.from(tmp.querySelectorAll('tr.page-gap, tr.page-repeat-header'))) {
     tr.remove()
   }
   for (const td of Array.from(tmp.querySelectorAll('[data-base-rowspan]'))) {
     td.setAttribute('rowspan', td.getAttribute('data-base-rowspan')!)
   }
-  return tmp.outerHTML
+}
+
+/** Repeat the source table's leading header rows at the start of the cut. */
+export function repeatHeaderCloneHtml(table: HTMLElement): string {
+  const clone = table.cloneNode(true) as HTMLElement
+  stripPreviewTableWidgets(clone)
+  clone.style.marginTop = '0px'
+  let leadingHeader = true
+  for (const row of outerTableRows(clone)) {
+    leadingHeader &&= row.dataset.repeatHeader === '1'
+    // Keep body rows in layout so autofit and rowspan retain their column geometry.
+    if (!leadingHeader) row.style.visibility = 'hidden'
+  }
+  return clone.outerHTML
 }
 
 /** pruned clone for one page window: blocks intersecting [from-pad, to+pad] verbatim, pruned runs as spacers */
@@ -1053,6 +1071,7 @@ export function PaginationPreview({
   const [html, setHtml] = useState('')
   /** non-null = pruned-clone mode (large documents): per-page windows instead of full clones */
   const [cloneKids, setCloneKids] = useState<CloneChild[] | null>(null)
+  const [repeatHtml, setRepeatHtml] = useState(() => new Map<number, string>())
   const [cellPageBoxes, setCellPageBoxes] = useState<CellPageBox[]>([])
   const [relXPictures, setRelXPictures] = useState<PageRelXPicture[]>([])
   /** Live section list: a section whose break block was deleted (unsaved) merges into the next, matching the canvas */
@@ -1073,6 +1092,16 @@ export function PaginationPreview({
       .contentWidth
 
   useEffect(() => {
+    let sourceCells: ReturnType<typeof createPrintSourceDiagnostic> | undefined
+    const releaseSources = () => {
+      if (sourceCells)
+        disposeOwnedDiagnostic(
+          (window as unknown as Record<string, Record<string, unknown>>).__previewDebug,
+          'sourceCells',
+          sourceCells,
+          sourceCells.dispose,
+        )
+    }
     const pm = document.querySelector('.editor-scroll .ProseMirror') as HTMLElement | null
     if (!pm) return
     // before the gaps go: a pending canvas pass runs now and rebuilds its
@@ -1433,8 +1462,20 @@ export function PaginationPreview({
       )
       setLeakCss(leadLeakCss(blocks, computed))
       setSlices(computed)
+      const repeats = new Map<number, string>()
+      for (const { repeatHeader, regions } of computed) {
+        const windows = regions?.flatMap((region) => region.columns) ?? [{ repeatHeader }]
+        for (const surface of windows) {
+          const index = surface.repeatHeader?.block
+          if (index === undefined || repeats.has(index)) continue
+          const table = blocks[index]?.el
+          if (table?.matches('table.doc-table')) repeats.set(index, repeatHeaderCloneHtml(table))
+        }
+      }
+      setRepeatHtml(repeats)
       // read-only snapshot for e2e: the cuts the sheets print and the shadow's verdict
       ;(window as unknown as Record<string, unknown>).__previewDebug = {
+        sourceCells: (sourceCells = createPrintSourceDiagnostic(documentView, blocks, rowSplits)),
         slices: computed,
         shadowed,
         previewCutMismatch: previewCutDiag.length,
@@ -1517,10 +1558,14 @@ export function PaginationPreview({
         setCloneKids(null)
         setHtml(Array.from(pm.children, (c) => cloneBlockHtml(c as HTMLElement)).join(''))
       }
+    } catch (error) {
+      releaseSources()
+      throw error
     } finally {
       if (measureNeutralize) pm.classList.remove('measuring-columns')
       if (zoomHost) zoomHost.style.zoom = savedZoom
     }
+    return releaseSources
     // snapshot: measure once on open; deps intentionally empty
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -1881,21 +1926,12 @@ export function PaginationPreview({
                   >
                     <div
                       className="pv-offset"
-                      style={{
-                        marginTop: -(slice.repeatHeader.top - seamLift),
-                        width: wrapWOf(slice.section),
-                      }}
+                      style={{ marginTop: seamLift, width: wrapWOf(slice.section) }}
                     >
                       <div
                         className="doc-page pv-content"
                         dangerouslySetInnerHTML={{
-                          __html: cloneKids
-                            ? prunedCloneHtml(
-                                cloneKids,
-                                slice.repeatHeader.top,
-                                slice.repeatHeader.top + slice.repeatHeader.height,
-                              )
-                            : html,
+                          __html: repeatHtml.get(slice.repeatHeader.block) ?? '',
                         }}
                       />
                     </div>
@@ -1959,21 +1995,12 @@ export function PaginationPreview({
                                 >
                                   <div
                                     className="pv-offset"
-                                    style={{
-                                      marginTop: -col.repeatHeader.top,
-                                      width: wrapWOf(region.section),
-                                    }}
+                                    style={{ width: wrapWOf(region.section) }}
                                   >
                                     <div
                                       className="doc-page pv-content"
                                       dangerouslySetInnerHTML={{
-                                        __html: cloneKids
-                                          ? prunedCloneHtml(
-                                              cloneKids,
-                                              col.repeatHeader.top,
-                                              col.repeatHeader.top + col.repeatHeader.height,
-                                            )
-                                          : html,
+                                        __html: repeatHtml.get(col.repeatHeader.block) ?? '',
                                       }}
                                     />
                                   </div>

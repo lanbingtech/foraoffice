@@ -25,3 +25,25 @@ export function absoluteDate(iso?: string | null): string {
   const d = new Date(iso)
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
 }
+
+const anchorFlashes = new WeakMap<HTMLElement, Animation>()
+
+/** Paint the navigation cue without editing the ProseMirror content DOM. */
+export function showCommentAnchors(targets: readonly HTMLElement[]): void {
+  targets[0]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  const easing = 'cubic-bezier(0, 0, 0.2, 1)'
+  for (const target of targets) {
+    anchorFlashes.get(target)?.cancel()
+    anchorFlashes.set(
+      target,
+      target.animate(
+        [
+          { background: 'var(--docs-paper-comment-flash)', offset: 0, easing },
+          { background: 'var(--docs-paper-comment-flash)', offset: 0.4, easing },
+          { background: 'var(--docs-paper-comment-bg)', offset: 1 },
+        ],
+        { duration: 350 },
+      ),
+    )
+  }
+}

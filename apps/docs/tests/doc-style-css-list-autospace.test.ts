@@ -8,7 +8,11 @@
 import { describe, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'
 import type { NumberingDef, ParsedDocFull } from '@genoffice/docx-engine'
-import { docStyleCss } from '../src/renderer/doc-style-css'
+import {
+  activateRenderedStyles,
+  activeDocStyleCss,
+  docStyleCss,
+} from '../src/renderer/doc-style-css'
 import { editorExtensions } from '../src/renderer/editor/extensions'
 
 ;(globalThis as { CSS?: unknown }).CSS ??= { escape: (s: string) => s }
@@ -89,6 +93,34 @@ describe('docStyleCss list auto-spacing collapse', () => {
     )
     expect(css).not.toContain('.doc-li[data-style="ListParagraph"]:has(+ .doc-li)')
   })
+
+  it('emits styled list adjacency once when many auto-spacing styles share the list definitions', () => {
+    const lists = Object.fromEntries(
+      Array.from({ length: 180 }, (_, i) => [String(i), `definition${i}`]),
+    )
+    const styles = new Map(
+      Array.from({ length: 90 }, (_, i) => {
+        const styleId = `ListStyle${i}`
+        return [
+          styleId,
+          {
+            styleId,
+            name: styleId,
+            type: 'paragraph',
+            display: { spaceBeforeAuto: true, spaceAfterAuto: true },
+          },
+        ]
+      }),
+    )
+    const css = docStyleCss(parsedWith({}, lists, styles))
+    // The style selector belongs to the predicate once per relationship.
+    const styleAdjacency = css
+      .split('\n')
+      .filter((rule) => rule.includes('data-num=') && rule.includes('data-style="ListStyle0"'))
+    expect(styleAdjacency).toHaveLength(4)
+    expect(styleAdjacency.every((rule) => rule.startsWith('.doc-page .doc-li:is('))).toBe(true)
+    expect(css.length).toBeLessThan(500_000)
+  })
 })
 
 describe('docListItem renderHTML', () => {
@@ -113,4 +145,42 @@ describe('docListItem renderHTML', () => {
       /<div[^>]*class="[^"]*doc-li[^"]*"[^>]*data-num="12"|data-num="12"[^>]*class="[^"]*doc-li/,
     )
   })
+})
+
+it('publishes styles from every decoded story and activates additional styles as nodes render', () => {
+  const names = ['Body', 'TableCell', 'Header', 'Note', 'FieldRun', 'TextBox', 'Applied', 'Unused']
+  const styles = new Map(
+    names.map((styleId) => [
+      styleId,
+      {
+        styleId,
+        name: styleId,
+        type: 'paragraph',
+        display: { spaceAfterAuto: true },
+      },
+    ]),
+  )
+  const parsed = {
+    ...parsedWith({}, {}, styles),
+    blocks: [
+      { styleId: 'Body', table: { rows: [[{ richParas: [{ styleId: 'TableCell' }] }]] } },
+      { fieldDisplay: { runStyleId: 'FieldRun' }, strayStyleId: 'TextBox' },
+    ],
+    hfParts: { rId1: { paras: [{ styleId: 'Header' }] } },
+    footnotes: [{ paras: [{ styleId: 'Note' }] }],
+  } as unknown as ParsedDocFull
+  const initial = activeDocStyleCss(parsed)
+  for (const style of names.slice(0, -2)) expect(initial).toContain(`[data-style="${style}"]`)
+  expect(initial).not.toContain('[data-style="Applied"]')
+  expect(initial).not.toContain('[data-style="Unused"]')
+
+  const wrapper = document.createElement('div')
+  const paragraph = document.createElement('p')
+  paragraph.dataset.style = 'Applied'
+  wrapper.appendChild(paragraph)
+  expect(activateRenderedStyles(parsed, [wrapper])).toBe(true)
+  expect(activateRenderedStyles(parsed, [paragraph])).toBe(false)
+  expect(activeDocStyleCss(parsed)).toContain('[data-style="Applied"]')
+  expect(activeDocStyleCss(parsed)).not.toContain('[data-style="Unused"]')
+  expect(activeDocStyleCss({ ...parsed })).not.toContain('[data-style="Applied"]')
 })
