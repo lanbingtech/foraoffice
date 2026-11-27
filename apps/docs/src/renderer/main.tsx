@@ -65,11 +65,19 @@ async function bootstrap(): Promise<void> {
     .then(setAuthorName)
     .catch(() => {})
   getOptionalDocsHost()?.onAuthorNameChanged?.(setAuthorName)
+  const projectedBody = import.meta.env.VITE_DOCS_PAGED_BODY === '1'
+  // Headless output needs the complete document. Resolve its intent before opening the file.
+  const headlessExport = projectedBody
+    ? await getOptionalDocsHost()
+        ?.consumeHeadlessExport()
+        .catch(() => undefined)
+    : undefined
   createRoot(document.getElementById('root')!).render(
     <LocaleProvider initial={lang}>
       <App
         agentUi={nativeDocsAgentUi}
-        projectedBody={import.meta.env.VITE_DOCS_PAGED_BODY === '1'}
+        projectedBody={projectedBody && headlessExport === null}
+        headlessExport={headlessExport}
       />
     </LocaleProvider>,
   )

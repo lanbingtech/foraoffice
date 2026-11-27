@@ -126,6 +126,7 @@ import {
   type CommentImage,
 } from '@genoffice/docx-engine'
 import type { AiDocContent, MenuCommand, MergeDataSource, OpenDocxResult } from '../shared/ipc'
+import type { HeadlessExportTarget } from '@genoffice/electron-utils/headless-export'
 import {
   buildMailMergeFiles,
   type MailMergeRequest,
@@ -866,6 +867,7 @@ export function App({
   onViewportOpen,
   sourceImport,
   projectedBody = false,
+  headlessExport,
   agentUi,
   embedded = false,
 }: {
@@ -875,6 +877,7 @@ export function App({
   onViewportOpen?: (editor: Editor | null) => void
   sourceImport?: FileActionContext['sourceImport']
   projectedBody?: boolean
+  headlessExport?: HeadlessExportTarget | null
   agentUi?: DocsAgentUi
   embedded?: boolean
 } = {}) {
@@ -897,7 +900,11 @@ export function App({
     projected: boolean
     restoreFocus?: boolean
   } | null>(null)
-  const viewportSession = useRef<ReturnType<typeof startDocumentViewportSession> | null>(null)
+  const viewportSession = useRef<{
+    session: ReturnType<typeof startDocumentViewportSession>
+    editor: Editor
+    host: HTMLElement
+  } | null>(null)
   const preparingBody = useRef<ReturnType<NonNullable<FileActionContext['prepareBody']>>>(null)
   const nativeBodyOwner = useRef<Editor | null>(null)
   /** a phased open is still streaming the document tail: editor stays read-only */
@@ -1770,10 +1777,13 @@ export function App({
   })
   const editor = body?.editor ?? nativeEditor
   const mountNativeBody = useCallback(
-    (owner: Editor, host: HTMLElement, restoreFocus = false) => {
+    (owner: Editor, host: HTMLElement, restoreFocus: boolean, language?: string | null) => {
       nativeBodyOwner.current = owner
-      owner.setOptions({ ...nativeEditor.options, element: host })
+      owner.setOptions({ ...nativeEditor.options, element: host, editable: owner.options.editable })
+      // View plugins measure during mount, before EditorContent reparents the body.
+      if (language) host.lang = language
       owner.mount(host)
+      if (language) owner.view.dom.lang = language
       setBody({ editor: owner, host, projected: false, restoreFocus })
     },
     [nativeEditor],
@@ -1781,19 +1791,36 @@ export function App({
   useLayoutEffect(() => {
     if (body?.restoreFocus) body.editor.view.focus()
   }, [body])
-  const restoreNativeBody = useCallback(() => {
-    const session = viewportSession.current
-    if (!session) return
-    viewportSession.current = null
-    const owner = session.takeEditor()
-    if (!owner) session.dispose()
-    else mountNativeBody(owner, document.createElement('div'))
-  }, [mountNativeBody])
+  const restoreNativeBody = useCallback(
+    (keepFocus = false) => {
+      const active = viewportSession.current
+      if (!active) return
+      const { session, editor, host } = active
+      const focused = keepFocus && editor.view.hasFocus()
+      const language = editor.view.dom.getAttribute('lang')
+      viewportSession.current = null
+      const owner = session.takeEditor()
+      if (!owner) session.dispose()
+      else mountNativeBody(owner, host, focused, language)
+    },
+    [mountNativeBody],
+  )
+  const requireCompleteBody = useCallback(() => {
+    if (viewportSession.current) flushSync(() => restoreNativeBody(true))
+  }, [restoreNativeBody])
+  // Preview and live-DOM export require the same complete body as normal Docs.
+  const setCompletePagePreview = useCallback(
+    (show: boolean) => {
+      if (show) requireCompleteBody()
+      setShowPagePreview(show)
+    },
+    [requireCompleteBody],
+  )
   useEffect(
     () => () => {
       preparingBody.current?.discard()
       preparingBody.current = null
-      viewportSession.current?.dispose()
+      viewportSession.current?.session.dispose()
       viewportSession.current = null
       nativeBodyOwner.current?.destroy()
       nativeBodyOwner.current = null
@@ -2588,7 +2615,7 @@ export function App({
                       activate() {
                         activated = true
                         preparingBody.current = null
-                        viewportSession.current = session
+                        viewportSession.current = { session, editor: owner, host }
                         setBody({ editor: owner, host, projected: true })
                         publishPage(currentPage, totalPages)
                       },
@@ -2601,10 +2628,11 @@ export function App({
                   },
                   onFailure(_reason, takeEditor) {
                     const focused = activated && editingOwner?.view.hasFocus()
+                    const language = activated ? editingOwner?.view.dom.getAttribute('lang') : null
                     const owner = activated ? takeEditor() : undefined
                     if (owner) {
                       viewportSession.current = null
-                      mountNativeBody(owner, host, focused === true)
+                      mountNativeBody(owner, host, focused === true, language)
                     }
                     offer(null)
                   },
@@ -2646,7 +2674,7 @@ export function App({
     setDocLoading,
     setReadMode,
     setLargeDocSpellOff,
-    setShowPagePreview,
+    setShowPagePreview: setCompletePagePreview,
     section,
     sectionDirty,
     sections,
@@ -3542,8 +3570,11 @@ export function App({
     [],
   )
   const exportHtml = useCallback(
-    (outPath?: string) => exportHtmlImpl(fileCtxRef.current, outPath),
-    [],
+    (outPath?: string) => {
+      requireCompleteBody()
+      return exportHtmlImpl(fileCtxRef.current, outPath)
+    },
+    [requireCompleteBody],
   )
   const exportMarkdown = useCallback(
     (outPath?: string) => exportMarkdownImpl(fileCtxRef.current, outPath),
@@ -3557,11 +3588,11 @@ export function App({
     ;(window as unknown as Record<string, unknown>).__exportPdf = exportPdf
     ;(window as unknown as Record<string, unknown>).__exportImages = exportImages
     ;(window as unknown as Record<string, unknown>).__openPagePreview = () =>
-      setShowPagePreview(true)
+      setCompletePagePreview(true)
     ;(window as unknown as Record<string, unknown>).__setRevisionDisplay = (
       mode: RevisionDisplayMode,
     ) => setRevisionDisplay(mode)
-  }, [exportPdf, exportImages])
+  }, [exportPdf, exportImages, setCompletePagePreview])
 
   // Headless export mode (--headless-export): this renderer lives in a hidden
   // window whose only job is to run the File menu's PDF or HTML export against
@@ -3571,7 +3602,8 @@ export function App({
     if (headlessExportStartedRef.current) return
     headlessExportStartedRef.current = true
     void (async () => {
-      const target = await getDocsHost().consumeHeadlessExport()
+      const target =
+        headlessExport === undefined ? await getDocsHost().consumeHeadlessExport() : headlessExport
       if (!target) return
       const report = await runHeadlessDocumentExport(
         target.outPath,
@@ -3586,7 +3618,7 @@ export function App({
       )
       getDocsHost().headlessExportDone(report)
     })()
-  }, [exportPdf, exportHtml, exportMarkdown])
+  }, [exportPdf, exportHtml, exportMarkdown, headlessExport])
 
   useEffect(() => {
     const pending = pendingMixedExportRef.current
@@ -9216,7 +9248,7 @@ export function App({
       const generation = currentDocGeneration()
       const current = fileCtxRef.current.doc
       if (!isPhasedContentPending()) {
-        setShowPagePreview(true)
+        setCompletePagePreview(true)
         return
       }
       void waitForFullContent().then((complete) => {
@@ -9227,7 +9259,7 @@ export function App({
           currentDocGeneration() === generation &&
           !isPhasedContentPending()
         )
-          setShowPagePreview(true)
+          setCompletePagePreview(true)
       })
     },
   })
@@ -9988,7 +10020,7 @@ export function App({
               hasDocument={!!doc}
               panelRef={findPanelRef}
               layout={publishedPageLayout}
-              measuredPages={() => viewportSession.current?.pagePositions()}
+              measuredPages={() => viewportSession.current?.session.pagePositions()}
             />
             {doc && showNav && (
               <NavPane
