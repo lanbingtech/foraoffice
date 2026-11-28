@@ -3796,15 +3796,15 @@ th[data-rev-fmt] {
     1px var(--cm-up);
   background-position:
     /* previous page bottom corners: arms down and outward from the boundary */
-    calc(var(--gap-ml, 96px) - var(--cm-len)) var(--cm-y),
-    var(--gap-ml, 96px) var(--cm-y),
-    calc(100% - var(--gap-mr, 96px) + var(--cm-len)) var(--cm-y),
-    calc(100% - var(--gap-mr, 96px)) var(--cm-y),
+    calc(var(--crop-prev-left, var(--gap-ml, 96px)) - var(--cm-len)) var(--cm-y),
+    var(--crop-prev-left, var(--gap-ml, 96px)) var(--cm-y),
+    calc(100% - var(--crop-prev-right, var(--gap-mr, 96px)) + var(--cm-len)) var(--cm-y),
+    calc(100% - var(--crop-prev-right, var(--gap-mr, 96px))) var(--cm-y),
     /* next page top corners (the gap ends at its text boundary): arms up and outward */
     calc(var(--gap-ml, 96px) - var(--cm-len)) 100%,
     var(--gap-ml, 96px) 100%,
-    calc(100% - var(--gap-mr, 96px) + var(--cm-len)) 100%,
-    calc(100% - var(--gap-mr, 96px)) 100%;
+    calc(100% - var(--crop-next-right, var(--gap-mr, 96px)) + var(--cm-len)) 100%,
+    calc(100% - var(--crop-next-right, var(--gap-mr, 96px))) 100%;
 }
 
 .page-wrap:not(.paper-mixed)::before,
@@ -3829,22 +3829,22 @@ th[data-rev-fmt] {
   top: calc(var(--page-mt, 96px) - var(--cm-h));
   height: var(--cm-h);
   background-position:
-    calc(var(--page-ml, 96px) - var(--cm-len)) 100%,
-    var(--page-ml, 96px) 0,
-    calc(100% - var(--page-mr, 96px) + var(--cm-len)) 100%,
-    calc(100% - var(--page-mr, 96px)) 0;
+    calc(var(--crop-first-ml, var(--page-ml, 96px)) - var(--cm-len)) 100%,
+    var(--crop-first-ml, var(--page-ml, 96px)) 0,
+    calc(100% - var(--crop-first-mr, var(--page-mr, 96px)) + var(--cm-len)) 100%,
+    calc(100% - var(--crop-first-mr, var(--page-mr, 96px))) 0;
 }
 
 /* last page bottom corners: the box starts at the bottom text boundary */
 .page-wrap:not(.paper-mixed)::after {
-  --cm-h: min(var(--cm-len), var(--page-mb, 96px));
-  bottom: calc(var(--page-mb, 96px) - var(--cm-h));
+  --cm-h: min(var(--cm-len), var(--crop-last-mb, var(--page-mb, 96px)));
+  bottom: calc(var(--crop-last-mb, var(--page-mb, 96px)) - var(--cm-h));
   height: var(--cm-h);
   background-position:
-    calc(var(--page-ml, 96px) - var(--cm-len)) 0,
-    var(--page-ml, 96px) 0,
-    calc(100% - var(--page-mr, 96px) + var(--cm-len)) 0,
-    calc(100% - var(--page-mr, 96px)) 0;
+    calc(var(--crop-last-ml, var(--page-ml, 96px)) - var(--cm-len)) 0,
+    var(--crop-last-ml, var(--page-ml, 96px)) 0,
+    calc(100% - var(--crop-last-mr, var(--page-mr, 96px)) + var(--cm-len)) 0,
+    calc(100% - var(--crop-last-mr, var(--page-mr, 96px))) 0;
 }
 
 /* preview/export clones carry full ink (selector outranks the washout above) */
@@ -5583,13 +5583,48 @@ th[data-rev-fmt] {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  z-index: -1;
 }
 
 .page-sheet {
   position: absolute;
+}
+
+.page-sheet::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
   background: var(--page-bg, var(--docs-paper));
   box-shadow: var(--docs-page-shadow);
+}
+
+/* In a mixed-width document the gap can span the widest canvas. Place the
+   guides on each physical sheet, using that section's own text margins. */
+.page-wrap.paper-mixed .page-gap-paper::after {
+  display: none;
+}
+
+@media screen {
+  .page-sheet::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    --arm: 16px;
+    --ink: linear-gradient(var(--docs-paper-crop-mark), var(--docs-paper-crop-mark));
+    background:
+      var(--ink) left calc(var(--crop-left) - var(--arm)) top var(--crop-top) / var(--arm) 1px,
+      var(--ink) left var(--crop-left) top calc(var(--crop-top) - var(--arm)) / 1px var(--arm),
+      var(--ink) right calc(var(--crop-right) - var(--arm)) top var(--crop-top) / var(--arm) 1px,
+      var(--ink) right var(--crop-right) top calc(var(--crop-top) - var(--arm)) / 1px var(--arm),
+      var(--ink) left calc(var(--crop-left) - var(--arm)) bottom var(--crop-bottom) / var(--arm) 1px,
+      var(--ink) left var(--crop-left) bottom calc(var(--crop-bottom) - var(--arm)) / 1px var(--arm),
+      var(--ink) right calc(var(--crop-right) - var(--arm)) bottom var(--crop-bottom) / var(--arm)
+        1px,
+      var(--ink) right var(--crop-right) bottom calc(var(--crop-bottom) - var(--arm)) / 1px
+        var(--arm);
+    background-repeat: no-repeat;
+  }
 }
 
 /* footnote area at the top of a page gap (previous page's bottom, Word behavior): the gap was already enlarged by the reserved height;
