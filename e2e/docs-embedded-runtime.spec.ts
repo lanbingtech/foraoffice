@@ -631,6 +631,10 @@ test('the embedded public editor edits, undoes, saves and reopens Word with its 
     ]
     for (const call of calls) await tool(call.name, call.input)
     expect(await toolOutput('list_styles')).toContain('RuntimeStyle')
+    await expect(page.locator('.ProseMirror > [data-style="RuntimeStyle"]').first()).toHaveCSS(
+      'font-weight',
+      '600',
+    )
     await tool('insert_content', { html: '<p>Runtime second block</p>', afterBlockIndex: 0 })
     await tool('insert_chart', {
       kind: 'bar',

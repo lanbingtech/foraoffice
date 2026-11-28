@@ -583,6 +583,7 @@ const config = {
     {
       from: '../docs/out',
       to: 'modules/docs',
+      filter: ['main/**/*', 'preload/**/*', 'renderer/**/*'],
     },
     {
       from: '../sheets/out',

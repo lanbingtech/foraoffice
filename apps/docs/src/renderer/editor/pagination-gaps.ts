@@ -528,6 +528,7 @@ export interface GapMetrics {
    *  header/footer strips belong (alignGapHfStrips); defaults to marginLeft/Right */
   sectionMarginLeft?: number
   sectionMarginRight?: number
+  cropSides?: { previousLeft: number; previousRight: number; nextRight: number }
   sectionMarginTop?: number
   /** the next page's left edge and width on the shared paper (differing-width
    *  documents center narrower pages); absent = the page spans the paper */
@@ -648,6 +649,11 @@ export function makeGapEl(m: GapMetrics, kind: GapKind, cols?: number): HTMLElem
   // (indent included), which is the wrong place for a strip
   gap.style.setProperty('--gap-ml', `${m.sectionMarginLeft ?? m.marginLeft}px`)
   gap.style.setProperty('--gap-mr', `${m.sectionMarginRight ?? m.marginRight}px`)
+  if (m.cropSides) {
+    gap.style.setProperty('--crop-prev-left', `${m.cropSides.previousLeft}px`)
+    gap.style.setProperty('--crop-prev-right', `${m.cropSides.previousRight}px`)
+    gap.style.setProperty('--crop-next-right', `${m.cropSides.nextRight}px`)
+  }
   if (kind === 'table') {
     // A real spanning cell is required here. Chromium's collapsed-border table
     // painting can leak the neighboring row's border/fill through a cell-less
@@ -817,7 +823,7 @@ export function setPageGaps(
     }
     // boundaryY in the key: a reused widget must not keep a stale boundary
     // (cols too: a table-structure edit must rebuild the spanning cell)
-    const mKey = `${metrics.marginTop},${metrics.marginBottom},${metrics.bodyMarginBottom ?? -1},${metrics.marginLeft},${metrics.marginRight},${Math.round(gap.pullUp ?? 0)},${Math.round(gap.boundaryY ?? -1)},${gap.cols ?? 0},${Math.round(metrics.pageLeft ?? -1)}`
+    const mKey = `${metrics.marginTop},${metrics.marginBottom},${metrics.bodyMarginBottom ?? -1},${metrics.marginLeft},${metrics.marginRight},${Math.round(gap.pullUp ?? 0)},${Math.round(gap.boundaryY ?? -1)},${gap.cols ?? 0},${Math.round(metrics.pageLeft ?? -1)},${metrics.sectionMarginLeft},${metrics.sectionMarginRight},${metrics.cropSides ? Object.values(metrics.cropSides).join(',') : ''}`
     const build = (as: GapKind) => {
       const el = makeGapEl(metrics, as, gap.cols)
       // margins don't apply to table-rows and cuts are zero-height markers;
@@ -1426,6 +1432,7 @@ export function syncPageSheets(
   zoomFactor: number,
   first: { left: number; width: number } | null,
   cuts?: readonly PageCut[],
+  marginsOf?: (cut: PageCut) => { top: number; right: number; bottom: number; left: number },
 ): void {
   let layer = wrap.querySelector(':scope > .page-sheets') as HTMLElement | null
   if (!first) {
@@ -1438,7 +1445,8 @@ export function syncPageSheets(
     wrap.appendChild(layer)
   }
   layer.textContent = ''
-  for (const f of pageFramesFromGaps(wrap, zoomFactor, first, cuts)) {
+  const framedCuts = cuts?.filter((cut, index) => index === 0 || cut.gap)
+  for (const [index, f] of pageFramesFromGaps(wrap, zoomFactor, first, cuts).entries()) {
     if (f.bottom - f.top <= 10) continue
     const el = document.createElement('div')
     el.className = 'page-sheet'
@@ -1446,6 +1454,11 @@ export function syncPageSheets(
     el.style.height = `${f.bottom - f.top}px`
     el.style.left = `${f.left}px`
     el.style.width = `${f.width}px`
+    const cut = framedCuts?.[index]
+    if (cut && marginsOf) {
+      for (const [side, value] of Object.entries(marginsOf(cut)))
+        el.style.setProperty(`--crop-${side}`, `${value}px`)
+    }
     layer.appendChild(el)
   }
 }

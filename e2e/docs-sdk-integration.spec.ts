@@ -312,9 +312,16 @@ test('a browser host owns pathless storage while native inspection and advisory 
     const instructionInput = page.locator('.ai-ask-pop-input')
     const openSelectionPrompt = async () => {
       await body.click()
-      await body.press('Control+Home')
-      // Select the known fixture text without Electron's native word-navigation command.
-      for (let index = 0; index < 'same'.length; index++) await body.press('Shift+ArrowRight')
+      // Establish the native DOM selection for the prompt and host assertions.
+      await body
+        .locator('p')
+        .first()
+        .evaluate((paragraph) => {
+          const text = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT).nextNode()
+          if (!text?.textContent?.startsWith('same '))
+            throw new Error('Missing prompt fixture text')
+          window.getSelection()!.setBaseAndExtent(text, 0, text, 'same'.length)
+        })
       await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe('same')
       await expect(page.locator('.ai-ask-trigger')).toBeVisible()
       await page.locator('.ai-ask-trigger').click()

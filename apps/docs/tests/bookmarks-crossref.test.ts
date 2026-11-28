@@ -12,8 +12,8 @@ const BODY =
   '<w:r><w:t>Conclusion paragraph.</w:t></w:r></w:p>' +
   '<w:p><w:r><w:t>Plain paragraph.</w:t></w:r></w:p>'
 
-async function open() {
-  const source = await buildDocx({ bodyXml: BODY })
+async function open(bodyXml = BODY) {
+  const source = await buildDocx({ bodyXml })
   const parsed = await parseDocx(source)
   const editor = new Editor({
     element: document.createElement('div'),
@@ -29,6 +29,23 @@ async function docXmlOf(bytes: Uint8Array): Promise<string> {
 }
 
 describe('bookmarks & cross-references in the editor', () => {
+  it('keeps a bookmark spanning unedited paragraphs when saving an edit elsewhere', async () => {
+    const first =
+      '<w:p><w:bookmarkStart w:id="7" w:name="Range"/><w:r><w:rPr>' +
+      '<w:rFonts w:hAnsi="SimSun" w:cs="Arial"/></w:rPr><w:t>begin</w:t></w:r></w:p>'
+    const second = '<w:p><w:r><w:t>end</w:t></w:r><w:bookmarkEnd w:id="7"/></w:p>'
+    const { editor, parsed } = await open(first + second + '<w:p><w:r><w:t>Edit</w:t></w:r></w:p>')
+    try {
+      editor.commands.insertContentAt(editor.state.doc.content.size - 1, ' here')
+      const plan = pmDocToSavePlan(editor.getJSON() as PmNode, parsed.blocks)
+      const xml = await docXmlOf(await saveDocx(parsed, plan.saveBlocks))
+      expect(xml).toContain(first + second)
+      expect(xml).toContain('Edit here')
+    } finally {
+      editor.destroy()
+    }
+  })
+
   it('renders data-bookmarks and keeps an untouched doc byte-identical', async () => {
     const { editor, parsed, source } = await open()
     expect(editor.view.dom.querySelector('[data-bookmarks~="Conclusion"]')?.textContent).toBe(
