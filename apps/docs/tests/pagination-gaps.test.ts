@@ -22,7 +22,7 @@ import {
   syncPageBorders,
   syncFloatShifts,
 } from '../src/renderer/editor/pagination-gaps'
-import { leadDropsSpaceBefore } from '../src/renderer/pagination-cuts'
+import { leadDropsSpaceBefore, type PageCut } from '../src/renderer/pagination-cuts'
 import { measureBlocks } from '../src/renderer/pagination-measure'
 import { createLineRectsCache, singleCutCell } from '../src/renderer/pagination'
 import { Editor } from '@tiptap/core'
@@ -40,6 +40,21 @@ const rowOf = (cells: number): HTMLTableRowElement => {
 }
 
 const m = { marginTop: 96, marginBottom: 96, marginLeft: 90, marginRight: 90 }
+
+it('keeps the closing and opening crop marks at their respective section margins', () => {
+  const el = makeGapEl(
+    {
+      ...m,
+      sectionMarginLeft: 120,
+      cropSides: { previousLeft: 48, previousRight: 90, nextRight: 60 },
+    },
+    'block',
+  )
+  expect(el.style.getPropertyValue('--crop-prev-left')).toBe('48px')
+  expect(el.style.getPropertyValue('--crop-prev-right')).toBe('90px')
+  expect(el.style.getPropertyValue('--gap-ml')).toBe('120px')
+  expect(el.style.getPropertyValue('--crop-next-right')).toBe('60px')
+})
 
 describe('gap ledger', () => {
   it('records the header push even when zero so a later page clears an earlier one', () => {
@@ -600,6 +615,30 @@ describe('page frames and sheets (differing-width documents, genoffice#246)', ()
     paper.getBoundingClientRect = () => rect(0, 1056, 0, 816)
     wrap.appendChild(paper)
     expect(pageFramesFromGaps(wrap, 1)).toEqual([{ top: 0, bottom: 1056, left: 0, width: 816 }])
+  })
+
+  it('positions crop guides on each physical sheet, including the first and last', () => {
+    const wrap = wrapEl()
+    const cuts = [{ pageNo: 1 }, { pageNo: 2, gap: {} }, { pageNo: 3, gap: {} }] as PageCut[]
+    const marginsOf = ({ pageNo }: PageCut) => ({
+      left: pageNo === 2 ? 80 : 120,
+      right: pageNo === 2 ? 100 : 90,
+      top: 50 + pageNo,
+      bottom: 60 - pageNo,
+    })
+    syncPageSheets(wrap, 1, { left: 120, width: 816 }, cuts, marginsOf)
+    const sheets = [...wrap.querySelectorAll<HTMLElement>('.page-sheet')]
+    expect(
+      sheets.map((el) =>
+        ['left', 'right', 'top', 'bottom'].map((side) =>
+          el.style.getPropertyValue(`--crop-${side}`),
+        ),
+      ),
+    ).toEqual([
+      ['120px', '90px', '51px', '59px'],
+      ['80px', '100px', '52px', '58px'],
+      ['120px', '90px', '53px', '57px'],
+    ])
   })
 
   it('paints one sheet per page and clears the layer when the paper is uniform again', () => {
