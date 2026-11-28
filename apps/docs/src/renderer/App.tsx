@@ -4948,6 +4948,23 @@ export function App({
               // header/footer strip inset on the paper (alignGapHfStrips): survives
               // the inline/in-cell gaps below overriding marginLeft/Right with the host
               // block's paper offset (which folds in paragraph indents and cell positions)
+              ...(mirrorMargins ||
+              prevSec.marginLeft !== nextSec.marginLeft ||
+              prevSec.marginRight !== nextSec.marginRight
+                ? {
+                    cropSides: {
+                      previousLeft: twipsToPx(
+                        pageMargins(prevSec, cuts[k].pageNo, mirrorMargins).left,
+                      ),
+                      previousRight: twipsToPx(
+                        pageMargins(prevSec, cuts[k].pageNo, mirrorMargins).right,
+                      ),
+                      nextRight: twipsToPx(
+                        pageMargins(nextSec, cuts[k + 1].pageNo, mirrorMargins).right,
+                      ),
+                    },
+                  }
+                : {}),
               sectionMarginLeft: bodyLeftOf(nextSec, k + 1),
               sectionMarginRight: twipsToPx(nextSec.marginRight),
               sectionMarginTop: twipsToPx(nextSec.marginTop),
@@ -5666,6 +5683,16 @@ export function App({
             factor,
             mixedPaper && viewMode === 'print' && !readMode ? (firstFrame ?? null) : null,
             cuts,
+            (cut) => {
+              const set = secList?.[cut.section]?.settings ?? pbSec!
+              const sides = pageMargins(set, cut.pageNo, mirrorMargins)
+              return {
+                top: effectiveTopPx(set, cut.hf.headerPx),
+                bottom: effectiveBottomPx(set, cut.hf.footerPx),
+                left: twipsToPx(sides.left),
+                right: twipsToPx(sides.right),
+              }
+            },
           )
         }
         stage('sheets')
@@ -8628,6 +8655,13 @@ export function App({
     '--page-bg': pageColor ? `#${pageColor}` : undefined,
     '--page-cols': colFlow && viewMode === 'print' ? colFlow.cols : undefined,
     // end-of-document footnote area sits on the last page's sheet
+    '--crop-first-ml': firstPageMargins ? `${twipsToPx(firstPageMargins.left)}px` : undefined,
+    '--crop-first-mr': firstPageMargins ? `${twipsToPx(firstPageMargins.right)}px` : undefined,
+    '--crop-last-ml': lastPageMargins ? `${twipsToPx(lastPageMargins.left)}px` : undefined,
+    '--crop-last-mr': lastPageMargins ? `${twipsToPx(lastPageMargins.right)}px` : undefined,
+    '--crop-last-mb': lastSection
+      ? `${effectiveBottomPx(lastSection, pageLayoutRef.current?.cuts.at(-1)?.hf.footerPx ?? singleHfPx.footerPx)}px`
+      : undefined,
     '--last-page-w': mixedPaper && lastBox ? `${lastBox.width}px` : undefined,
     '--last-page-x': mixedPaper && lastSection ? `${pageLeftOf(lastSection)}px` : undefined,
   } as CSSProperties
