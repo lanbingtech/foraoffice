@@ -2139,12 +2139,11 @@ function foldEffectiveFormat(
     if (chars.right !== undefined) out.indentRight = eff.indent.right
     // the save path cancels these when it rebuilds w:ind in twips
     out.charIndents = chars
-    // the editor's direct-formatting mirror: only what the paragraph's own
-    // w:ind declares (an indent the style chain provides must not become
-    // direct formatting on a round trip)
-    const own = charIndentsOf(pPr ? findChild(pPr, 'w:ind') : undefined)
-    if (own) out.directCharIndents = own
   }
+  // A direct zero can cancel the last inherited character indent, leaving
+  // no effective character units. Its declaration must still survive a save.
+  const own = charIndentsOf(pPr ? findChild(pPr, 'w:ind') : undefined)
+  if (own) out.directCharIndents = own
   out.effective = eff
   return out
 }
