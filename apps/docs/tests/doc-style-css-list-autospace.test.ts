@@ -89,6 +89,34 @@ describe('docStyleCss list auto-spacing collapse', () => {
     )
     expect(css).not.toContain('.doc-li[data-style="ListParagraph"]:has(+ .doc-li)')
   })
+
+  it('emits styled list adjacency once when many auto-spacing styles share the list definitions', () => {
+    const lists = Object.fromEntries(
+      Array.from({ length: 180 }, (_, i) => [String(i), `definition${i}`]),
+    )
+    const styles = new Map(
+      Array.from({ length: 90 }, (_, i) => {
+        const styleId = `ListStyle${i}`
+        return [
+          styleId,
+          {
+            styleId,
+            name: styleId,
+            type: 'paragraph',
+            display: { spaceBeforeAuto: true, spaceAfterAuto: true },
+          },
+        ]
+      }),
+    )
+    const css = docStyleCss(parsedWith({}, lists, styles))
+    // The style selector belongs to the predicate once per relationship.
+    const styleAdjacency = css
+      .split('\n')
+      .filter((rule) => rule.includes('data-num=') && rule.includes('data-style="ListStyle0"'))
+    expect(styleAdjacency).toHaveLength(4)
+    expect(styleAdjacency.every((rule) => rule.startsWith('.doc-page .doc-li:is('))).toBe(true)
+    expect(css.length).toBeLessThan(500_000)
+  })
 })
 
 describe('docListItem renderHTML', () => {

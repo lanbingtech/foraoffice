@@ -38,9 +38,9 @@ afterEach(() => {
   for (const editor of editors.splice(0)) editor.destroy()
 })
 
-async function openEditor() {
+async function openEditor(bodyXml = BODY) {
   const { editorExtensions } = await import('../src/renderer/editor/extensions')
-  const parsed = await parseDocx(await buildDocx({ bodyXml: BODY, stylesXml: STYLES }))
+  const parsed = await parseDocx(await buildDocx({ bodyXml, stylesXml: STYLES }))
   const editor = new Editor({
     element: document.createElement('div'),
     extensions: editorExtensions,
@@ -66,6 +66,25 @@ async function setFirstLine(editor: Editor, indentFirstLine: number | null) {
 }
 
 describe('character-unit indents: saving an indent edit', () => {
+  it('keeps an unedited paragraph with an explicit zero character indent as original XML', async () => {
+    const { parsed, editor } = await openEditor(
+      '<w:p><w:pPr><w:ind w:hanging="420" w:firstLineChars="0"/></w:pPr><w:r><w:t>text</w:t></w:r></w:p>',
+    )
+    const plan = pmDocToSavePlan(editor.getJSON() as PmNode, parsed.blocks)
+    expect(plan.saveBlocks[0]).toEqual({ kind: 'original', docxIndex: 0 })
+    runUiOps(editor, [
+      {
+        op: 'setParagraphAttrs',
+        target: { blockIndexes: [0] },
+        attrs: { indentFirstLine: 720, indentFirstLineChars: null },
+      },
+    ])
+    const updated = pmDocToSavePlan(editor.getJSON() as PmNode, parsed.blocks)
+    const reopened = await parseDocx(await saveDocx(parsed, updated.saveBlocks))
+    expect(reopened.blocks[0].format?.indentFirstLine).toBe(720)
+    expect(reopened.blocks[0].rawPPr?.match(/w:firstLineChars="0"/g)).toHaveLength(1)
+  })
+
   it('parses the style indent into both paragraphs (12pt text: 2 chars = 480 twips)', async () => {
     const { parsed } = await openEditor()
     expect(parsed.blocks[0].rawPPr).toBeUndefined()

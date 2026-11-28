@@ -23,10 +23,46 @@ async function mixedRun() {
 }
 
 describe('rFonts dual-slot model', () => {
+  it('keeps a High ANSI font and its complex-script slot when ASCII is inherited', async () => {
+    const fonts = '<w:rFonts w:hAnsi="SimSun" w:cs="Times New Roman" w:hint="eastAsia"/>'
+    const bodyXml = `<w:p><w:r><w:rPr>${fonts}</w:rPr><w:t>text</w:t></w:r></w:p>`
+    const doc = await parseDocx(await buildDocx({ bodyXml }))
+    const run = { ...doc.blocks[0].runs![0], text: 'edited' }
+    delete run.fontCs // the editor retains this slot in rawRPr
+    expect(generateParagraphXml({ type: 'paragraph', runs: [run] }, GEN_CTX)).toContain(fonts)
+    expect(
+      generateParagraphXml({ type: 'paragraph', runs: [{ ...run, fontCs: 'Arial' }] }, GEN_CTX),
+    ).toContain(fonts.replace('Times New Roman', 'Arial'))
+  })
+
   it('parses eastAsia as primary font and ascii as the Latin slot', async () => {
     const run = await mixedRun()
     expect(run.font).toBe('SimSun')
     expect(run.fontAscii).toBe('Times New Roman')
+  })
+
+  it('preserves a distinct High ANSI face while editing the East Asian face', async () => {
+    const fontXml = '<w:rFonts w:ascii="Calibri" w:hAnsi="Arial" w:eastAsia="KaiTi"/>'
+    const bodyXml = `<w:p><w:r><w:rPr>${fontXml}</w:rPr><w:t>text</w:t></w:r></w:p>`
+    const doc = await parseDocx(await buildDocx({ bodyXml }))
+    const run = { ...doc.blocks[0].runs![0], font: 'SimSun', eastAsiaFont: 'SimSun' }
+    expect(generateParagraphXml({ type: 'paragraph', runs: [run] }, GEN_CTX)).toContain(
+      fontXml.replace('KaiTi', 'SimSun'),
+    )
+  })
+
+  it('writes an explicit Latin font that matches the fallback of a different theme face', () => {
+    const rawRPr = '<w:rPr><w:rFonts w:ascii="Arial" w:asciiTheme="minorAscii"/></w:rPr>'
+    const run = {
+      text: 'example',
+      rawRPr,
+      font: 'Arial',
+      fontAscii: 'Arial',
+      themeRFonts: { font: 'Calibri', fontAscii: 'Calibri' },
+    }
+    const xml = generateParagraphXml({ type: 'paragraph', runs: [run] }, GEN_CTX)
+    expect(xml).toContain('w:ascii="Arial"')
+    expect(xml).not.toContain('w:asciiTheme')
   })
 
   it('untouched round-trip keeps the original rFonts bytes', async () => {

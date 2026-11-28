@@ -9546,7 +9546,7 @@ async function oleDisplay(
   if (file && path) {
     const mime = await imagePartMime(ctx.zip, path)
     if (isMetafileMime(mime)) {
-      const converted = await metafileToDataUrl(await file.async('arraybuffer'), mime)
+      const converted = await mediaPartDataUrl(ctx.zip, path)
       if (converted) out.imageDataUrl = converted
     } else if (mime) {
       out.imageDataUrl = await mediaPartSrc(ctx.zip, file, path, mime)

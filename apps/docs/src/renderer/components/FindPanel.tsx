@@ -407,19 +407,18 @@ export function FindPanel({
     const caret = editor.state.selection.from
     const view = editor.view
     let positions: Array<number | null>
-    let current: number
+    let current: () => number
     if (target === 'page' || target === 'section') {
       if (!lay) return setGotoMiss(true)
       positions = target === 'page' ? pagePositions(view, lay) : sectionPositions(view, lay)
-      const bi = blockIndexAtPos(view, lay, caret)
-      current =
+      current = () =>
         target === 'page'
-          ? pageOfBlock(lay, Math.max(bi, 0)) - 1
+          ? pageOfBlock(lay, Math.max(blockIndexAtPos(view, lay, caret), 0)) - 1
           : Math.max(0, lastAtOrBefore(positions, caret))
     } else if (target === 'line') {
       if (!lay) return setGotoMiss(true)
       const total = lineCounts(lay).reduce((a, b) => a + b, 0)
-      current = lineIndexAtPos(view, lay, caret)
+      current = () => lineIndexAtPos(view, lay, caret)
       const idx = resolveGoToIndex(explicit ? gotoInput : '', current, total, dir)
       if (idx === null) return setGotoMiss(true)
       const pos = linePosition(view, lay, idx + 1)
@@ -429,7 +428,7 @@ export function FindPanel({
       return
     } else {
       positions = gotoItems.map((i) => i.pos)
-      current = lastAtOrBefore(positions, caret)
+      current = () => lastAtOrBefore(positions, caret)
     }
     let idx: number | null
     if (target === 'bookmark' && explicit && gotoInput) {

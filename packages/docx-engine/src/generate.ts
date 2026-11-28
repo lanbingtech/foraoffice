@@ -14,8 +14,9 @@ import type {
   TableCell,
   TableModel,
 } from './types'
-import { escapeXmlAttr, escapeXmlText } from './xml-utils'
+import { escapeXmlAttr, escapeXmlText, findChild, xmlParser, type XNode } from './xml-utils'
 import { resolvePropChangeXml } from './revision-xml'
+import { charIndentsOf, mergeCharIndents } from './parse-props'
 
 export interface GenerateContext {
   /** heading level -> styleId existing in the original styles.xml */
@@ -1547,7 +1548,7 @@ function formatPPrChildren(format: ParaFormat | undefined): PPrChild[] {
   // a character-unit special indent rides along its twips twin (Word writes
   // both; the *Chars attribute wins and rescales with the first run's size —
   // CJK "first line: 2 characters", issue #1892)
-  if (format.charIndents?.firstLine)
+  if (format.charIndents?.firstLine !== undefined)
     indAttrs.push(`w:firstLineChars="${Math.round(format.charIndents.firstLine)}"`)
   if (format.indentFirstLine !== undefined) {
     if (format.indentFirstLine >= 0)
@@ -1821,6 +1822,21 @@ function sameIndent(a: ParaFormat, b: ParaFormat): boolean {
   )
 }
 
+/** Word can cancel an inherited indent with an explicit zero. The effective
+ * format can omit that zero, so recover it from the original direct properties
+ * when rebuilding an edited indent. */
+function savedCharIndents(
+  rawPPr: string,
+  original: ParaFormat | undefined,
+): CharIndents | undefined {
+  let direct = original?.directCharIndents
+  if (!direct && rawPPr.includes('Chars')) {
+    const [paragraphProperties] = xmlParser.parse(rawPPr) as XNode[]
+    if (paragraphProperties) direct = charIndentsOf(findChild(paragraphProperties, 'w:ind'))
+  }
+  return mergeCharIndents(original?.charIndents, direct)
+}
+
 /**
  * Cancel attributes for the character-unit indents a paragraph was laid out
  * with but the new format no longer carries. A rebuilt w:ind carries twips,
@@ -1834,13 +1850,14 @@ function sameIndent(a: ParaFormat, b: ParaFormat): boolean {
 function charIndentCancelAttrs(original: CharIndents, format: ParaFormat | undefined): string[] {
   const kept = format?.charIndents
   const out: string[] = []
-  if (original.left && !kept?.left) out.push('w:leftChars="0"')
-  if (original.right && !kept?.right) out.push('w:rightChars="0"')
+  if (original.left !== undefined && !kept?.left) out.push('w:leftChars="0"')
+  if (original.right !== undefined && !kept?.right) out.push('w:rightChars="0"')
   // firstLineChars and hangingChars are one component (the special indent):
   // a new character special replaces the old one outright — no cancel
-  if ((original.hanging || original.firstLine) && !kept?.hanging && !kept?.firstLine) {
-    out.push(original.hanging ? 'w:hangingChars="0"' : 'w:firstLineChars="0"')
-  }
+  if (original.hanging !== undefined && !kept?.hanging && kept?.firstLine === undefined)
+    out.push('w:hangingChars="0"')
+  else if (original.firstLine !== undefined && !kept?.hanging && kept?.firstLine === undefined)
+    out.push('w:firstLineChars="0"')
   return out
 }
 
@@ -2050,8 +2067,9 @@ export function mergeCellParaFormat(
       CELL_MODELED_ATTR_GROUPS[tag].filter((g) => g.fields.some(differs)).flatMap((g) => g.attrs),
     )
     let freshElement = fresh.find((c) => c.name === tag)?.xml
-    if (tag === 'w:ind' && original?.charIndents) {
-      const cancels = charIndentCancelAttrs(original.charIndents, format).filter((attribute) =>
+    const originalChars = tag === 'w:ind' ? savedCharIndents(rawPPr, original) : undefined
+    if (originalChars) {
+      const cancels = charIndentCancelAttrs(originalChars, format).filter((attribute) =>
         rebuilt.has(attribute.slice(0, attribute.indexOf('='))),
       )
       if (cancels.length)
@@ -2076,8 +2094,10 @@ export function mergePPrFormat(
   // (`w:firstLineChars="0"`…), or Word — and this parser — would keep
   // resolving the character indent over the new value; components the new
   // format still carries are re-emitted (with their *Chars attribute) instead
-  if (original?.charIndents && !sameIndent(original, format ?? {})) {
-    const cancel = charIndentCancelAttrs(original.charIndents, format)
+  const originalChars =
+    original && !sameIndent(original, format ?? {}) ? savedCharIndents(rawPPr, original) : undefined
+  if (originalChars) {
+    const cancel = charIndentCancelAttrs(originalChars, format)
     if (cancel.length > 0) {
       const at = fresh.findIndex((c) => c.name === 'w:ind')
       const xml =
@@ -3672,14 +3692,18 @@ function mergeRFontsXml(rawXml: string, run: Run): string {
   // run.font may just be the parse-side derivation of an ascii-only element; writing
   // it back would invent an eastAsia slot that pins CJK to the old Latin font. Only
   // write eastAsia when the slot already existed or the user actually changed it.
-  const rawPrimary = attrs.get('w:eastAsia') ?? attrs.get('w:ascii') ?? attrs.get('w:hAnsi')
+  const rawPrimary = attrs.get('w:eastAsia') ?? attrs.get('w:ascii')
   const hadEastAsia = attrs.has('w:eastAsia') || attrs.has('w:eastAsiaTheme')
   const set = (slot: string, theme: string, value: string) => {
     attrs.set(slot, escapeXmlAttr(value))
     attrs.delete(theme)
   }
   // slots still equal to their theme-resolved value are untouched: keep the theme attrs
-  if (run.fontAscii && run.fontAscii !== run.themeRFonts?.fontAscii) {
+  if (
+    run.fontAscii &&
+    (run.fontAscii !== attrs.get('w:ascii') || run.themeRFonts?.fontAscii !== undefined) &&
+    run.fontAscii !== run.themeRFonts?.fontAscii
+  ) {
     set('w:ascii', 'w:asciiTheme', run.fontAscii)
     set('w:hAnsi', 'w:hAnsiTheme', run.fontAscii)
   }
@@ -3690,7 +3714,7 @@ function mergeRFontsXml(rawXml: string, run: Run): string {
   ) {
     set('w:eastAsia', 'w:eastAsiaTheme', run.font)
   }
-  if (run.fontCs) set('w:cs', 'w:cstheme', run.fontCs)
+  if (run.fontCs && run.fontCs !== attrs.get('w:cs')) set('w:cs', 'w:cstheme', run.fontCs)
   return `<w:rFonts${[...attrs].map(([k, v]) => ` ${k}="${v}"`).join('')}/>`
 }
 
@@ -3835,10 +3859,10 @@ export function mergeRPrModel(rawRPr: string, run: Run, insideLink: boolean): st
           : raw === 'Hyperlink'
       }
       case 'rFonts': {
-        // mirrors the parse side: primary = eastAsia ?? ascii ?? hAnsi, latin = ascii ?? hAnsi,
-        // complex-script = literal w:cs
+        // The parser keeps High ANSI separate from ASCII. A lone hAnsi
+        // declaration leaves the ASCII and primary model fonts inherited.
         const attrs = rawOf('w:rFonts')
-        const ascii = rawAttr(attrs, 'w:ascii') ?? rawAttr(attrs, 'w:hAnsi')
+        const ascii = rawAttr(attrs, 'w:ascii')
         // an absent model fontCs is "untouched", not a removal: editor-rebuilt
         // Runs drop unmodeled fields, and losing w:cs on an unrelated edit
         // would corrupt complex-script runs (mergeRFontsXml likewise only
@@ -3846,10 +3870,8 @@ export function mergeRPrModel(rawRPr: string, run: Run, insideLink: boolean): st
         // a model value resolved from a theme ref counts as untouched: the literal
         // attrs can never equal it, and rebuilding would materialize the theme link
         return (
-          ((rawAttr(attrs, 'w:eastAsia') ?? ascii) === run.font ||
-            (run.font !== undefined && run.font === run.themeRFonts?.font)) &&
-          (ascii === run.fontAscii ||
-            (run.fontAscii !== undefined && run.fontAscii === run.themeRFonts?.fontAscii)) &&
+          (run.themeRFonts?.font ?? rawAttr(attrs, 'w:eastAsia') ?? ascii) === run.font &&
+          (run.themeRFonts?.fontAscii ?? ascii) === run.fontAscii &&
           (run.eastAsiaFont === undefined ||
             rawAttr(attrs, 'w:eastAsia') === run.eastAsiaFont ||
             run.eastAsiaFont === run.themeRFonts?.font) &&
@@ -3924,7 +3946,12 @@ export function mergeRPrModel(rawRPr: string, run: Run, insideLink: boolean): st
     if (groupEqual(g.key)) continue
     for (const t of g.tags) rebuiltTags.add(t)
     const rawRFonts = g.key === 'rFonts' ? rawOf('w:rFonts') : undefined
-    if (rawRFonts && (run.font || run.fontAscii)) {
+    // A CS-only edit on a run with inherited primary/ASCII fonts must also
+    // keep its independent High ANSI slot and hint. Explicit primary/ASCII
+    // removals still use the freshly generated element.
+    const csOnly =
+      rawRFonts && run.fontCs && !rawAttr(rawRFonts, 'w:ascii') && !rawAttr(rawRFonts, 'w:eastAsia')
+    if (rawRFonts && (run.font || run.fontAscii || csOnly)) {
       // edited font slots merge into the original element instead of replacing it
       freshOut.push({ name: 'w:rFonts', xml: mergeRFontsXml(rawRFonts, run) })
     } else {
