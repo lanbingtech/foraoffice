@@ -528,6 +528,7 @@ export interface GapMetrics {
    *  header/footer strips belong (alignGapHfStrips); defaults to marginLeft/Right */
   sectionMarginLeft?: number
   sectionMarginRight?: number
+  cropSides?: { previousLeft: number; previousRight: number; nextRight: number }
   sectionMarginTop?: number
   /** the next page's left edge and width on the shared paper (differing-width
    *  documents center narrower pages); absent = the page spans the paper */
@@ -648,6 +649,11 @@ export function makeGapEl(m: GapMetrics, kind: GapKind, cols?: number): HTMLElem
   // (indent included), which is the wrong place for a strip
   gap.style.setProperty('--gap-ml', `${m.sectionMarginLeft ?? m.marginLeft}px`)
   gap.style.setProperty('--gap-mr', `${m.sectionMarginRight ?? m.marginRight}px`)
+  if (m.cropSides) {
+    gap.style.setProperty('--crop-prev-left', `${m.cropSides.previousLeft}px`)
+    gap.style.setProperty('--crop-prev-right', `${m.cropSides.previousRight}px`)
+    gap.style.setProperty('--crop-next-right', `${m.cropSides.nextRight}px`)
+  }
   if (kind === 'table') {
     // A real spanning cell is required here. Chromium's collapsed-border table
     // painting can leak the neighboring row's border/fill through a cell-less
@@ -817,7 +823,7 @@ export function setPageGaps(
     }
     // boundaryY in the key: a reused widget must not keep a stale boundary
     // (cols too: a table-structure edit must rebuild the spanning cell)
-    const mKey = `${metrics.marginTop},${metrics.marginBottom},${metrics.bodyMarginBottom ?? -1},${metrics.marginLeft},${metrics.marginRight},${Math.round(gap.pullUp ?? 0)},${Math.round(gap.boundaryY ?? -1)},${gap.cols ?? 0},${Math.round(metrics.pageLeft ?? -1)}`
+    const mKey = `${metrics.marginTop},${metrics.marginBottom},${metrics.bodyMarginBottom ?? -1},${metrics.marginLeft},${metrics.marginRight},${Math.round(gap.pullUp ?? 0)},${Math.round(gap.boundaryY ?? -1)},${gap.cols ?? 0},${Math.round(metrics.pageLeft ?? -1)},${metrics.sectionMarginLeft},${metrics.sectionMarginRight},${metrics.cropSides ? Object.values(metrics.cropSides).join(',') : ''}`
     const build = (as: GapKind) => {
       const el = makeGapEl(metrics, as, gap.cols)
       // margins don't apply to table-rows and cuts are zero-height markers;
@@ -1426,27 +1432,51 @@ export function syncPageSheets(
   zoomFactor: number,
   first: { left: number; width: number } | null,
   cuts?: readonly PageCut[],
+  marginsOf?: (cut: PageCut) => { top: number; right: number; bottom: number; left: number },
 ): void {
-  let layer = wrap.querySelector(':scope > .page-sheets') as HTMLElement | null
+  const existing = wrap.querySelector<HTMLElement>(':scope > .page-sheets')
   if (!first) {
-    layer?.remove()
+    existing?.remove()
     return
   }
-  if (!layer) {
-    layer = document.createElement('div')
-    layer.className = 'page-sheets'
-    wrap.appendChild(layer)
+  // Keep the previous paper in place during geometry reads; unchanged frames
+  // should not invalidate the presentation tree on a convergence pass.
+  const frames = pageFramesFromGaps(wrap, zoomFactor, first, cuts)
+  const framedCuts = cuts?.filter((cut, index) => index === 0 || cut.gap)
+  const layer = existing ?? document.createElement('div')
+  const additions = document.createDocumentFragment()
+  const sheets = Array.from(layer.children) as HTMLElement[]
+  let used = 0
+  for (const [index, frame] of frames.entries()) {
+    if (frame.bottom - frame.top <= 10) continue
+    const el = sheets[used] ?? document.createElement('div')
+    if (!sheets[used]) {
+      el.className = 'page-sheet'
+      additions.append(el)
+    }
+    used++
+    const cut = framedCuts?.[index]
+    if (cut && marginsOf) {
+      for (const [side, value] of Object.entries(marginsOf(cut))) {
+        const key = `--crop-${side}`
+        const px = `${value}px`
+        if (el.style.getPropertyValue(key) !== px) el.style.setProperty(key, px)
+      }
+    }
+    const top = `${frame.top}px`
+    const height = `${frame.bottom - frame.top}px`
+    const left = `${frame.left}px`
+    const width = `${frame.width}px`
+    if (el.style.top !== top) el.style.top = top
+    if (el.style.height !== height) el.style.height = height
+    if (el.style.left !== left) el.style.left = left
+    if (el.style.width !== width) el.style.width = width
   }
-  layer.textContent = ''
-  for (const f of pageFramesFromGaps(wrap, zoomFactor, first, cuts)) {
-    if (f.bottom - f.top <= 10) continue
-    const el = document.createElement('div')
-    el.className = 'page-sheet'
-    el.style.top = `${f.top}px`
-    el.style.height = `${f.bottom - f.top}px`
-    el.style.left = `${f.left}px`
-    el.style.width = `${f.width}px`
-    layer.appendChild(el)
+  for (const sheet of sheets.slice(used)) sheet.remove()
+  if (additions.firstChild) layer.append(additions)
+  if (!existing) {
+    layer.className = 'page-sheets'
+    wrap.append(layer)
   }
 }
 

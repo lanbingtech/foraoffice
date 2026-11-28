@@ -265,6 +265,7 @@ export {
   substituteBullet,
   markerFallbackFace,
   SEGOE_UI_SYMBOL_RE,
+  appendListMarkerInfos,
   computeListMarkerInfos,
   computeListMarkers,
   computeListValues,
@@ -273,6 +274,7 @@ export {
   markerTabAdvance,
   type ListItemRef,
   type ListMarkerInfo,
+  type ListMarkerState,
 } from './list-markers'
 
 export { previewFontSettings } from './font-settings'

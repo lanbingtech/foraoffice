@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   GAP_BAND,
   gapLedgerOf,
@@ -22,9 +22,13 @@ import {
   syncPageBorders,
   syncFloatShifts,
 } from '../src/renderer/editor/pagination-gaps'
-import { leadDropsSpaceBefore } from '../src/renderer/pagination-cuts'
+import { leadDropsSpaceBefore, type PageCut } from '../src/renderer/pagination-cuts'
 import { measureBlocks } from '../src/renderer/pagination-measure'
-import { createLineRectsCache, singleCutCell } from '../src/renderer/pagination'
+import {
+  createLineRectsCache,
+  createTableGapReads,
+  singleCutCell,
+} from '../src/renderer/pagination'
 import { Editor } from '@tiptap/core'
 import { NodeSelection } from '@tiptap/pm/state'
 import { buildShapeParagraphXml, parseDocx } from '@genoffice/docx-engine'
@@ -40,6 +44,21 @@ const rowOf = (cells: number): HTMLTableRowElement => {
 }
 
 const m = { marginTop: 96, marginBottom: 96, marginLeft: 90, marginRight: 90 }
+
+it('keeps the closing and opening crop marks at their respective section margins', () => {
+  const el = makeGapEl(
+    {
+      ...m,
+      sectionMarginLeft: 120,
+      cropSides: { previousLeft: 48, previousRight: 90, nextRight: 60 },
+    },
+    'block',
+  )
+  expect(el.style.getPropertyValue('--crop-prev-left')).toBe('48px')
+  expect(el.style.getPropertyValue('--crop-prev-right')).toBe('90px')
+  expect(el.style.getPropertyValue('--gap-ml')).toBe('120px')
+  expect(el.style.getPropertyValue('--crop-next-right')).toBe('60px')
+})
 
 describe('gap ledger', () => {
   it('records the header push even when zero so a later page clears an earlier one', () => {
@@ -302,6 +321,52 @@ describe('createLineRectsCache', () => {
     expect(rectsOf(el, 1)).toBe(a)
     const other = document.createElement('p')
     expect(rectsOf(other, 1)).not.toBe(a)
+  })
+})
+
+describe('createTableGapReads', () => {
+  it('reuses row and gap geometry across cuts while preserving the real row grid', () => {
+    const block = document.createElement('div')
+    block.innerHTML = `<table><thead><tr id="thead"><th></th></tr></thead><tbody>
+      <tr id="header"><td colspan="2"></td><td></td></tr>
+      <tr class="page-gap page-gap-inline"><td colspan="7"></td></tr>
+      <tr class="page-repeat-header page-gap-inline"><td colspan="8"></td></tr>
+      <tr id="first"><td><table class="doc-nested-table"><tbody><tr id="nested">
+        <td colspan="9"><span class="page-gap-inline"></span></td>
+      </tr></tbody></table></td></tr>
+      <tr id="last"><td></td></tr>
+    </tbody></table>`
+    const table = block.querySelector('table')!
+    const [head, header, first, last] = ['thead', 'header', 'first', 'last'].map((id) =>
+      block.querySelector<HTMLElement>(`#${id}`)!,
+    )
+    const rect = (element: Element, top: number, height: number) =>
+      vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ top, height } as DOMRect)
+    const wrapRect = rect(block, 100, 160)
+    const headerRect = rect(header, 112, 24)
+    rect(first, 190, 24)
+    rect(last, 214, 24)
+    const gapRects = [...block.querySelectorAll('.page-gap-inline')].map((gap, i) =>
+      rect(gap, [145, 175, 214][i], [30, 15, 10][i]),
+    )
+    const blockQueries = vi.spyOn(block, 'querySelectorAll')
+    const tableQueries = vi.spyOn(table, 'querySelectorAll')
+
+    const pass = createTableGapReads(2)
+    expect(pass.rowsOf(block)).toEqual([head, header, first, last])
+    expect(pass.rowOffset(block, first)).toBe(22.5)
+    expect(pass.rowOffset(block, last)).toBe(29.5)
+    expect(pass.rowsOf(block)).toEqual([head, header, first, last])
+    expect(pass.gridOf(first)).toEqual({ rows: [header, first, last], columns: 3 })
+    expect(pass.gridOf(last)).toEqual({ rows: [header, first, last], columns: 3 })
+    expect(pass.rowHeight(header)).toBe(12)
+    expect(pass.rowHeight(header)).toBe(12)
+    expect(blockQueries.mock.calls).toEqual([['tr'], ['.page-gap-inline']])
+    expect(tableQueries).toHaveBeenCalledTimes(1)
+    for (const read of [wrapRect, headerRect, ...gapRects]) expect(read).toHaveBeenCalledTimes(1)
+
+    wrapRect.mockReturnValue({ top: 110, height: 160 } as DOMRect)
+    expect(createTableGapReads(2).rowOffset(block, first)).toBe(17.5)
   })
 })
 
@@ -602,6 +667,30 @@ describe('page frames and sheets (differing-width documents, genoffice#246)', ()
     expect(pageFramesFromGaps(wrap, 1)).toEqual([{ top: 0, bottom: 1056, left: 0, width: 816 }])
   })
 
+  it('keeps each sheet?s crop guides relative to its own paper, including the first and last', () => {
+    const wrap = wrapEl()
+    const cuts = [{ pageNo: 1 }, { pageNo: 2, gap: {} }, { pageNo: 3, gap: {} }] as PageCut[]
+    const marginsOf = ({ pageNo }: PageCut) => ({
+      left: pageNo === 2 ? 80 : 120,
+      right: pageNo === 2 ? 100 : 90,
+      top: 50 + pageNo,
+      bottom: 60 - pageNo,
+    })
+    syncPageSheets(wrap, 1, { left: 120, width: 816 }, cuts, marginsOf)
+    const sheets = [...wrap.querySelectorAll<HTMLElement>('.page-sheet')]
+    expect(
+      sheets.map((el) =>
+        ['left', 'right', 'top', 'bottom'].map((side) =>
+          el.style.getPropertyValue(`--crop-${side}`),
+        ),
+      ),
+    ).toEqual([
+      ['120px', '90px', '51px', '59px'],
+      ['80px', '100px', '52px', '58px'],
+      ['120px', '90px', '53px', '57px'],
+    ])
+  })
+
   it('paints one sheet per page and clears the layer when the paper is uniform again', () => {
     const wrap = wrapEl()
     syncPageSheets(wrap, 1, { left: 120, width: 816 })
@@ -613,6 +702,8 @@ describe('page frames and sheets (differing-width documents, genoffice#246)', ()
     ])
     expect(sheets[0].style.top).toBe('0px')
     expect(sheets[0].style.height).toBe('1096px')
+    syncPageSheets(wrap, 1, { left: 120, width: 816 })
+    expect(wrap.querySelector('.page-sheet')).toBe(sheets[0])
     syncPageSheets(wrap, 1, null)
     expect(wrap.querySelector('.page-sheets')).toBeNull()
   })

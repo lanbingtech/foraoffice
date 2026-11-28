@@ -187,6 +187,7 @@ import {
   carryStreamedSamples,
   endnotesAnchorY,
   createLineRectsCache,
+  createTableGapReads,
   anchorElement,
   lineStartAnchor,
   liveSectionsForDocument,
@@ -205,7 +206,6 @@ import {
   pageReaderShadow,
   type FlowCarry,
   LEAD_ROW_TOL_PX,
-  outerTableRows,
   type PageCut,
   pageNumbers,
   sliceWithLineSplit,
@@ -329,7 +329,7 @@ import {
 } from './line-metrics'
 import { saveUntilPersisted } from './save-until-persisted'
 import { SPELLCHECK_KEY, spellcheckEnabled } from './spellcheck-pref'
-import { cachedByDoc } from './doc-cache'
+import { createDocumentSummary } from './document-summary'
 import { useShallowStable, useStableCallbacks } from './use-stable'
 import { FindPanel } from './components/FindPanel'
 import { ZoomDialog } from './components/ZoomDialog'
@@ -627,8 +627,7 @@ const EMPTY_BLOCKS: Block[] = []
 
 // O(doc) derivations cached by PM doc reference: caret moves and unrelated
 // state updates reuse the last result instead of re-walking the whole document
-const wordCountOfDoc = cachedByDoc((d) => countWords(documentTextForWordCount(d)))
-const revisionsOfDoc = cachedByDoc((d) => collectRevisions(d))
+const emptyRevisions: RevisionRange[] = []
 
 /**
  * Document position of a measured line-start DOM anchor. posAtDOM works from the DOM
@@ -3487,7 +3486,9 @@ export function App({
   const compareWithFile = useCallback(() => compareWithFileImpl(reviewCtxRef.current), [])
 
   // the ribbon's revision badge walks every block: paced with the word count below
-  const [revisionRanges, setRevisionRanges] = useState<RevisionRange[]>([])
+  const documentSummary = useMemo(() => createDocumentSummary(Boolean(doc)), [doc])
+  const [summary, setSummary] = useState<ReturnType<typeof documentSummary.read>>()
+  const revisionRanges = summary?.revisions ?? emptyRevisions
   // open comment threads add the markup column right of the paper: width-fit
   // zoom must count it or the canvas overflows the pane
   // (Simple Markup collapses threads to glyphs inside the page margin: no column)
@@ -4761,6 +4762,7 @@ export function App({
         const overlayPages: number[] = []
         const carries: FlowCarry[] = []
         const lineRectsOf = createLineRectsCache()
+        const tableGapReads = createTableGapReads(factor)
         const gapIds = new Set<string>()
         let firstPageFloats: { els: HTMLElement[]; key: string } | undefined
         if (viewMode === 'print' && !readMode) {
@@ -4948,6 +4950,23 @@ export function App({
               // header/footer strip inset on the paper (alignGapHfStrips): survives
               // the inline/in-cell gaps below overriding marginLeft/Right with the host
               // block's paper offset (which folds in paragraph indents and cell positions)
+              ...(mirrorMargins ||
+              prevSec.marginLeft !== nextSec.marginLeft ||
+              prevSec.marginRight !== nextSec.marginRight
+                ? {
+                    cropSides: {
+                      previousLeft: twipsToPx(
+                        pageMargins(prevSec, cuts[k].pageNo, mirrorMargins).left,
+                      ),
+                      previousRight: twipsToPx(
+                        pageMargins(prevSec, cuts[k].pageNo, mirrorMargins).right,
+                      ),
+                      nextRight: twipsToPx(
+                        pageMargins(nextSec, cuts[k + 1].pageNo, mirrorMargins).right,
+                      ),
+                    },
+                  }
+                : {}),
               sectionMarginLeft: bodyLeftOf(nextSec, k + 1),
               sectionMarginRight: twipsToPx(nextSec.marginRight),
               sectionMarginTop: twipsToPx(nextSec.marginTop),
@@ -5166,7 +5185,7 @@ export function App({
             if (lead.kind === 'row' || lead.kind === 'cell') {
               // the previous pass's gap rows and repeated headers are not rows of the
               // measured table (domTableRows): index the same list
-              const realRows = outerTableRows(b.el)
+              const realRows = tableGapReads.rowsOf(b.el)
               if (lead.kind === 'row') {
                 const tr = realRows[lead.row ?? -1]
                 if (!tr) {
@@ -5175,12 +5194,7 @@ export function App({
                 }
                 // the I11 shadow of the row sampler: the measured row top must still be
                 // where the DOM row sits (a tr's offset includes in-table gaps above it)
-                const gapRects = Array.from(b.el.querySelectorAll('.page-gap-inline')).map((g) =>
-                  g.getBoundingClientRect(),
-                )
-                const trTop = tr.getBoundingClientRect().top
-                const gapsAbove = gapRects.reduce((s, g) => (g.top <= trTop ? s + g.height : s), 0)
-                const off = (trTop - b.el.getBoundingClientRect().top - gapsAbove) / factor
+                const off = tableGapReads.rowOffset(b.el, tr)
                 const rowTop = (b.tableRows ?? [])
                   .slice(0, lead.row)
                   .reduce((s, r) => s + r.height, 0)
@@ -5194,6 +5208,8 @@ export function App({
                 )
                 try {
                   const $pos = editor.view.state.doc.resolve(editor.view.posAtDOM(tr, 0))
+                  // The page-gap cell spans exactly the live grid, excluding prior decorations.
+                  const grid = tableGapReads.gridOf(tr)
                   // w:tblHeader repetition: the engine reserved slice.repeatHeader.height
                   // at the top of this page's column, so cloning the source header rows
                   // below the gap fills exactly that space. Clones are decorations —
@@ -5201,46 +5217,21 @@ export function App({
                   let repeatHeaderEls: HTMLElement[] | undefined
                   let repeatHeaderPx = 0
                   if (slice.repeatHeader) {
-                    const tableEl = tr.closest('table')
-                    const srcRows = tableEl
-                      ? (Array.from(tableEl.querySelectorAll(':scope > tbody > tr')).filter(
-                          (r) =>
-                            !r.classList.contains('page-gap') &&
-                            !r.classList.contains('page-repeat-header'),
-                        ) as HTMLElement[])
-                      : []
                     const els: HTMLElement[] = []
                     let acc = 0
-                    for (const row of srcRows) {
+                    for (const row of grid.rows) {
                       if (acc >= slice.repeatHeader.height - 1.5) break
                       const clone = row.cloneNode(true) as HTMLElement
                       clone.classList.add('page-gap-inline', 'page-repeat-header')
                       clone.setAttribute('contenteditable', 'false')
                       els.push(clone)
-                      acc += row.getBoundingClientRect().height / factor
+                      acc += tableGapReads.rowHeight(row)
                     }
                     if (els.length > 0) {
                       repeatHeaderEls = els
                       repeatHeaderPx = acc
                     }
                   }
-                  // the spanning gap cell must cover exactly the table's column
-                  // grid: a wider colSpan adds phantom columns, which collapses
-                  // colgroup-less fixed-layout tables to ~1px columns (makeGapEl)
-                  const gridCols = Math.max(
-                    1,
-                    ...Array.from(
-                      tr
-                        .closest('table')
-                        ?.querySelectorAll<HTMLTableRowElement>(':scope > tbody > tr') ?? [],
-                    )
-                      .filter(
-                        (r) =>
-                          !r.classList.contains('page-gap') &&
-                          !r.classList.contains('page-repeat-header'),
-                      )
-                      .map((r) => Array.from(r.cells).reduce((s, c) => s + c.colSpan, 0)),
-                  )
                   for (let d = $pos.depth; d > 0; d--) {
                     if ($pos.node(d).type.name === 'docTableRow') {
                       // no notes area in table gaps: pad the full remainder
@@ -5248,7 +5239,7 @@ export function App({
                       gaps.push({
                         pos: $pos.before(d),
                         kind: 'table',
-                        cols: gridCols,
+                        cols: grid.columns,
                         page: k + 1,
                         boundaryY: slice.start,
                         ...(fsplit ? { floatGap: true } : {}),
@@ -5666,6 +5657,16 @@ export function App({
             factor,
             mixedPaper && viewMode === 'print' && !readMode ? (firstFrame ?? null) : null,
             cuts,
+            (cut) => {
+              const set = secList?.[cut.section]?.settings ?? pbSec!
+              const sides = pageMargins(set, cut.pageNo, mirrorMargins)
+              return {
+                top: effectiveTopPx(set, cut.hf.headerPx),
+                bottom: effectiveBottomPx(set, cut.hf.footerPx),
+                left: twipsToPx(sides.left),
+                right: twipsToPx(sides.right),
+              }
+            },
           )
         }
         stage('sheets')
@@ -6060,7 +6061,7 @@ export function App({
   // status-bar word count: the whole text is re-walked per doc, so pace it
   // (Word refreshes its count on idle too). A trailing throttle, not a
   // debounce: the streamed tail of a phased open would keep resetting one
-  const [wordCount, setWordCount] = useState(0)
+  const wordCount = summary?.words ?? 0
   // Word's "selected/total" pair; 0 means no selection, so the bar falls back
   // to the plain total. Cheap enough (a text range, not a document walk) to
   // follow the selection directly rather than ride the throttle above.
@@ -6073,13 +6074,13 @@ export function App({
     const pmDoc = editor.state.doc
     return [
       ...collectHfRevisions(hfState),
-      ...collectTextboxRevisions(pmDoc),
+      ...documentSummary.read(pmDoc).textboxes,
       ...collectNoteRevisions(pmDoc, 'footnote', footnotes),
       ...collectNoteRevisions(pmDoc, 'endnote', endnotes),
     ]
-    // revisionRanges: the throttled document-change trigger
+    // The snapshot advances even when only notes or textboxes changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor, doc, hfState, footnotes, endnotes, revisionRanges])
+  }, [editor, doc, hfState, footnotes, endnotes, documentSummary, summary])
   storyRevisionsRef.current = storyRevisions
   const allRevisions = useMemo(
     () => (storyRevisions.length ? [...revisionRanges, ...storyRevisions] : revisionRanges),
@@ -6137,11 +6138,11 @@ export function App({
     let timer = 0
     const refresh = () => {
       timer = 0
-      setWordCount(wordCountOfDoc(editor.state.doc))
-      setRevisionRanges(doc ? revisionsOfDoc(editor.state.doc) : [])
+      setSummary(documentSummary.read(editor.state.doc))
       setSelectionWordCount(selectedWordCount(editor.state.doc, editor.state.selection))
     }
-    const onUpdate = () => {
+    const onUpdate = ({ transaction }: { transaction: Transaction }) => {
+      documentSummary.observe(transaction, editor.state.doc)
       if (!timer) timer = window.setTimeout(refresh, WORD_COUNT_THROTTLE_MS)
     }
     refresh()
@@ -6150,7 +6151,7 @@ export function App({
       window.clearTimeout(timer)
       editor.off('update', onUpdate)
     }
-  }, [editor, doc, docLoading])
+  }, [editor, documentSummary, docLoading])
 
   /** Word word-count dialog: pages/lines estimated from the current layout */
   const openStats = useCallback(() => {
@@ -8628,6 +8629,13 @@ export function App({
     '--page-bg': pageColor ? `#${pageColor}` : undefined,
     '--page-cols': colFlow && viewMode === 'print' ? colFlow.cols : undefined,
     // end-of-document footnote area sits on the last page's sheet
+    '--crop-first-ml': firstPageMargins ? `${twipsToPx(firstPageMargins.left)}px` : undefined,
+    '--crop-first-mr': firstPageMargins ? `${twipsToPx(firstPageMargins.right)}px` : undefined,
+    '--crop-last-ml': lastPageMargins ? `${twipsToPx(lastPageMargins.left)}px` : undefined,
+    '--crop-last-mr': lastPageMargins ? `${twipsToPx(lastPageMargins.right)}px` : undefined,
+    '--crop-last-mb': lastSection
+      ? `${effectiveBottomPx(lastSection, pageLayoutRef.current?.cuts.at(-1)?.hf.footerPx ?? singleHfPx.footerPx)}px`
+      : undefined,
     '--last-page-w': mixedPaper && lastBox ? `${lastBox.width}px` : undefined,
     '--last-page-x': mixedPaper && lastSection ? `${pageLeftOf(lastSection)}px` : undefined,
   } as CSSProperties
