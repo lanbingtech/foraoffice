@@ -88,6 +88,7 @@ export type {
   DocsSaveResult,
   DocsSaveOutcome,
   DocsErrorCode,
+  DocsSelectedCell,
   DocsSelection,
 } from '../shared/operation-result'
 export type { DocsStructurePlan } from '../shared/structure-plan'

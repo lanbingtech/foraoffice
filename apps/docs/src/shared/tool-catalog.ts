@@ -38,7 +38,7 @@ export function docsToolCatalog(): AgentToolDef[] {
     {
       name: 'get_document_context',
       description:
-        'Get the latest document block previews, full-text stats, editable status and authorized resource context. In MCP, selection contains the current caret or selected text. If actionSelection is present, it identifies the captured target for edits under that action. Refreshes the full caller baseline, including document-side state. Block indexes change after modifications; call this when you need up-to-date indexes or a stale-target error requires full context.',
+        'Get the latest document block previews, full-text stats, editable status and authorized resource context. In MCP, selection contains the current caret, selected text, or selected table cells with their grid coordinates and spans. If actionSelection is present, it identifies the captured target for edits under that action. Refreshes the full caller baseline, including document-side state. Block indexes change after modifications; call this when you need up-to-date indexes or a stale-target error requires full context.',
       inputSchema: { type: 'object', properties: {}, required: [] },
     },
     {
