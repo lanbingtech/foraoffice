@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Editor, type JSONContent } from '@tiptap/core'
+import { CellSelection, TableMap } from '@tiptap/pm/tables'
 import { parseDocx, saveDocx } from '@genoffice/docx-engine'
 import { buildDocx } from '../../../packages/docx-engine/tests/helpers/build-docx'
 import {
@@ -122,6 +123,52 @@ function cellFixture(content: JSONContent[]) {
 }
 
 describe('AI table cell selection through the SDK runtime', () => {
+  it('keeps the captured cell grid and projects its text after a document edit', async () => {
+    const editor = cellFixture([
+      text('secret', [{ type: 'redaction', attrs: { label: 'private' } }]),
+      text('deleted', [{ type: 'del', attrs: revision('del') }]),
+      text('visible'),
+    ])
+    const { doc } = editor.state
+    const [first, second] = TableMap.get(doc.firstChild!).map
+    editor.view.dispatch(
+      editor.state.tr.setSelection(CellSelection.create(doc, first + 1, second + 1)),
+    )
+    const runtime = createDocsRuntime({
+      current: () => ({ editor, identity: editor, numIds: NUM_IDS }),
+    })
+    const router = createDocsCommandRouter(runtime)
+    router.bindScope('cell-action', runtime.capture())
+    const read = (requestId: string) =>
+      router.handle({
+        requestId,
+        callerId: 'harness',
+        bindingId: 'cell-action',
+        command: 'read_document',
+        payload: {},
+      })
+    const cells = [
+      { row: 0, col: 0, rowSpan: 1, colSpan: 1, text: '{{private}}visible' },
+      { row: 0, col: 1, rowSpan: 1, colSpan: 1, text: 'other cell' },
+    ]
+    try {
+      expect(await read('before-edit')).toMatchObject({
+        actionSelection: { kind: 'cells', startBlockIndex: 0, cells },
+      })
+      editor.commands.insertContentAt(0, '<p>Before the table</p>')
+      editor.commands.setTextSelection(1)
+      const after = await read('after-edit')
+      expect(after).toMatchObject({
+        selection: { kind: 'caret', startBlockIndex: 0 },
+        actionSelection: { kind: 'cells', startBlockIndex: 1, cells },
+      })
+      expect(JSON.stringify(after)).not.toContain('secret')
+    } finally {
+      router.dispose()
+      runtime.dispose()
+    }
+  })
+
   it('reads the exact styled span and keeps the frozen action on the new table', async () => {
     const { editor, block } = await fixture()
     const range = select(editor, block)
