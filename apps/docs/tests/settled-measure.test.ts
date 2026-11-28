@@ -55,53 +55,22 @@ const nodeInsert = (editor: Editor) =>
 describe('SettledParagraphCache', () => {
   const node = {} as ProseMirrorNode
 
-  it('reads independent paragraphs with their inline gaps hidden in one pass', () => {
+  it('measures each paragraph at its original position with only its own page gap hidden', () => {
     const root = document.createElement('div')
     root.innerHTML = '<p><span class="page-gap-inline"></span></p>'.repeat(2)
     const gaps = Array.from(root.querySelectorAll<HTMLElement>('.page-gap-inline'))
     const elements = Array.from(root.children)
-    const viewOf = (dom: HTMLElement) =>
-      ({ dom, nodeDOM: (pos: number) => elements[pos] }) as unknown as EditorView
-    const view = viewOf(root)
+    const view = { dom: root, nodeDOM: (pos: number) => elements[pos] } as unknown as EditorView
     const cache = new SettledParagraphCache<number[]>(shiftAll)
     const paragraphs = elements.map((_, pos) => ({ node: {} as ProseMirrorNode, pos }))
 
     const result = cache.measurePass(view, paragraphs, ({ pos }) => {
-      expect(gaps.map((gap) => gap.style.display)).toEqual(['none', 'none'])
+      expect(gaps[pos].style.display).toBe('none')
+      expect(gaps[1 - pos].style.display).toBe('')
       return [pos]
     })
     expect(result).toEqual([[0], [1]])
     expect(gaps.map((gap) => gap.style.display)).toEqual(['', ''])
-
-    const individually = ({ pos }: { pos: number }) => {
-      expect(gaps[pos].style.display).toBe('none')
-      expect(gaps[1 - pos].style.display).toBe('')
-      return [pos]
-    }
-    root.style.columnCount = '2'
-    cache.clear()
-    document.body.appendChild(root)
-    try {
-      cache.measurePass(view, paragraphs, individually)
-    } finally {
-      root.remove()
-    }
-    expect(gaps.map((gap) => gap.style.display)).toEqual(['', ''])
-
-    const float = document.createElement('div')
-    float.className = 'doc-table-float-left'
-    root.appendChild(float)
-    const withFloat = viewOf(document.createElement('div'))
-    withFloat.dom.append(...root.childNodes)
-    cache.clear()
-    cache.measurePass(withFloat, paragraphs, individually)
-    expect(gaps.map((gap) => gap.style.display)).toEqual(['', ''])
-
-    float.className = 'doc-para-frame-box-float'
-    const withFrame = viewOf(document.createElement('div'))
-    withFrame.dom.append(...withFloat.dom.childNodes)
-    cache.clear()
-    cache.measurePass(withFrame, paragraphs, individually)
   })
 
   it('re-measures until two consecutive passes agree, then reuses the result', () => {
