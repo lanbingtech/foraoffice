@@ -30,7 +30,7 @@ import {
   type KbFileInfo,
   type MindMapTreeNode,
 } from '@genoffice/agent-core'
-import { redactTextBetween, type RedactableNode } from './redact-view'
+import { redactEditorRange } from './redact-view'
 import { imageGenerationAvailable, mediaAnalysisAvailable } from '@genoffice/ai-provider/browser'
 import type { AiSettings, AttachmentAddResult, AttachmentMeta } from '../../shared/ipc'
 import { ATTACHMENT_IMAGE_EXTS } from '../../shared/ipc'
@@ -1004,12 +1004,7 @@ export function AiPanel({
   const liveSelection = editor.state.selection
   const selectionText = liveSelection.empty
     ? ''
-    : redactTextBetween(
-        editor.getJSON() as RedactableNode,
-        liveSelection.from,
-        liveSelection.to,
-        '\n',
-      )
+    : redactEditorRange(editor.state.doc, liveSelection.from, liveSelection.to, '\n')
         .replace(/\s+/g, ' ')
         .trim()
   const hasScopeSelection = selectionText.length > 0
@@ -1022,9 +1017,7 @@ export function AiPanel({
   const selectionScopeQuote = (): AiScopeQuoteData | undefined => {
     const { from, to, empty } = editor.state.selection
     if (empty) return undefined
-    const text = redactTextBetween(editor.getJSON() as RedactableNode, from, to, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
+    const text = redactEditorRange(editor.state.doc, from, to, ' ').replace(/\s+/g, ' ').trim()
     if (!text) return undefined
     return {
       label: t('aiScopeSelection', { words: countWords(text) }),

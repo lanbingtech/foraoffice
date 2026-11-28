@@ -4,6 +4,7 @@ import {
   type WithheldNode,
 } from '@genoffice/agent-core/redact-range'
 import { REDACT_MARK, placeholderSource } from './redact'
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 
 /**
  * The model-facing view of a document: every withheld span becomes its marker,
@@ -133,6 +134,34 @@ export function redactTextBetween(
     // an empty container, so the set has to name every one the schema has
     isLeaf: (n) => ATOM_TYPES.has(nameOf(n as RedactableNode) ?? ''),
   })
+}
+
+/** Project a live selection using its native block index. The shared walker
+ * applies the same withheld markers to each overlapping block. */
+export function redactEditorRange(
+  doc: ProseMirrorNode,
+  from: number,
+  to: number,
+  blockSeparator = '\n',
+): string {
+  if (to <= from) return ''
+  const first = doc.childAfter(from)
+  const text: string[] = []
+  let start = first.offset
+  for (let i = first.index; i < doc.childCount && start < to; i++) {
+    const child = doc.child(i)
+    if (start > from) text.push(blockSeparator)
+    text.push(
+      redactTextBetween(
+        { content: [child.toJSON()] },
+        Math.max(0, from - start),
+        to - start,
+        blockSeparator,
+      ),
+    )
+    start += child.nodeSize
+  }
+  return text.join('')
 }
 
 /** The same document with spans replaced, for callers that need the nodes. */
