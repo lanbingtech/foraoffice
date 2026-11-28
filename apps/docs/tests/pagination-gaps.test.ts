@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import {
   GAP_BAND,
   gapLedgerOf,
@@ -24,11 +24,7 @@ import {
 } from '../src/renderer/editor/pagination-gaps'
 import { leadDropsSpaceBefore, type PageCut } from '../src/renderer/pagination-cuts'
 import { measureBlocks } from '../src/renderer/pagination-measure'
-import {
-  createLineRectsCache,
-  createTableGapReads,
-  singleCutCell,
-} from '../src/renderer/pagination'
+import { createLineRectsCache, singleCutCell } from '../src/renderer/pagination'
 import { Editor } from '@tiptap/core'
 import { NodeSelection } from '@tiptap/pm/state'
 import { buildShapeParagraphXml, parseDocx } from '@genoffice/docx-engine'
@@ -321,52 +317,6 @@ describe('createLineRectsCache', () => {
     expect(rectsOf(el, 1)).toBe(a)
     const other = document.createElement('p')
     expect(rectsOf(other, 1)).not.toBe(a)
-  })
-})
-
-describe('createTableGapReads', () => {
-  it('reuses row and gap geometry across cuts while preserving the real row grid', () => {
-    const block = document.createElement('div')
-    block.innerHTML = `<table><thead><tr id="thead"><th></th></tr></thead><tbody>
-      <tr id="header"><td colspan="2"></td><td></td></tr>
-      <tr class="page-gap page-gap-inline"><td colspan="7"></td></tr>
-      <tr class="page-repeat-header page-gap-inline"><td colspan="8"></td></tr>
-      <tr id="first"><td><table class="doc-nested-table"><tbody><tr id="nested">
-        <td colspan="9"><span class="page-gap-inline"></span></td>
-      </tr></tbody></table></td></tr>
-      <tr id="last"><td></td></tr>
-    </tbody></table>`
-    const table = block.querySelector('table')!
-    const [head, header, first, last] = ['thead', 'header', 'first', 'last'].map((id) =>
-      block.querySelector<HTMLElement>(`#${id}`)!,
-    )
-    const rect = (element: Element, top: number, height: number) =>
-      vi.spyOn(element, 'getBoundingClientRect').mockReturnValue({ top, height } as DOMRect)
-    const wrapRect = rect(block, 100, 160)
-    const headerRect = rect(header, 112, 24)
-    rect(first, 190, 24)
-    rect(last, 214, 24)
-    const gapRects = [...block.querySelectorAll('.page-gap-inline')].map((gap, i) =>
-      rect(gap, [145, 175, 214][i], [30, 15, 10][i]),
-    )
-    const blockQueries = vi.spyOn(block, 'querySelectorAll')
-    const tableQueries = vi.spyOn(table, 'querySelectorAll')
-
-    const pass = createTableGapReads(2)
-    expect(pass.rowsOf(block)).toEqual([head, header, first, last])
-    expect(pass.rowOffset(block, first)).toBe(22.5)
-    expect(pass.rowOffset(block, last)).toBe(29.5)
-    expect(pass.rowsOf(block)).toEqual([head, header, first, last])
-    expect(pass.gridOf(first)).toEqual({ rows: [header, first, last], columns: 3 })
-    expect(pass.gridOf(last)).toEqual({ rows: [header, first, last], columns: 3 })
-    expect(pass.rowHeight(header)).toBe(12)
-    expect(pass.rowHeight(header)).toBe(12)
-    expect(blockQueries.mock.calls).toEqual([['tr'], ['.page-gap-inline']])
-    expect(tableQueries).toHaveBeenCalledTimes(1)
-    for (const read of [wrapRect, headerRect, ...gapRects]) expect(read).toHaveBeenCalledTimes(1)
-
-    wrapRect.mockReturnValue({ top: 110, height: 160 } as DOMRect)
-    expect(createTableGapReads(2).rowOffset(block, first)).toBe(17.5)
   })
 })
 

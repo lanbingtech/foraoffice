@@ -2,17 +2,14 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Editor } from '@tiptap/core'
-import type { DecorationSet } from '@tiptap/pm/view'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { parseDocx, saveDocx, type NumberingDef, type StyleInfo } from '@genoffice/docx-engine'
 import { buildDocx } from '../../../packages/docx-engine/tests/helpers/build-docx'
-import { blocksToPmDoc, type PmNode } from '../src/renderer/editor/convert'
+import { blocksToPmDoc } from '../src/renderer/editor/convert'
 import { editorExtensions } from '../src/renderer/editor/extensions'
-import { appendStreamedNodes } from '../src/renderer/file-actions'
 import {
   substituteBullet,
   markerFallbackFace,
-  appendListMarkerInfos,
   computeListMarkerInfos,
   computeListMarkers,
   formatNumber,
@@ -116,43 +113,6 @@ describe('computeListMarkers', () => {
     expect(markers).toEqual(['5.', '6.', '1.', '2.'])
   })
 
-  it('can extend a numbering checkpoint without changing an earlier transaction', () => {
-    const alias = def({
-      ...DECIMAL_3LVL,
-      numId: '2',
-      startOverrides: { 0: 7 },
-    })
-    const unrelated = def({ ...DECIMAL_3LVL, numId: '3', abstractNumId: '3' })
-    const numbering = defs(DECIMAL_3LVL, alias, unrelated)
-    const head = appendListMarkerInfos(
-      [
-        { numId: '1', ilvl: 1 },
-        { numId: '3', ilvl: 0 },
-      ],
-      numbering,
-    )
-    const deleted = appendListMarkerInfos(
-      [{ numId: '2', ilvl: 0, deleted: true }],
-      numbering,
-      head.state,
-    )
-    expect(deleted.markers[0]?.text).toBe('7.')
-    expect(deleted.state).toBe(head.state)
-
-    const continued = appendListMarkerInfos([{ numId: '2', ilvl: 0 }], numbering, head.state)
-    expect(continued.markers[0]?.text).toBe('7.')
-    expect(continued.state.counters.get('1')).not.toBe(head.state.counters.get('1'))
-    expect(continued.state.counters.get('3')).toBe(head.state.counters.get('3'))
-    expect(head.state.overrideApplied.size).toBe(0)
-    expect(head.state.counters.get('1')).toEqual([1, 1])
-    expect(
-      appendListMarkerInfos([{ numId: '1', ilvl: 0 }], numbering, head.state).markers[0]?.text,
-    ).toBe('2.')
-    expect(
-      appendListMarkerInfos([{ numId: '2', ilvl: 0 }], numbering, continued.state).markers[0]?.text,
-    ).toBe('8.')
-  })
-
   it('shares counters across numIds of the same abstractNum', () => {
     const a = def({ numId: '1', abstractNumId: '9', levels: DECIMAL_3LVL.levels })
     const b = def({ numId: '2', abstractNumId: '9', levels: DECIMAL_3LVL.levels })
@@ -226,134 +186,6 @@ describe('computeListMarkers', () => {
     )
     expect(markers).toEqual(['1.', '1.1', '2.'])
     editor.destroy()
-  })
-
-  it('extends trusted streamed list tails with the same markers as a full editor rebuild', () => {
-    const alias = def({
-      ...DECIMAL_3LVL,
-      numId: '2',
-      abstractNumId: '1',
-      startOverrides: { 0: 7, 1: 3 },
-    })
-    const numbering = defs(DECIMAL_3LVL, alias)
-    const item = (numId: string, ilvl: number, text: string, deleted = false): PmNode => ({
-      type: 'docListItem',
-      attrs: { kind: 'ordered', numId, ilvl, ...(deleted ? { paraMarkDel: true } : {}) },
-      content: [{ type: 'text', text }],
-    })
-    const table: PmNode = {
-      type: 'docTable',
-      content: [
-        {
-          type: 'docTableRow',
-          content: [
-            {
-              type: 'docTableCell',
-              content: [item('2', 1, 'inside a cell')],
-            },
-          ],
-        },
-      ],
-    }
-    const stray: PmNode = {
-      type: 'docProtected',
-      attrs: {
-        blockType: 'textbox',
-        strayList: { numId: '2', ilvl: 0 },
-        strayRuns: [{ text: 'anchor text' }],
-        textboxes: [{ widthPx: 80, paras: [{ runs: [{ text: 'box body' }] }] }],
-      },
-    }
-    const make = () => {
-      const editor = new Editor({
-        element: document.createElement('div'),
-        extensions: editorExtensions,
-      })
-      editor.storage.listNumbering.defs = numbering
-      editor.commands.setContent({
-        type: 'doc',
-        content: [item('1', 1, 'initial nested level'), item('1', 0, 'initial parent')],
-      })
-      return editor
-    }
-    const decorations = (editor: Editor) => {
-      const plugin = editor.state.plugins.find((p) =>
-        (p as unknown as { key: string }).key.startsWith('listNumbering$'),
-      )!
-      return (plugin.getState(editor.state) as { decos: DecorationSet }).decos
-    }
-    const rendered = (editor: Editor) =>
-      Array.from(
-        editor.view.dom.querySelectorAll<HTMLElement>('[data-marker], [data-stray-marker]'),
-        (el) => [el.getAttribute('data-marker'), el.getAttribute('style')],
-      )
-    const live = make()
-    const full = make()
-    try {
-      const compare = () => {
-        full.commands.setContent(live.getJSON())
-        expect(rendered(live)).toEqual(rendered(full))
-        expect(
-          decorations(live)
-            .find()
-            .map(({ from, to }) => [from, to]),
-        ).toEqual(
-          decorations(full)
-            .find()
-            .map(({ from, to }) => [from, to]),
-        )
-        expect(decorations(live).find()).toHaveLength(rendered(live).length)
-      }
-      const first = decorations(live)
-      appendStreamedNodes(live, [{ type: 'docParagraph' }])
-      expect(decorations(live)).toBe(first)
-
-      const add = vi.spyOn(first, 'add')
-      const remap = vi.spyOn(first, 'map')
-      appendStreamedNodes(live, [table, item('2', 0, 'deleted marker', true), stray])
-      expect(add).toHaveBeenCalledOnce()
-      expect(remap).not.toHaveBeenCalled()
-      compare()
-
-      appendStreamedNodes(live, [item('1', 1, 'nested reset'), item('2', 0, 'continuation')])
-      compare()
-      expect(rendered(live).map(([marker]) => marker)).toEqual([
-        '1.1',
-        '2.',
-        '2.3',
-        '7.',
-        null,
-        '7.1',
-        '8.',
-      ])
-      expect(
-        live.view.dom
-          .querySelector<HTMLElement>('[data-stray-marker]')
-          ?.style.getPropertyValue('--li-marker'),
-      ).toContain('7.')
-
-      // Ordinary structural edits and changed definitions rebuild the prefix.
-      live.view.dispatch(
-        live.state.tr.insert(0, live.schema.nodeFromJSON(item('1', 0, 'new first'))),
-      )
-      compare()
-      expect(rendered(live)[0][0]).toBe('1.')
-      const replacement = defs(
-        {
-          ...DECIMAL_3LVL,
-          levels: { ...DECIMAL_3LVL.levels, 0: { start: 4, numFmt: 'decimal', lvlText: '%1.' } },
-        },
-        alias,
-      )
-      live.storage.listNumbering.defs = replacement
-      full.storage.listNumbering.defs = replacement
-      appendStreamedNodes(live, [item('1', 0, 'new definitions')])
-      compare()
-      expect(rendered(live)[0][0]).toBe('4.')
-    } finally {
-      live.destroy()
-      full.destroy()
-    }
   })
 
   it('decorates picture-bullet items with the image instead of the placeholder glyph', async () => {
@@ -906,61 +738,6 @@ describe('list marker decorations', () => {
     .spyOn(HTMLCanvasElement.prototype, 'getContext')
     .mockReturnValue(fakeCtx as never)
   afterAll(() => measureStub.mockRestore())
-
-  it('remeasures a streamed prefix when its marker font finishes loading', () => {
-    const fonts = new EventTarget()
-    const previousFonts = Object.getOwnPropertyDescriptor(document, 'fonts')
-    Object.defineProperty(document, 'fonts', { configurable: true, value: fonts })
-    let glyphWidth = 8
-    const metric = vi
-      .spyOn(fakeCtx, 'measureText')
-      .mockImplementation((text) => ({ width: text.length * glyphWidth }))
-    const editor = new Editor({
-      element: document.createElement('div'),
-      extensions: editorExtensions,
-    })
-    try {
-      editor.storage.listNumbering.defs = defs(
-        def({
-          numId: '1',
-          levels: {
-            0: {
-              start: 1,
-              numFmt: 'decimal',
-              lvlText: '%1.',
-              lvlJc: 'right',
-              indentLeft: 720,
-              hanging: 360,
-            },
-          },
-        }),
-      )
-      editor.commands.setContent({
-        type: 'doc',
-        content: [
-          {
-            type: 'docListItem',
-            attrs: { kind: 'ordered', numId: '1', ilvl: 0 },
-            content: [{ type: 'text', text: 'prefix' }],
-          },
-        ],
-      })
-      const hanging = () =>
-        editor.view.dom.querySelector<HTMLElement>('.doc-li')?.style.getPropertyValue('--li-hang')
-      expect(hanging()).toBe('30pt')
-
-      glyphWidth = 12
-      fonts.dispatchEvent(new Event('loadingdone'))
-      appendStreamedNodes(editor, [{ type: 'docParagraph' }])
-      expect(hanging()).toBe('36pt')
-      expect(editor.view.dom.querySelectorAll('[data-marker]')).toHaveLength(1)
-    } finally {
-      editor.destroy()
-      metric.mockRestore()
-      if (previousFonts) Object.defineProperty(document, 'fonts', previousFonts)
-      else Reflect.deleteProperty(document, 'fonts')
-    }
-  })
 
   it('flags markers hanging left of a table cell text area as clipped (Word clips there)', async () => {
     const lvl =

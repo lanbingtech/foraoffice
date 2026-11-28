@@ -662,18 +662,9 @@ class TabLayoutView {
     // Chromium lays tabs out in left-aligned space and only then justifies the
     // line (Word order too), so justified paragraphs are measured with their
     // justification suspended: the stretched spaces would otherwise inflate
-    // every later tab's x and segment width and feed back into the targets.
-    // Change only the tab paragraphs so unrelated body styles stay valid.
-    const measuring =
-      paras.length === 0
-        ? []
-        : Array.from(view.dom.querySelectorAll('.has-tab-stops')).filter(
-            (el) => el.closest('.ProseMirror') === view.dom,
-          )
-    const observer = (view as { domObserver?: { stop(): void; start(): void } }).domObserver
-    if (measuring.length > 0) observer?.stop()
+    // every later tab's x and segment width and feed back into the targets
+    if (paras.length > 0) view.dom.classList.add('doc-tabs-measuring')
     try {
-      measuring.forEach((el) => el.classList.add('doc-tabs-measuring'))
       for (const para of paras) {
         const measured = this.measureParagraph(para.node, para.pos)
         if (!measured) continue
@@ -682,8 +673,7 @@ class TabLayoutView {
         tabs.push(...measured)
       }
     } finally {
-      measuring.forEach((el) => el.classList.remove('doc-tabs-measuring'))
-      if (measuring.length > 0) observer?.start()
+      view.dom.classList.remove('doc-tabs-measuring')
     }
 
     if (paras.length > 0 && !measurable) {

@@ -187,7 +187,6 @@ import {
   carryStreamedSamples,
   endnotesAnchorY,
   createLineRectsCache,
-  createTableGapReads,
   anchorElement,
   lineStartAnchor,
   liveSectionsForDocument,
@@ -206,6 +205,7 @@ import {
   pageReaderShadow,
   type FlowCarry,
   LEAD_ROW_TOL_PX,
+  outerTableRows,
   type PageCut,
   pageNumbers,
   sliceWithLineSplit,
@@ -499,14 +499,7 @@ import {
 } from './components/comments-mode'
 import { StylesPane } from './components/StylesPane'
 import { Ruler } from './components/Ruler'
-import {
-  activateRenderedStyles,
-  activeDocStyleCss,
-  docBodyFont,
-  docHasCjk,
-  docLineFactor,
-  docThemeCss,
-} from './doc-style-css'
+import { docBodyFont, docHasCjk, docLineFactor, docStyleCss, docThemeCss } from './doc-style-css'
 import { isDocDirty, runGuardedCandidate, runGuardedDocumentAction } from './doc-dirty'
 import {
   EMPTY_HF_VARIANTS,
@@ -1022,13 +1015,12 @@ export function App({
   /** live section list of the last pass (header obstacles of the next pass) */
   const lastSecListRef = useRef<SectionInfo[] | null>(null)
   const cutsNow = useCallback(() => pageLayoutRef.current?.cuts, [])
-  const prepareDocStylesRef = useRef<() => boolean>(() => false)
   /** runs the debounced pagination pass now (set by the scheduler effect) */
-  const flushPaginationRef = useRef<(force?: boolean) => void>(() => {})
+  const flushPaginationRef = useRef<() => void>(() => {})
   /** the current pass's layout, after any pending pass: readers that need
    *  the document as it stands (TOC numbers, the preview snapshot) */
   const layoutNow = useCallback((): PageLayout | null => {
-    flushPaginationRef.current(prepareDocStylesRef.current())
+    flushPaginationRef.current()
     return pageLayoutRef.current
   }, [])
   const [showShortcuts, setShowShortcuts] = useState(false)
@@ -1268,13 +1260,7 @@ export function App({
   useEffect(() => {
     setEditQueue([])
   }, [aiPanelKey])
-  const docStyleElementRef = useRef<HTMLStyleElement>(null)
-  const [docCss, setDocCssState] = useState('')
-  const setDocCss = useCallback((css: string) => {
-    const element = docStyleElementRef.current
-    if (element && element.textContent !== css) element.textContent = css
-    setDocCssState(css)
-  }, [])
+  const [docCss, setDocCss] = useState('')
   // Live CJK-ness of the body while editing; overrides docCss's --doc-line-factor
   const [liveDocCjk, setLiveDocCjk] = useState<boolean | null>(null)
   // header/footer push-down re-measures after the doc-scoped <style> elements
@@ -2308,42 +2294,6 @@ export function App({
   const liveStylesRef = useRef<{ parsed: ParsedDocFull; styles: Map<string, StyleInfo> } | null>(
     null,
   )
-  useLayoutEffect(() => {
-    const parsed = doc?.parsed
-    const scope = editor?.view.dom.closest('.app')
-    if (tornDown || !parsed || !scope) return
-    const css = () => {
-      const live = liveStylesRef.current
-      return activeDocStyleCss(parsed, live?.parsed === parsed ? live.styles : undefined)
-    }
-    // Imported styles are seeded from the decoded stories before the first
-    // paint. Styles introduced by editing, paste or regenerated fields are
-    // activated when their presentation nodes render.
-    if (activateRenderedStyles(parsed, [scope])) setDocCss(css())
-    const activate = (mutations: MutationRecord[]): boolean => {
-      if (mutations.length === 0) return false
-      const roots = mutations.flatMap((mutation) =>
-        mutation.type === 'attributes' ? [mutation.target] : Array.from(mutation.addedNodes),
-      )
-      if (!activateRenderedStyles(parsed, roots)) return false
-      setDocCss(css())
-      return true
-    }
-    const observer = new MutationObserver(activate)
-    observer.observe(scope, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ['data-style', 'data-tbl-style'],
-    })
-    // Synchronous layout readers can run in the task that inserted a new
-    // styled node, before the observer's microtask delivers its records.
-    prepareDocStylesRef.current = () => activate(observer.takeRecords())
-    return () => {
-      prepareDocStylesRef.current = () => false
-      observer.disconnect()
-    }
-  }, [doc?.parsed, editor, setDocCss, tornDown])
   fileCtxRef.current = {
     commitDocumentState: (operation) => flushSync(operation),
     editor,
@@ -4424,15 +4374,13 @@ export function App({
       }
       return blocksKeepSlicing(items, slices, factor) || reject('geometry')
     }
-    const remeasure = (forceFull = false) => {
+    const remeasure = () => {
       if (disposed) return
       timer = null
       lastPassAt = performance.now()
-      const stylesChanged = prepareDocStylesRef.current()
-      const full = stylesChanged || forceFull
-      const edited = full ? null : fastEdits
+      const edited = fastEdits
       fastEdits = new Set()
-      const dirty = full ? null : dirtyFrom
+      const dirty = dirtyFrom
       dirtyFrom = Infinity
       try {
         const zoomEl = scroller.querySelector<HTMLElement>('.doc-zoom')
@@ -4814,7 +4762,6 @@ export function App({
         const overlayPages: number[] = []
         const carries: FlowCarry[] = []
         const lineRectsOf = createLineRectsCache()
-        const tableGapReads = createTableGapReads(factor)
         const gapIds = new Set<string>()
         let firstPageFloats: { els: HTMLElement[]; key: string } | undefined
         if (viewMode === 'print' && !readMode) {
@@ -5237,7 +5184,7 @@ export function App({
             if (lead.kind === 'row' || lead.kind === 'cell') {
               // the previous pass's gap rows and repeated headers are not rows of the
               // measured table (domTableRows): index the same list
-              const realRows = tableGapReads.rowsOf(b.el)
+              const realRows = outerTableRows(b.el)
               if (lead.kind === 'row') {
                 const tr = realRows[lead.row ?? -1]
                 if (!tr) {
@@ -5246,7 +5193,12 @@ export function App({
                 }
                 // the I11 shadow of the row sampler: the measured row top must still be
                 // where the DOM row sits (a tr's offset includes in-table gaps above it)
-                const off = tableGapReads.rowOffset(b.el, tr)
+                const gapRects = Array.from(b.el.querySelectorAll('.page-gap-inline')).map((g) =>
+                  g.getBoundingClientRect(),
+                )
+                const trTop = tr.getBoundingClientRect().top
+                const gapsAbove = gapRects.reduce((s, g) => (g.top <= trTop ? s + g.height : s), 0)
+                const off = (trTop - b.el.getBoundingClientRect().top - gapsAbove) / factor
                 const rowTop = (b.tableRows ?? [])
                   .slice(0, lead.row)
                   .reduce((s, r) => s + r.height, 0)
@@ -5260,8 +5212,6 @@ export function App({
                 )
                 try {
                   const $pos = editor.view.state.doc.resolve(editor.view.posAtDOM(tr, 0))
-                  // The page-gap cell spans exactly the live grid, excluding prior decorations.
-                  const grid = tableGapReads.gridOf(tr)
                   // w:tblHeader repetition: the engine reserved slice.repeatHeader.height
                   // at the top of this page's column, so cloning the source header rows
                   // below the gap fills exactly that space. Clones are decorations —
@@ -5269,21 +5219,46 @@ export function App({
                   let repeatHeaderEls: HTMLElement[] | undefined
                   let repeatHeaderPx = 0
                   if (slice.repeatHeader) {
+                    const tableEl = tr.closest('table')
+                    const srcRows = tableEl
+                      ? (Array.from(tableEl.querySelectorAll(':scope > tbody > tr')).filter(
+                          (r) =>
+                            !r.classList.contains('page-gap') &&
+                            !r.classList.contains('page-repeat-header'),
+                        ) as HTMLElement[])
+                      : []
                     const els: HTMLElement[] = []
                     let acc = 0
-                    for (const row of grid.rows) {
+                    for (const row of srcRows) {
                       if (acc >= slice.repeatHeader.height - 1.5) break
                       const clone = row.cloneNode(true) as HTMLElement
                       clone.classList.add('page-gap-inline', 'page-repeat-header')
                       clone.setAttribute('contenteditable', 'false')
                       els.push(clone)
-                      acc += tableGapReads.rowHeight(row)
+                      acc += row.getBoundingClientRect().height / factor
                     }
                     if (els.length > 0) {
                       repeatHeaderEls = els
                       repeatHeaderPx = acc
                     }
                   }
+                  // the spanning gap cell must cover exactly the table's column
+                  // grid: a wider colSpan adds phantom columns, which collapses
+                  // colgroup-less fixed-layout tables to ~1px columns (makeGapEl)
+                  const gridCols = Math.max(
+                    1,
+                    ...Array.from(
+                      tr
+                        .closest('table')
+                        ?.querySelectorAll<HTMLTableRowElement>(':scope > tbody > tr') ?? [],
+                    )
+                      .filter(
+                        (r) =>
+                          !r.classList.contains('page-gap') &&
+                          !r.classList.contains('page-repeat-header'),
+                      )
+                      .map((r) => Array.from(r.cells).reduce((s, c) => s + c.colSpan, 0)),
+                  )
                   for (let d = $pos.depth; d > 0; d--) {
                     if ($pos.node(d).type.name === 'docTableRow') {
                       // no notes area in table gaps: pad the full remainder
@@ -5291,7 +5266,7 @@ export function App({
                       gaps.push({
                         pos: $pos.before(d),
                         kind: 'table',
-                        cols: grid.columns,
+                        cols: gridCols,
                         page: k + 1,
                         boundaryY: slice.start,
                         ...(fsplit ? { floatGap: true } : {}),
@@ -5652,7 +5627,6 @@ export function App({
         stage('columnLayout')
         const tCommit0 = performance.now()
         layoutBatch.commit()
-        prepareDocStylesRef.current()
         tCommit = performance.now() - tCommit0
         stage('commit')
         // in-table gap bands live in the spanning cell's coordinate space:
@@ -5939,10 +5913,10 @@ export function App({
     // state fills in: a synchronous whole-document pass per run made a long
     // open quadratic, so the paced scheduler takes it (the last chunk's update
     // still lands a full pass once the tail has settled)
-    flushPaginationRef.current = (force) => {
-      if (!force && timer === null) return
-      if (timer !== null) window.clearTimeout(timer)
-      remeasure(force)
+    flushPaginationRef.current = () => {
+      if (timer === null) return
+      window.clearTimeout(timer)
+      remeasure()
     }
     if (isPhasedContentPending()) onUpdate()
     else remeasure()
@@ -5958,7 +5932,9 @@ export function App({
         const parsed = fileCtxRef.current.doc?.parsed
         const live = liveStylesRef.current
         if (parsed) {
-          setDocCss(activeDocStyleCss(parsed, live?.parsed === parsed ? live.styles : undefined))
+          setDocCss(
+            docStyleCss(live?.parsed === parsed ? { ...parsed, styles: live.styles } : parsed),
+          )
         }
       }
       if (reprobeHf) {
@@ -7264,7 +7240,7 @@ export function App({
         liveStylesRef.current = { parsed, styles: r.styles }
         setLiveStyles({ parsed, styles: r.styles })
         editor.storage.listNumbering.styles = r.styles
-        setDocCss(activeDocStyleCss(parsed, r.styles))
+        setDocCss(docStyleCss({ ...parsed, styles: r.styles }))
       })
       .catch(() => {})
     return () => {
@@ -8720,7 +8696,7 @@ export function App({
       data-comment-popup={commentPopup ?? undefined}
     >
       <ToastHost />
-      <style ref={docStyleElementRef} data-doc-css="" />
+      {docCss && <style data-doc-css="">{docCss}</style>}
       {revisionAuthorStyle && <style data-rev-authors="">{revisionAuthorStyle}</style>}
       {tcOptionsStyle && <style data-rev-options="">{tcOptionsStyle}</style>}
       {liveLineFactor != null && (

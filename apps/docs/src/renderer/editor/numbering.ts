@@ -4,12 +4,10 @@ export {
   substituteBullet,
   markerFallbackFace,
   SEGOE_UI_SYMBOL_RE,
-  appendListMarkerInfos,
   computeListMarkerInfos,
   computeListMarkers,
   formatNumber,
   markerTabAdvance,
   type ListItemRef,
   type ListMarkerInfo,
-  type ListMarkerState,
 } from '@genoffice/docx-engine'

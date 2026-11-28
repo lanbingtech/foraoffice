@@ -1,4 +1,4 @@
-import type { Fragment, Node as PmNode } from '@tiptap/pm/model'
+import type { Node as PmNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, type Transaction } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { touchedTopLevelBlocks } from './touched-blocks'
@@ -76,21 +76,6 @@ export interface BlockDecorationSpec {
   changed?: (before: PmNode, after: PmNode) => boolean
   /** inputs outside the document (display modes): a change rebuilds on the next transaction */
   signature?: () => string
-}
-
-/** A top-level block's decorations depend only on that block. */
-export function blockLocalDecorations(
-  decorate: (node: PmNode, pos: number, out: Decoration[]) => void,
-): Required<Pick<BlockDecorationSpec, 'build' | 'append'>> {
-  const build = (content: Fragment, base: number) => {
-    const decos: Decoration[] = []
-    content.forEach((node, offset) => decorate(node, base + offset, decos))
-    return decos
-  }
-  return {
-    build: (doc) => build(doc.content, 0),
-    append: (tr, tail, old) => old.add(tr.doc, build(tail.content, tail.from)),
-  }
 }
 
 export function blockDecorationPlugin(spec: BlockDecorationSpec): Plugin<BlockDecorationState> {

@@ -3303,7 +3303,7 @@ th[data-rev-fmt] {
 /* TabStopExtension measures tab paragraphs with justification suspended: tab
    advances are laid out in left-aligned space (Chromium and Word alike), so
    the stretched spaces of a justified line must not enter the measurements */
-.ProseMirror .has-tab-stops.doc-tabs-measuring {
+.ProseMirror.doc-tabs-measuring .has-tab-stops {
   text-align: left !important;
 }
 

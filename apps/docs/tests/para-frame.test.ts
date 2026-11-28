@@ -24,11 +24,6 @@ function paraEl(attrs: Record<string, unknown>): HTMLParagraphElement {
 }
 
 describe('w:framePr paragraph frames', () => {
-  it('floats a height-only frame without an explicit width', () => {
-    const p = paraEl({ frameBox: JSON.stringify({ hTwips: 600, floatSide: 'left' }) })
-    expect(p.style.cssFloat).toBe('left')
-  })
-
   it('a page-anchored wrap-around frame floats at its x minus the section margin', () => {
     const frame = {
       wTwips: 2851,

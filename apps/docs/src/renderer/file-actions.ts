@@ -70,7 +70,7 @@ import { parseDocxOffThread } from './parse-off-thread'
 import { PHASED_APPEND } from './editor/streaming-tail-guard'
 import { docTextLength, docWeight, openTierFor } from './large-document'
 import { documentToMarkdown } from './export-markdown'
-import { activeDocStyleCss } from './doc-style-css'
+import { docStyleCss } from './doc-style-css'
 import { documentTextContext } from './text-layout/document-context'
 import { setNoteNumFmts } from './note-format'
 import type { CompareEntry } from './editor/compare'
@@ -653,7 +653,7 @@ export async function loadFile(
       // opens files without replacing the current document.
       discardStalePasswordIntents()
       ctx.setAiPanelKey((k) => k + 1)
-      ctx.setDocCss(activeDocStyleCss(parsed))
+      ctx.setDocCss(docStyleCss(parsed))
       ctx.setSection(readSectionSettings(parsed))
       ctx.setSections(readSections(parsed))
       ctx.setSectionDirty(false)
@@ -831,7 +831,7 @@ export async function newFile(ctx: FileActionContext): Promise<boolean | undefin
       // the previous draft (its DocState, including the encrypted flag, is gone)
       discardStalePasswordIntents()
       ctx.setAiPanelKey((k) => k + 1)
-      ctx.setDocCss(activeDocStyleCss(parsed))
+      ctx.setDocCss(docStyleCss(parsed))
       ctx.setSection(readSectionSettings(parsed))
       ctx.setSections(readSections(parsed))
       ctx.setSectionDirty(false)
@@ -1638,7 +1638,7 @@ async function saveOnce(
         chain.run()
         restoreMarksAfterDocRewrite(editor, caretMarks)
       }
-      ctx.setDocCss(activeDocStyleCss(reparsed))
+      ctx.setDocCss(docStyleCss(reparsed))
       ctx.setDoc((prev) =>
         prev
           ? {
