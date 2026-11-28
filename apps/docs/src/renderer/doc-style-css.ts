@@ -405,8 +405,84 @@ function rowClosing(closingSel: string): string {
   return cellClosingWith(closingSel, ':is(td, th):last-child')
 }
 
-export function docStyleCss(parsed: ParsedDocFull): string {
+const styleIdsByDocument = new WeakMap<ParsedDocFull, Set<string>>()
+
+function documentStyleIds(parsed: ParsedDocFull): Set<string> {
+  const known = styleIdsByDocument.get(parsed)
+  if (known) return known
+
+  const ids = new Set(parsed.headingStyleIds?.values())
+  if (parsed.listParagraphStyleId) ids.add(parsed.listParagraphStyleId)
+  // The decoded document carries style references in body blocks, runs,
+  // table cells, textboxes and the other stories, including the streamed tail.
+  const seen = new WeakSet<object>()
+  const read = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || ArrayBuffer.isView(value) || seen.has(value)) return
+    seen.add(value)
+    if (Array.isArray(value)) {
+      for (const item of value) read(item)
+      return
+    }
+    const model = value as Record<string, unknown>
+    for (const key in model) {
+      const field = model[key]
+      if ((key === 'styleId' || key.endsWith('StyleId')) && typeof field === 'string')
+        ids.add(field)
+      else if (field && typeof field === 'object') read(field)
+    }
+  }
+  for (const story of [
+    parsed.blocks,
+    parsed.headerParas,
+    parsed.footerParas,
+    parsed.headerFirst,
+    parsed.footerFirst,
+    parsed.headerEven,
+    parsed.footerEven,
+    parsed.hfParts,
+    parsed.footnotes,
+    parsed.endnotes,
+    parsed.comments,
+  ])
+    read(story)
+
+  styleIdsByDocument.set(parsed, ids)
+  return ids
+}
+
+const DOC_STYLE_ATTRIBUTE = '[data-style], [data-tbl-style]'
+
+export function activateRenderedStyles(parsed: ParsedDocFull, roots: Iterable<Node>): boolean {
+  const ids = documentStyleIds(parsed)
+  const before = ids.size
+  const add = (el: Element) => {
+    for (const name of ['data-style', 'data-tbl-style']) {
+      const id = el.getAttribute(name)
+      if (id) ids.add(id)
+    }
+  }
+  for (const root of roots) {
+    if (root.nodeType !== Node.ELEMENT_NODE) continue
+    const el = root as Element
+    add(el)
+    for (const styled of el.querySelectorAll(DOC_STYLE_ATTRIBUTE)) add(styled)
+  }
+  return ids.size !== before
+}
+
+export function activeDocStyleCss(
+  parsed: ParsedDocFull,
+  styles: ParsedDocFull['styles'] = parsed.styles,
+): string {
+  const source = styles === parsed.styles ? parsed : { ...parsed, styles }
+  return docStyleCss(source, documentStyleIds(parsed))
+}
+
+export function docStyleCss(parsed: ParsedDocFull, active?: ReadonlySet<string>): string {
   const rules: string[] = []
+  const renderedStyles = [...parsed.styles.values()].filter(
+    (info) => !active || active.has(info.styleId) || info.isDefault || isHyperlinkStyle(info),
+  )
   const additive = parsed.doNotUseHTMLParagraphAutoSpacing === true
   const SB = spaceBeforeProp(additive)
   const autoPt = autoSpacingPt(additive)
@@ -805,7 +881,7 @@ export function docStyleCss(parsed: ParsedDocFull): string {
   }
   // table styles: tables carrying data-tbl-style are colored by style (explicit cell shading
   // is inline style and naturally overrides these rules; parse gives exact display after save)
-  for (const info of parsed.styles.values()) {
+  for (const info of renderedStyles) {
     const t = info.tableDisplay
     if (info.type !== 'table' || !t) continue
     const sel = `.doc-page table[data-tbl-style="${CSS.escape(info.styleId)}"]`
@@ -927,7 +1003,7 @@ export function docStyleCss(parsed: ParsedDocFull): string {
   }
   const viaEa = textCtx.latinViaEaSlot
   const baseEa = textCtx.bodyEa ?? undefined
-  for (const info of parsed.styles.values()) {
+  for (const info of renderedStyles) {
     const d = info.display
     if (!d) continue
     const decls: string[] = []
@@ -1239,7 +1315,7 @@ export function docStyleCss(parsed: ParsedDocFull): string {
       `.doc-page span.doc-cs { font-size:${paraCsFormat(normal, dd).sizeHalfPoints / 2}pt }`,
     )
     const charRules: string[] = []
-    for (const info of parsed.styles.values()) {
+    for (const info of renderedStyles) {
       const d = info.display
       if (!d) continue
       const s = `[data-style="${CSS.escape(info.styleId)}"]`
@@ -1257,7 +1333,7 @@ export function docStyleCss(parsed: ParsedDocFull): string {
   // direct pPr w:contextualSpacing (.ctx-sp) without style-level backing: same
   // same-style suppression, keyed to the paragraph that carries it (unstyled
   // pairs are covered by a static rule in styles.css)
-  for (const info of parsed.styles.values()) {
+  for (const info of renderedStyles) {
     if (info.type !== 'paragraph' || info.display?.contextualSpacing) continue
     const s = `[data-style="${CSS.escape(info.styleId)}"]`
     rules.push(`.doc-page ${s}.ctx-sp:has(+ ${s}) { margin-bottom:0 !important }`)

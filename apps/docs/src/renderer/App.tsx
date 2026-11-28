@@ -499,7 +499,14 @@ import {
 } from './components/comments-mode'
 import { StylesPane } from './components/StylesPane'
 import { Ruler } from './components/Ruler'
-import { docBodyFont, docHasCjk, docLineFactor, docStyleCss, docThemeCss } from './doc-style-css'
+import {
+  activateRenderedStyles,
+  activeDocStyleCss,
+  docBodyFont,
+  docHasCjk,
+  docLineFactor,
+  docThemeCss,
+} from './doc-style-css'
 import { isDocDirty, runGuardedCandidate, runGuardedDocumentAction } from './doc-dirty'
 import {
   EMPTY_HF_VARIANTS,
@@ -1015,12 +1022,13 @@ export function App({
   /** live section list of the last pass (header obstacles of the next pass) */
   const lastSecListRef = useRef<SectionInfo[] | null>(null)
   const cutsNow = useCallback(() => pageLayoutRef.current?.cuts, [])
+  const prepareDocStylesRef = useRef<() => boolean>(() => false)
   /** runs the debounced pagination pass now (set by the scheduler effect) */
-  const flushPaginationRef = useRef<() => void>(() => {})
+  const flushPaginationRef = useRef<(force?: boolean) => void>(() => {})
   /** the current pass's layout, after any pending pass: readers that need
    *  the document as it stands (TOC numbers, the preview snapshot) */
   const layoutNow = useCallback((): PageLayout | null => {
-    flushPaginationRef.current()
+    flushPaginationRef.current(prepareDocStylesRef.current())
     return pageLayoutRef.current
   }, [])
   const [showShortcuts, setShowShortcuts] = useState(false)
@@ -1260,7 +1268,13 @@ export function App({
   useEffect(() => {
     setEditQueue([])
   }, [aiPanelKey])
-  const [docCss, setDocCss] = useState('')
+  const docStyleElementRef = useRef<HTMLStyleElement>(null)
+  const [docCss, setDocCssState] = useState('')
+  const setDocCss = useCallback((css: string) => {
+    const element = docStyleElementRef.current
+    if (element && element.textContent !== css) element.textContent = css
+    setDocCssState(css)
+  }, [])
   // Live CJK-ness of the body while editing; overrides docCss's --doc-line-factor
   const [liveDocCjk, setLiveDocCjk] = useState<boolean | null>(null)
   // header/footer push-down re-measures after the doc-scoped <style> elements
@@ -2294,6 +2308,42 @@ export function App({
   const liveStylesRef = useRef<{ parsed: ParsedDocFull; styles: Map<string, StyleInfo> } | null>(
     null,
   )
+  useLayoutEffect(() => {
+    const parsed = doc?.parsed
+    const scope = editor?.view.dom.closest('.app')
+    if (tornDown || !parsed || !scope) return
+    const css = () => {
+      const live = liveStylesRef.current
+      return activeDocStyleCss(parsed, live?.parsed === parsed ? live.styles : undefined)
+    }
+    // Imported styles are seeded from the decoded stories before the first
+    // paint. Styles introduced by editing, paste or regenerated fields are
+    // activated when their presentation nodes render.
+    if (activateRenderedStyles(parsed, [scope])) setDocCss(css())
+    const activate = (mutations: MutationRecord[]): boolean => {
+      if (mutations.length === 0) return false
+      const roots = mutations.flatMap((mutation) =>
+        mutation.type === 'attributes' ? [mutation.target] : Array.from(mutation.addedNodes),
+      )
+      if (!activateRenderedStyles(parsed, roots)) return false
+      setDocCss(css())
+      return true
+    }
+    const observer = new MutationObserver(activate)
+    observer.observe(scope, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['data-style', 'data-tbl-style'],
+    })
+    // Synchronous layout readers can run in the task that inserted a new
+    // styled node, before the observer's microtask delivers its records.
+    prepareDocStylesRef.current = () => activate(observer.takeRecords())
+    return () => {
+      prepareDocStylesRef.current = () => false
+      observer.disconnect()
+    }
+  }, [doc?.parsed, editor, setDocCss, tornDown])
   fileCtxRef.current = {
     commitDocumentState: (operation) => flushSync(operation),
     editor,
@@ -4374,13 +4424,15 @@ export function App({
       }
       return blocksKeepSlicing(items, slices, factor) || reject('geometry')
     }
-    const remeasure = () => {
+    const remeasure = (forceFull = false) => {
       if (disposed) return
       timer = null
       lastPassAt = performance.now()
-      const edited = fastEdits
+      const stylesChanged = prepareDocStylesRef.current()
+      const full = stylesChanged || forceFull
+      const edited = full ? null : fastEdits
       fastEdits = new Set()
-      const dirty = dirtyFrom
+      const dirty = full ? null : dirtyFrom
       dirtyFrom = Infinity
       try {
         const zoomEl = scroller.querySelector<HTMLElement>('.doc-zoom')
@@ -5600,6 +5652,7 @@ export function App({
         stage('columnLayout')
         const tCommit0 = performance.now()
         layoutBatch.commit()
+        prepareDocStylesRef.current()
         tCommit = performance.now() - tCommit0
         stage('commit')
         // in-table gap bands live in the spanning cell's coordinate space:
@@ -5886,10 +5939,10 @@ export function App({
     // state fills in: a synchronous whole-document pass per run made a long
     // open quadratic, so the paced scheduler takes it (the last chunk's update
     // still lands a full pass once the tail has settled)
-    flushPaginationRef.current = () => {
-      if (timer === null) return
-      window.clearTimeout(timer)
-      remeasure()
+    flushPaginationRef.current = (force) => {
+      if (!force && timer === null) return
+      if (timer !== null) window.clearTimeout(timer)
+      remeasure(force)
     }
     if (isPhasedContentPending()) onUpdate()
     else remeasure()
@@ -5905,9 +5958,7 @@ export function App({
         const parsed = fileCtxRef.current.doc?.parsed
         const live = liveStylesRef.current
         if (parsed) {
-          setDocCss(
-            docStyleCss(live?.parsed === parsed ? { ...parsed, styles: live.styles } : parsed),
-          )
+          setDocCss(activeDocStyleCss(parsed, live?.parsed === parsed ? live.styles : undefined))
         }
       }
       if (reprobeHf) {
@@ -7213,7 +7264,7 @@ export function App({
         liveStylesRef.current = { parsed, styles: r.styles }
         setLiveStyles({ parsed, styles: r.styles })
         editor.storage.listNumbering.styles = r.styles
-        setDocCss(docStyleCss({ ...parsed, styles: r.styles }))
+        setDocCss(activeDocStyleCss(parsed, r.styles))
       })
       .catch(() => {})
     return () => {
@@ -8669,7 +8720,7 @@ export function App({
       data-comment-popup={commentPopup ?? undefined}
     >
       <ToastHost />
-      {docCss && <style data-doc-css="">{docCss}</style>}
+      <style ref={docStyleElementRef} data-doc-css="" />
       {revisionAuthorStyle && <style data-rev-authors="">{revisionAuthorStyle}</style>}
       {tcOptionsStyle && <style data-rev-options="">{tcOptionsStyle}</style>}
       {liveLineFactor != null && (
