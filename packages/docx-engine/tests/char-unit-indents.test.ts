@@ -510,8 +510,18 @@ describe('character-unit indents: saving', () => {
         stylesXml: styles,
       }),
     )
-    expect(saved.blocks[0].format).toEqual({ indentFirstLine: 720, align: 'justify' })
-    expect(saved.blocks[1].format).toEqual({ align: 'justify' })
-    expect(saved.blocks[2].format).toEqual({ indentLeft: 720 })
+    expect(saved.blocks[0].format).toEqual({
+      indentFirstLine: 720,
+      align: 'justify',
+      directCharIndents: { firstLine: 0 },
+    })
+    expect(saved.blocks[1].format).toEqual({
+      align: 'justify',
+      directCharIndents: { firstLine: 0 },
+    })
+    expect(saved.blocks[2].format).toEqual({
+      indentLeft: 720,
+      directCharIndents: { left: 0, hanging: 0 },
+    })
   })
 })
