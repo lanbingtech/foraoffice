@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { mergePPrFormat, parseDocx } from '../src/index'
+import { mergeCellParaFormat } from '../src/generate'
 import { buildDocx } from './helpers/build-docx'
 
 /**
@@ -402,6 +403,22 @@ describe('character-unit indents: document grid and styles', () => {
 })
 
 describe('character-unit indents: saving', () => {
+  it.each([
+    { name: 'body paragraphs', merge: mergePPrFormat },
+    { name: 'table paragraphs', merge: mergeCellParaFormat },
+  ])('keeps absolute left and right indents after a twips edit in $name', async ({ merge }) => {
+    const styles = `<w:styles ${NS}><w:style w:type="paragraph" w:styleId="Normal" w:default="1"><w:pPr><w:ind w:leftChars="300" w:rightChars="200"/></w:pPr><w:rPr><w:sz w:val="24"/></w:rPr></w:style></w:styles>`
+    const bodyXml = para(
+      '<w:ind w:left="240" w:leftChars="0" w:right="180" w:rightChars="0"/>',
+      run('body', 24),
+    )
+    const original = (await parseDocx(await buildDocx({ bodyXml, stylesXml: styles }))).blocks[0]
+    const edited = { indentLeft: 480, indentRight: 360 }
+    const saved = merge(original.rawPPr!, edited, original.format)
+    const reopened = await formats(`<w:p>${saved}${run('body', 24)}</w:p>`, styles)
+    expect(reopened[0]).toMatchObject(edited)
+  })
+
   it('an unrelated format edit keeps the raw w:ind bytes when the indent model is unchanged', async () => {
     const bytes = await buildDocx({
       bodyXml: para('<w:ind w:firstLineChars="200"/>', run('body', 24)),
@@ -510,18 +527,8 @@ describe('character-unit indents: saving', () => {
         stylesXml: styles,
       }),
     )
-    expect(saved.blocks[0].format).toEqual({
-      indentFirstLine: 720,
-      align: 'justify',
-      directCharIndents: { firstLine: 0 },
-    })
-    expect(saved.blocks[1].format).toEqual({
-      align: 'justify',
-      directCharIndents: { firstLine: 0 },
-    })
-    expect(saved.blocks[2].format).toEqual({
-      indentLeft: 720,
-      directCharIndents: { left: 0, hanging: 0 },
-    })
+    expect(saved.blocks[0].format).toEqual({ indentFirstLine: 720, align: 'justify' })
+    expect(saved.blocks[1].format).toEqual({ align: 'justify' })
+    expect(saved.blocks[2].format).toEqual({ indentLeft: 720 })
   })
 })

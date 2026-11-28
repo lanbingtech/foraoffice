@@ -109,15 +109,8 @@ describe('character-unit indents: saving an indent edit', () => {
       '<w:pPr><w:ind w:firstLine="720" w:firstLineChars="0"/><w:jc w:val="both"/></w:pPr>',
     )
     // the edit wins over the style on reload — Word resolves it the same way
-    expect(reparsed.blocks[0].format).toEqual({
-      indentFirstLine: 720,
-      directCharIndents: { firstLine: 0 },
-    })
-    expect(reparsed.blocks[1].format).toEqual({
-      align: 'justify',
-      indentFirstLine: 720,
-      directCharIndents: { firstLine: 0 },
-    })
+    expect(reparsed.blocks[0].format).toEqual({ indentFirstLine: 720 })
+    expect(reparsed.blocks[1].format).toEqual({ align: 'justify', indentFirstLine: 720 })
   })
 
   it('removing the first-line indent writes the bare cancel', async () => {
@@ -130,11 +123,8 @@ describe('character-unit indents: saving an indent edit', () => {
     const xml = reparsed.internal.documentXml
     expect(xml).toContain('<w:pPr><w:ind w:firstLineChars="0"/></w:pPr>')
     expect(xml).toContain('<w:pPr><w:ind w:firstLineChars="0"/><w:jc w:val="both"/></w:pPr>')
-    expect(reparsed.blocks[0].format).toEqual({ directCharIndents: { firstLine: 0 } })
-    expect(reparsed.blocks[1].format).toEqual({
-      align: 'justify',
-      directCharIndents: { firstLine: 0 },
-    })
+    expect(reparsed.blocks[0].format).toEqual({})
+    expect(reparsed.blocks[1].format).toEqual({ align: 'justify' })
   })
 
   it('an unrelated edit keeps the paragraphs character-indented', async () => {
