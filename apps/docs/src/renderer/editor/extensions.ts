@@ -12,6 +12,7 @@ import { textParaLineBox } from '../text-layout/para-line-box'
 import { inlineSegments, type InlineRun, type InlineSegments } from '../text-layout/inline-segments'
 import { MultiSelect } from './multi-select'
 import { Editor, Extension, Node } from '@tiptap/core'
+import { attributesRenderedManually } from './manual-html-attributes'
 import { SHAPE_INLINE_WRAP } from './floating-z-order'
 import { selectBoxAt, selectedBoxPlugin } from './selected-box'
 import { drawingChildInteraction } from './drawing-child-interaction'
@@ -1248,7 +1249,7 @@ export const DocParagraph = Node.create({
   group: 'block',
   content: 'inline*',
   addAttributes() {
-    return { ...anchorAttrs }
+    return attributesRenderedManually(anchorAttrs)
   },
   parseHTML() {
     // getAttrs null = match with defaults (foreign HTML); data-para restores formatting
@@ -1322,12 +1323,12 @@ export const DocHeading = Node.create({
   group: 'block',
   content: 'inline*',
   addAttributes() {
-    return {
+    return attributesRenderedManually({
       ...anchorAttrs,
       level: { default: 1 },
       /** level from a direct w:outlineLvl on a non-heading style (body formatting) */
       outlineOnly: { default: null as boolean | null },
-    }
+    })
   },
   parseHTML() {
     return [1, 2, 3, 4, 5, 6].map((level) => ({
@@ -1349,12 +1350,12 @@ export const DocListItem = Node.create({
   group: 'block',
   content: 'inline*',
   addAttributes() {
-    return {
+    return attributesRenderedManually({
       ...anchorAttrs,
       kind: { default: 'bullet' as 'bullet' | 'ordered' },
       numId: { default: null as string | null },
       ilvl: { default: 0 },
-    }
+    })
   },
   parseHTML() {
     const ilvlOf = (el: HTMLElement): number => {
@@ -2571,7 +2572,7 @@ export const ListNumberingExtension = Extension.create<object, ListNumberingStor
   },
 })
 
-const tableCellAttrs = {
+const tableCellAttrs = attributesRenderedManually({
   sourceCell: { default: null, rendered: false },
   sourceProperties: { default: null, rendered: false },
   vAlign: { default: null as string | null },
@@ -2607,7 +2608,7 @@ const tableCellAttrs = {
   color: { default: null as string | null },
   bold: { default: false },
   align: { default: null as string | null },
-}
+})
 
 export function borderWidthPx(b: BorderLine): number {
   return borderDrawnPx(b)
@@ -3030,7 +3031,7 @@ export const DocTable = Node.create({
   selectable: true,
   draggable: true,
   addAttributes() {
-    return {
+    return attributesRenderedManually({
       docxIndex: { default: null as number | null },
       colWidthsPct: { default: null as number[] | null },
       widthPx: { default: null as number | null },
@@ -3088,7 +3089,7 @@ export const DocTable = Node.create({
        *  and hidden text, keyed row:column (they have no node of their own) */
       continuationCells: { default: null as string | null },
       blockRevision: { default: null as Record<string, string> | null },
-    }
+    })
   },
   parseHTML() {
     return [{ tag: 'table.doc-table' }, { tag: 'table' }]
@@ -3306,7 +3307,7 @@ export const DocTableRow = Node.create({
   name: 'docTableRow',
   content: '(docTableCell | docTableHeader)+',
   addAttributes() {
-    return {
+    return attributesRenderedManually({
       sourceRow: { default: null, rendered: false },
       heightTwips: { default: null as number | null },
       heightRule: { default: null as 'atLeast' | 'exact' | null },
@@ -3324,7 +3325,7 @@ export const DocTableRow = Node.create({
       rawTblPrEx: { default: null as string | null },
       /** tracked exception change (tblPrEx w:tblPrExChange) */
       tblPrExChange: { default: null as Record<string, string> | null },
-    }
+    })
   },
   parseHTML() {
     return [{ tag: 'tr' }]

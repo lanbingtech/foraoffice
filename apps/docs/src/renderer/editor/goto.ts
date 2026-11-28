@@ -229,16 +229,17 @@ export function linePosition(view: EditorView, layout: PageLayout, line: number)
  */
 export function resolveGoToIndex(
   input: string,
-  current: number,
+  current: number | (() => number),
   count: number,
   dir: 1 | -1 = 1,
 ): number | null {
   if (count <= 0) return null
   const s = input.trim()
   const clamp = (i: number) => Math.max(0, Math.min(count - 1, i))
-  if (!s) return clamp(current + dir)
+  const currentIndex = () => (typeof current === 'number' ? current : current())
+  if (!s) return clamp(currentIndex() + dir)
   const rel = /^([+-])(\d+)$/.exec(s)
-  if (rel) return clamp(current + (rel[1] === '+' ? 1 : -1) * Number(rel[2]))
+  if (rel) return clamp(currentIndex() + (rel[1] === '+' ? 1 : -1) * Number(rel[2]))
   if (/^\d+$/.test(s)) return clamp(Number(s) - 1)
   return null
 }
