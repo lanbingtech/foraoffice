@@ -14,9 +14,9 @@ import type {
   TableCell,
   TableModel,
 } from './types'
-import { escapeXmlAttr, escapeXmlText } from './xml-utils'
+import { escapeXmlAttr, escapeXmlText, findChild, xmlParser, type XNode } from './xml-utils'
 import { resolvePropChangeXml } from './revision-xml'
-import { mergeCharIndents } from './parse-props'
+import { charIndentsOf, mergeCharIndents } from './parse-props'
 
 export interface GenerateContext {
   /** heading level -> styleId existing in the original styles.xml */
@@ -1822,6 +1822,21 @@ function sameIndent(a: ParaFormat, b: ParaFormat): boolean {
   )
 }
 
+/** Word can cancel an inherited indent with an explicit zero. The effective
+ * format can omit that zero, so recover it from the original direct properties
+ * when rebuilding an edited indent. */
+function savedCharIndents(
+  rawPPr: string,
+  original: ParaFormat | undefined,
+): CharIndents | undefined {
+  let direct = original?.directCharIndents
+  if (!direct && rawPPr.includes('Chars')) {
+    const [paragraphProperties] = xmlParser.parse(rawPPr) as XNode[]
+    if (paragraphProperties) direct = charIndentsOf(findChild(paragraphProperties, 'w:ind'))
+  }
+  return mergeCharIndents(original?.charIndents, direct)
+}
+
 /**
  * Cancel attributes for the character-unit indents a paragraph was laid out
  * with but the new format no longer carries. A rebuilt w:ind carries twips,
@@ -1835,8 +1850,8 @@ function sameIndent(a: ParaFormat, b: ParaFormat): boolean {
 function charIndentCancelAttrs(original: CharIndents, format: ParaFormat | undefined): string[] {
   const kept = format?.charIndents
   const out: string[] = []
-  if (original.left && !kept?.left) out.push('w:leftChars="0"')
-  if (original.right && !kept?.right) out.push('w:rightChars="0"')
+  if (original.left !== undefined && !kept?.left) out.push('w:leftChars="0"')
+  if (original.right !== undefined && !kept?.right) out.push('w:rightChars="0"')
   // firstLineChars and hangingChars are one component (the special indent):
   // a new character special replaces the old one outright — no cancel
   if (original.hanging !== undefined && !kept?.hanging && kept?.firstLine === undefined)
@@ -2052,8 +2067,8 @@ export function mergeCellParaFormat(
       CELL_MODELED_ATTR_GROUPS[tag].filter((g) => g.fields.some(differs)).flatMap((g) => g.attrs),
     )
     let freshElement = fresh.find((c) => c.name === tag)?.xml
-    const originalChars = mergeCharIndents(original?.charIndents, original?.directCharIndents)
-    if (tag === 'w:ind' && originalChars) {
+    const originalChars = tag === 'w:ind' ? savedCharIndents(rawPPr, original) : undefined
+    if (originalChars) {
       const cancels = charIndentCancelAttrs(originalChars, format).filter((attribute) =>
         rebuilt.has(attribute.slice(0, attribute.indexOf('='))),
       )
@@ -2079,8 +2094,9 @@ export function mergePPrFormat(
   // (`w:firstLineChars="0"`…), or Word — and this parser — would keep
   // resolving the character indent over the new value; components the new
   // format still carries are re-emitted (with their *Chars attribute) instead
-  const originalChars = mergeCharIndents(original?.charIndents, original?.directCharIndents)
-  if (original && originalChars && !sameIndent(original, format ?? {})) {
+  const originalChars =
+    original && !sameIndent(original, format ?? {}) ? savedCharIndents(rawPPr, original) : undefined
+  if (originalChars) {
     const cancel = charIndentCancelAttrs(originalChars, format)
     if (cancel.length > 0) {
       const at = fresh.findIndex((c) => c.name === 'w:ind')
