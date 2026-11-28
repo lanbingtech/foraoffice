@@ -661,11 +661,24 @@ test('the embedded public editor edits, undoes, saves and reopens Word with its 
       root: { label: 'Runtime map', children: [{ label: 'Word text', block: 0 }] },
     })
     expect(map._meta?.['io.foraoffice/display']).toMatchObject({ kind: 'mindmap' })
-    // Cursor-relative image insertion targets the original captured paragraph at index zero.
+    // Body images get their own block next to the captured paragraph.
+    const imagesNearCapturedParagraph = async () =>
+      JSON.parse(
+        await toolOutput('query_document', {
+          domain: 'images',
+          startBlockIndex: 0,
+          endBlockIndex: 1,
+        }),
+      ) as DocsQueryResult
+    expect((await imagesNearCapturedParagraph()).items).toHaveLength(0)
     await tool('insert_image', {
       url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6f1cAAAAASUVORK5CYII=',
     })
-    const media = await tool('read_document_media', { blockIndex: 0 })
+    const { items: nearbyImages } = await imagesNearCapturedParagraph()
+    expect(nearbyImages).toHaveLength(1)
+    const { mediaRef } = nearbyImages[0]
+    expect(mediaRef).toEqual(expect.any(String))
+    const media = await tool('read_document_media', { mediaRef })
     expect(media.content).toContainEqual({
       type: 'image',
       data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6f1cAAAAASUVORK5CYII=',

@@ -4,7 +4,7 @@ import type { Editor } from '@tiptap/core'
 import { REDACT_MARK } from './redact'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { TextSelection } from '@tiptap/pm/state'
-import { TableMap } from '@tiptap/pm/tables'
+import { CellSelection, TableMap } from '@tiptap/pm/tables'
 import {
   TABLE_HEADER_FILL,
   type Block,
@@ -36,7 +36,7 @@ import {
 import { modelTextOf, projectedNodeText, redactNode, type RedactableNode } from './redact-view'
 import { opSignatures } from './ops'
 import { pageSetupContextLines, type AiSectionState } from './page-setup'
-import type { DocsSelection } from '../../shared/operation-result'
+import type { DocsSelectedCell, DocsSelection } from '../../shared/operation-result'
 import { listRevisionEntries } from './revision-ops'
 import type { StoryRevision } from '../editor/story-revisions'
 
@@ -197,6 +197,7 @@ export interface SelectionScope {
   /** exact ProseMirror positions; run-level commands narrow to them when the range is partial */
   from: number
   to: number
+  cellSelection?: CellSelection
 }
 
 export function getSelectionScope(
@@ -224,18 +225,67 @@ export function getSelectionScope(
     startIndex = doc.childCount - 1
     endIndex = doc.childCount - 1
   }
-  return { startIndex, endIndex, isRange: !empty, from, to }
+  return {
+    startIndex,
+    endIndex,
+    isRange: !empty,
+    from,
+    to,
+    ...(selection instanceof CellSelection && { cellSelection: selection }),
+  }
+}
+
+function describeCellSelection(selection: CellSelection) {
+  const table = selection.$anchorCell.node(-1)
+  const tableStart = selection.$anchorCell.start(-1)
+  const map = TableMap.get(table)
+  const deletedTable = hasDeletionRevision(table)
+  const cells: DocsSelectedCell[] = []
+  let { from, to } = selection
+  let remaining = SELECTION_MAX_CHARS
+  selection.forEachCell((cell, pos) => {
+    const { top, left, bottom, right } = map.findCell(pos - tableStart)
+    const projected =
+      deletedTable || hasDeletionRevision(table.child(top))
+        ? ''
+        : liveText(cell, false, { blockSeparator: '\n' })
+    const text = projected.slice(0, remaining)
+    remaining -= text.length
+    from = Math.min(from, pos + 1)
+    to = Math.max(to, pos + cell.nodeSize - 1)
+    cells.push({
+      row: top,
+      col: left,
+      rowSpan: bottom - top,
+      colSpan: right - left,
+      text,
+      ...(text.length < projected.length && { textTruncated: true }),
+    })
+  })
+  return { cells, from, to }
 }
 
 export function describeSelection(editor: Editor, scope: SelectionScope): DocsSelection {
-  const { from, to, startIndex, endIndex, isRange } = scope
+  const { from, to, startIndex, endIndex, isRange, cellSelection } = scope
+  const blocks = { startBlockIndex: startIndex, endBlockIndex: endIndex }
+  if (cellSelection) {
+    const selected = describeCellSelection(cellSelection)
+    const text = selected.cells.map((cell) => cell.text).join('\n')
+    return {
+      kind: 'cells',
+      ...blocks,
+      ...selected,
+      text: clip(text, SELECTION_MAX_CHARS),
+      ...((text.length > SELECTION_MAX_CHARS ||
+        selected.cells.some((cell) => cell.textTruncated)) && { textTruncated: true }),
+    }
+  }
   const text = isRange ? liveTextBetween(editor, from, to) : ''
   return {
     kind: isRange ? 'range' : 'caret',
     from,
     to,
-    startBlockIndex: startIndex,
-    endBlockIndex: endIndex,
+    ...blocks,
     text: clip(text, SELECTION_MAX_CHARS),
     ...(text.length > SELECTION_MAX_CHARS && { textTruncated: true }),
   }
@@ -249,7 +299,7 @@ export function partialSelection(
   editor: Editor,
   scope: SelectionScope,
 ): { from: number; to: number } | null {
-  if (!scope.isRange) return null
+  if (!scope.isRange || scope.cellSelection) return null
   const doc = editor.state.doc
   if (scope.startIndex < 0 || scope.endIndex >= doc.childCount) return null
   const { from, to } = blockRangePositions(editor, scope.startIndex, scope.endIndex)
@@ -877,11 +927,14 @@ export function buildDocumentContext(
   const partialNote = partialSelection(editor, scope)
     ? ' (part of the text only — see the <sel> markers in the selected content)'
     : ''
-  const selLine = scope.isRange
-    ? scope.startIndex === scope.endIndex
-      ? `Current selection: block ${scope.startIndex}${partialNote}`
-      : `Current selection: blocks ${scope.startIndex}-${scope.endIndex}${partialNote}`
-    : `No selection; cursor is in block ${scope.startIndex}`
+  let selLine = `No selection; cursor is in block ${scope.startIndex}`
+  if (scope.cellSelection)
+    selLine = `Current selection: ${scope.cellSelection.ranges.length} cells in table block ${scope.startIndex}`
+  else if (scope.isRange)
+    selLine =
+      scope.startIndex === scope.endIndex
+        ? `Current selection: block ${scope.startIndex}${partialNote}`
+        : `Current selection: blocks ${scope.startIndex}-${scope.endIndex}${partialNote}`
 
   // authoritative stats for answer mode (previews above may be clipped)
   const statsLine = `Full-text stats: words ${countWords(fullText)}, characters (no spaces) ${
@@ -1051,6 +1104,38 @@ export function isBlankDocument(editor: Editor): boolean {
   return first.type.name === 'docParagraph' && first.content.size === 0
 }
 
+function buildSelectedContent(editor: Editor, scope: SelectionScope): string {
+  if (scope.cellSelection) {
+    const { cells } = describeCellSelection(scope.cellSelection)
+    return `Selected cells in table block ${scope.startIndex} (zero-based row and col):\n${clip(
+      cells.map((cell) => JSON.stringify(cell)).join('\n'),
+      SELECTION_MAX_CHARS,
+    )}`
+  }
+  if (!scope.isRange) return ''
+  const partial = partialSelection(editor, scope)
+  const selectionHtml = clip(
+    serializeRangeToHtml(editor, scope.startIndex, scope.endIndex, partial),
+    SELECTION_MAX_CHARS,
+  )
+  if (!selectionHtml) return ''
+  // `textBetween` would read the words; the context quotes the selection back
+  // to the model, so it has to be the projected read
+  const selectedText = partial ? liveTextBetween(editor, partial.from, partial.to) : ''
+  return (
+    partial
+      ? [
+          `Content selected by the user (blocks ${scope.startIndex}-${scope.endIndex}; ONLY the span inside <sel>…</sel> is selected, the rest of these blocks is shown for context):`,
+          selectionHtml,
+          `Selected text (${selectedText.length} characters): "${clip(selectedText, 1000)}"`,
+        ]
+      : [
+          `Content selected by the user (blocks ${scope.startIndex}-${scope.endIndex}):`,
+          selectionHtml,
+        ]
+  ).join('\n')
+}
+
 /**
  * Per-turn context: fresh document skeleton + selection fragment injected
  * as a selection chip. Passing `scope` freezes the selection the prompt
@@ -1065,26 +1150,6 @@ export function buildDocContext(
 ): string {
   const isEmptyDoc = isBlankDocument(editor)
   scope ??= getSelectionScope(editor)
-  const partial = partialSelection(editor, scope)
-  const selectionHtml = scope.isRange
-    ? clip(
-        serializeRangeToHtml(editor, scope.startIndex, scope.endIndex, partial),
-        SELECTION_MAX_CHARS,
-      )
-    : ''
-  // `textBetween` would read the words; the context quotes the selection back
-  // to the model, so it has to be the projected read
-  const selectedText = partial ? liveTextBetween(editor, partial.from, partial.to) : ''
-  const selectionLines = partial
-    ? [
-        `Content selected by the user (blocks ${scope.startIndex}-${scope.endIndex}; ONLY the span inside <sel>…</sel> is selected, the rest of these blocks is shown for context):`,
-        selectionHtml,
-        `Selected text (${selectedText.length} characters): "${clip(selectedText, 1000)}"`,
-      ]
-    : [
-        `Content selected by the user (blocks ${scope.startIndex}-${scope.endIndex}):`,
-        selectionHtml,
-      ]
   return [
     isEmptyDoc
       ? 'The document is currently blank.'
@@ -1092,7 +1157,7 @@ export function buildDocContext(
     // a blank body can still carry headers/footers (template setup): keep them visible
     isEmptyDoc && hf ? hfContextLines(hf).join('\n') : '',
     sections ? pageSetupContextLines(sections).join('\n') : '',
-    selectionHtml ? selectionLines.join('\n') : '',
+    buildSelectedContent(editor, scope),
     comments && comments.length > 0 ? buildCommentsContext(editor, comments) : '',
   ]
     .filter(Boolean)

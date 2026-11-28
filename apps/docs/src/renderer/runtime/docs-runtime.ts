@@ -3,6 +3,7 @@ import type { Editor } from '@tiptap/core'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import type { Transaction } from '@tiptap/pm/state'
 import { closeHistory } from '@tiptap/pm/history'
+import { Mapping } from '@tiptap/pm/transform'
 import type { AgentToolCall, ToolExecution } from '@genoffice/agent-core'
 import { ResourceAccessError } from '@genoffice/agent-core/resource-tools'
 import {
@@ -428,19 +429,32 @@ export function createDocsRuntime(bindings: DocsRuntimeBindings): DocsRuntime {
         return failure(error instanceof Error ? error.message : String(error))
       }
     }
-    const mapScope = ({ transaction }: { transaction: Transaction }) => {
+    const mapScope = ({
+      transaction,
+      appendedTransactions,
+    }: {
+      transaction: Transaction
+      appendedTransactions: readonly Transaction[]
+    }) => {
       if (
         transaction.docChanged &&
         transaction.getMeta(DRAFT_META) &&
         [...drafts.values()].some((draft) => draft.pending)
       )
         carryRead(transaction.before, transaction.doc)
-      if (!transaction.docChanged || !frozen || !observedEditor) return
-      const from = transaction.mapping.map(frozen.scope.from, -1)
-      const to = Math.max(from, transaction.mapping.map(frozen.scope.to, 1))
+      if (!frozen || !observedEditor || frozen.doc === observedEditor.state.doc) return
+      const { doc } = observedEditor.state
+      const mapping = new Mapping()
+      mapping.appendMapping(transaction.mapping)
+      for (const appended of appendedTransactions) mapping.appendMapping(appended.mapping)
+      const from = mapping.map(frozen.scope.from, -1)
+      const to = Math.max(from, mapping.map(frozen.scope.to, 1))
       frozen = {
-        doc: observedEditor.state.doc,
-        scope: getSelectionScope(observedEditor, { from, to, empty: from === to }),
+        doc,
+        scope: getSelectionScope(
+          observedEditor,
+          frozen.scope.cellSelection?.map(doc, mapping) ?? { from, to, empty: from === to },
+        ),
       }
     }
     observedEditor?.on('transaction', mapScope)

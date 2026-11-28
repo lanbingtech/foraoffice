@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { Editor } from '@tiptap/core'
+import { CellSelection, TableMap } from '@tiptap/pm/tables'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { createDocsHttpMcpServer, type DocsHttpMcpServer } from '../src/services/docs-http-mcp'
@@ -19,12 +20,12 @@ afterEach(async () => {
   service = undefined
 })
 
-async function fixture() {
+async function fixture(content = '<p>Unsaved words</p>') {
   const { editorExtensions } = await import('../src/renderer/editor/extensions')
   editor = new Editor({
     element: document.createElement('div'),
     extensions: editorExtensions,
-    content: '<p>Unsaved words</p>',
+    content,
   })
   const active = editor
   runtime = createDocsRuntime({
@@ -112,6 +113,55 @@ it('reads the live selection and caret on the same connection and uses the lates
   const edited = await client.callTool({ name: 'replace_selection', arguments: { html: 'edits' } })
   expect(edited.structuredContent).toMatchObject({ committed: true })
   expect(active.getText()).toBe('Unsaved edits')
+})
+
+it('returns the four selected table cells in grid order in both read tools and drag directions', async () => {
+  const { active, service } = await fixture(`
+    <table>
+      <tr><td colspan="2"><p>North</p></td><td><p>East</p></td><td><p>Outside 1</p></td></tr>
+      <tr><td rowspan="2"><p>South</p></td><td colspan="2"><p>{locationMap}</p></td><td><p>Outside 2</p></td></tr>
+      <tr><td><p>Outside 3</p></td><td><p>Outside 4</p></td><td><p>Outside 5</p></td></tr>
+    </table>
+  `)
+  const doc = active.state.doc
+  const map = TableMap.get(doc.firstChild!)
+  const first = 1 + map.map[0]
+  const last = 1 + map.map[map.width + 1]
+  const cells = [
+    { row: 0, col: 0, rowSpan: 1, colSpan: 2, text: 'North' },
+    { row: 0, col: 2, rowSpan: 1, colSpan: 1, text: 'East' },
+    { row: 1, col: 0, rowSpan: 2, colSpan: 1, text: 'South' },
+    { row: 1, col: 1, rowSpan: 1, colSpan: 2, text: '{locationMap}' },
+  ]
+  const { client } = await connect(service)
+  const selections = []
+  for (const [anchor, head] of [
+    [first, last],
+    [last, first],
+  ]) {
+    const selection = CellSelection.create(doc, anchor, head)
+    expect(selection.ranges).toHaveLength(4)
+    active.view.dispatch(active.state.tr.setSelection(selection))
+    for (const name of ['get_document_context', 'read_document']) {
+      const result = await client.callTool({ name })
+      const context = result.structuredContent as Record<string, unknown>
+      expect(result.isError).not.toBe(true)
+      expect(context).toMatchObject({
+        selection: {
+          kind: 'cells',
+          startBlockIndex: 0,
+          endBlockIndex: 0,
+          cells,
+          text: 'North\nEast\nSouth\n{locationMap}',
+        },
+      })
+      expect(context[name === 'read_document' ? 'text' : 'output']).toContain(
+        `Selected cells in table block 0 (zero-based row and col):\n${cells.map((cell) => JSON.stringify(cell)).join('\n')}`,
+      )
+      selections.push(context.selection)
+    }
+  }
+  expect(selections).toEqual(Array(4).fill(selections[0]))
 })
 
 it('authenticates HTTP access and keeps another caller usable after a client terminates its session', async () => {
