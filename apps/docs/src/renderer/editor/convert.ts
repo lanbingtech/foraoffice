@@ -4040,8 +4040,8 @@ function nodeFormat(node: PmNode): ParaFormat | undefined {
   // on both sides. Before this, the signature compared the effective value with
   // the direct one, so every style-inherited paragraph looked edited and an
   // untouched document came back carrying a frozen direct indent.
-  const firstLineChars = Number(node.attrs?.indentFirstLineChars)
-  if (Number.isFinite(firstLineChars) && firstLineChars > 0) {
+  const firstLineChars = Number(node.attrs?.indentFirstLineChars ?? NaN)
+  if (Number.isFinite(firstLineChars) && firstLineChars >= 0) {
     format.charIndents = { ...format.charIndents, firstLine: firstLineChars }
     format.directCharIndents = { ...format.directCharIndents, firstLine: firstLineChars }
   }
