@@ -196,10 +196,17 @@ started a draft under a write grant may still stop or discard its own draft
 if the editor becomes read-only.
 
 Both `get_document_context` and `read_document` return `selection` in the MCP
-result. It contains `kind` (`caret` or `range`), `from` and `to` in ProseMirror
+result. It contains `kind` (`caret`, `range`, or `cells`), `from` and `to` in ProseMirror
 document positions, zero-based `startBlockIndex` and `endBlockIndex`, and the
 projected `text`. A caret has equal endpoints and empty text. When text exceeds
 the response limit the result includes `textTruncated: true`.
+
+For `kind: 'cells'`, `cells` lists the selected physical cells in row-major
+order. Each entry has zero-based `row` and `col` coordinates for the cell's
+top-left corner, its `rowSpan` and `colSpan`, and projected `text`. A merged
+cell appears once. The selection's `text` joins the cells' text with newlines,
+and `from` and `to` bound the selected cells in document order. Use `cells` to
+identify the selected grid region. A cell's text can include `textTruncated`.
 
 For an Ask AI action, `actionSelection` contains its captured editing target,
 and the text context describes that target. `selection` still reports the

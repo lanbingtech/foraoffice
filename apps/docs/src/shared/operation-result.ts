@@ -16,8 +16,18 @@ export interface DocsImageReferenceIssue {
   reason: 'unbound' | 'malformed' | 'expired' | 'unsupported' | 'missing'
 }
 
+export interface DocsSelectedCell {
+  /** Zero-based coordinates of the cell's top-left corner in its table grid. */
+  row: number
+  col: number
+  rowSpan: number
+  colSpan: number
+  text: string
+  textTruncated?: true
+}
+
 export interface DocsSelection {
-  kind: 'caret' | 'range'
+  kind: 'caret' | 'range' | 'cells'
   /** ProseMirror document positions at the revision of the enclosing result. */
   from: number
   to: number
@@ -25,6 +35,8 @@ export interface DocsSelection {
   endBlockIndex: number
   text: string
   textTruncated?: true
+  /** The physical cells selected, in grid order, when kind is `cells`. */
+  cells?: DocsSelectedCell[]
 }
 
 export interface DocsSelectionContext {
