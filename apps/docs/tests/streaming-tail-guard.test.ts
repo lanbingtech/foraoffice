@@ -1,12 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Editor } from '@tiptap/core'
 import { editorExtensions } from '../src/renderer/editor/extensions'
-import { commentEndpoints } from '../src/renderer/editor/comment-endpoints'
-import {
-  PHASED_APPEND,
-  appendedStreamedTail,
-  touchesStreamingTail,
-} from '../src/renderer/editor/streaming-tail-guard'
+import { PHASED_APPEND, touchesStreamingTail } from '../src/renderer/editor/streaming-tail-guard'
 import { appendStreamedNodes } from '../src/renderer/file-actions'
 import {
   PHASED_MIN_BLOCKS,
@@ -47,101 +42,6 @@ function inside(editor: Editor, index: number, offset = 1): number {
   for (let i = 0; i < index; i++) pos += editor.state.doc.child(i).nodeSize
   return pos + offset
 }
-
-describe('appendedStreamedTail', () => {
-  it('returns only the blocks appended by a real streaming transaction', () => {
-    const editor = createEditor()
-    const end = editor.state.doc.content.size
-    let tail: ReturnType<typeof appendedStreamedTail> = null
-    editor.on('update', ({ transaction }) => {
-      tail = appendedStreamedTail(transaction)
-    })
-    appendStreamedNodes(editor, [para('next'), para('last')] as never)
-    expect(tail).toEqual({ from: end, content: editor.state.doc.content.cut(end) })
-  })
-
-  it('retains the trailing anchor widget and builds streamed table decorations at the same positions as a full load', () => {
-    const editor = createEditor()
-    const picture = (docxIndex: number): JsonNode => ({
-      type: 'docProtected',
-      attrs: {
-        blockType: 'image',
-        docxIndex,
-        imageWrap: 'square-left',
-        anchorLine: { spaceBefore: 120 },
-      },
-    })
-    const ruled: JsonNode = {
-      ...para('fill in the blank'),
-      attrs: { ruleOverlays: [{ xPx: 8, yPx: 16, widthPx: 32, spaceBeforePx: 0 }] },
-    }
-    const table: JsonNode = {
-      type: 'docTable',
-      content: [{ type: 'docTableRow', content: [{ type: 'docTableCell', content: [ruled] }] }],
-    }
-    const prefix = [ruled, picture(1)]
-    const tail = [para('following'), table, picture(2)]
-    editor.commands.setContent({ type: 'doc', content: prefix })
-    const selector = '.doc-anchor-line, .doc-rule-overlay, .doc-p-ruled'
-    const original = Array.from(editor.view.dom.querySelectorAll(selector))
-    expect(original).toHaveLength(3)
-    appendStreamedNodes(editor, tail as never)
-    const streamed = Array.from(editor.view.dom.querySelectorAll(selector))
-    expect(streamed).toHaveLength(6)
-    original.forEach((element, index) => expect(streamed[index]).toBe(element))
-    expect(streamed[2].nextElementSibling?.textContent).toBe('following')
-    expect(streamed[4].closest('td')).not.toBeNull()
-
-    const full = createEditor()
-    full.commands.setContent({ type: 'doc', content: [...prefix, ...tail] })
-    editor.commands.setTextSelection(1)
-    full.commands.setTextSelection(1)
-    expect(editor.view.dom.innerHTML).toBe(full.view.dom.innerHTML)
-  })
-
-  it('rejects edits and streamed replacements that can change a mounted block', () => {
-    const editor = createEditor()
-    const end = editor.state.doc.content.size
-    const paragraph = editor.schema.nodeFromJSON(para('replacement'))
-    const { tr } = editor.state
-    expect(appendedStreamedTail(tr.insert(end, paragraph))).toBeNull()
-    expect(
-      appendedStreamedTail(editor.state.tr.insert(0, paragraph).setMeta(PHASED_APPEND, true)),
-    ).toBeNull()
-    expect(
-      appendedStreamedTail(
-        editor.state.tr.replaceWith(0, end, paragraph).setMeta(PHASED_APPEND, true),
-      ),
-    ).toBeNull()
-  })
-
-  it('adds streamed comment endpoints at document offsets while retaining mounted endpoints', () => {
-    const editor = createEditor()
-    editor.commands.setContent({
-      type: 'doc',
-      content: [{ ...para('one'), attrs: { commentEndOffsets: { first: 2 } } }],
-    })
-    const before = commentEndpoints(editor.view, undefined)
-    expect(before.get('first')).toBe(3)
-
-    appendStreamedNodes(editor, [para('next')] as never)
-    expect(commentEndpoints(editor.view, undefined)).toBe(before)
-
-    const from = editor.state.doc.content.size
-    appendStreamedNodes(editor, [
-      { ...para('later'), attrs: { commentEndOffsets: { first: 1, last: 5 } } },
-      { type: 'docParagraph', attrs: { commentEnds: ['empty'] } },
-    ] as never)
-
-    const endpoints = commentEndpoints(editor.view, undefined)
-    expect([...endpoints]).toEqual([
-      ['first', 3],
-      ['last', from + 6],
-      ['empty', from + editor.state.doc.child(2).nodeSize + 1],
-    ])
-    expect([...before]).toEqual([['first', 3]])
-  })
-})
 
 describe('touchesStreamingTail', () => {
   it('flags edits in or after the last block, not earlier ones or the appends themselves', () => {

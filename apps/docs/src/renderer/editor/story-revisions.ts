@@ -240,12 +240,11 @@ export function collectHfRevisions(state: HfSectionState): StoryRevision[] {
   return out
 }
 
-export function collectTextboxRevisions(doc: PmNode, start = 0): StoryRevision[] {
+export function collectTextboxRevisions(doc: PmNode): StoryRevision[] {
   const out: StoryRevision[] = []
-  doc.descendants((node, offset) => {
+  doc.descendants((node, pos) => {
     const boxes = node.attrs?.textboxes as TextboxDisplay[] | null | undefined
     if (!boxes) return
-    const pos = start + offset
     boxes.forEach((box, bi) => {
       box.paras.forEach((para, pi) => {
         out.push(

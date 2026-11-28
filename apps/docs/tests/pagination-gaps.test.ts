@@ -617,7 +617,7 @@ describe('page frames and sheets (differing-width documents, genoffice#246)', ()
     expect(pageFramesFromGaps(wrap, 1)).toEqual([{ top: 0, bottom: 1056, left: 0, width: 816 }])
   })
 
-  it('keeps each sheet?s crop guides relative to its own paper, including the first and last', () => {
+  it('positions crop guides on each physical sheet, including the first and last', () => {
     const wrap = wrapEl()
     const cuts = [{ pageNo: 1 }, { pageNo: 2, gap: {} }, { pageNo: 3, gap: {} }] as PageCut[]
     const marginsOf = ({ pageNo }: PageCut) => ({
@@ -652,8 +652,6 @@ describe('page frames and sheets (differing-width documents, genoffice#246)', ()
     ])
     expect(sheets[0].style.top).toBe('0px')
     expect(sheets[0].style.height).toBe('1096px')
-    syncPageSheets(wrap, 1, { left: 120, width: 816 })
-    expect(wrap.querySelector('.page-sheet')).toBe(sheets[0])
     syncPageSheets(wrap, 1, null)
     expect(wrap.querySelector('.page-sheets')).toBeNull()
   })

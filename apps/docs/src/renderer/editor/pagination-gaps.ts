@@ -1434,49 +1434,32 @@ export function syncPageSheets(
   cuts?: readonly PageCut[],
   marginsOf?: (cut: PageCut) => { top: number; right: number; bottom: number; left: number },
 ): void {
-  const existing = wrap.querySelector<HTMLElement>(':scope > .page-sheets')
+  let layer = wrap.querySelector(':scope > .page-sheets') as HTMLElement | null
   if (!first) {
-    existing?.remove()
+    layer?.remove()
     return
   }
-  // Keep the previous paper in place during geometry reads; unchanged frames
-  // should not invalidate the presentation tree on a convergence pass.
-  const frames = pageFramesFromGaps(wrap, zoomFactor, first, cuts)
+  if (!layer) {
+    layer = document.createElement('div')
+    layer.className = 'page-sheets'
+    wrap.appendChild(layer)
+  }
+  layer.textContent = ''
   const framedCuts = cuts?.filter((cut, index) => index === 0 || cut.gap)
-  const layer = existing ?? document.createElement('div')
-  const additions = document.createDocumentFragment()
-  const sheets = Array.from(layer.children) as HTMLElement[]
-  let used = 0
-  for (const [index, frame] of frames.entries()) {
-    if (frame.bottom - frame.top <= 10) continue
-    const el = sheets[used] ?? document.createElement('div')
-    if (!sheets[used]) {
-      el.className = 'page-sheet'
-      additions.append(el)
-    }
-    used++
+  for (const [index, f] of pageFramesFromGaps(wrap, zoomFactor, first, cuts).entries()) {
+    if (f.bottom - f.top <= 10) continue
+    const el = document.createElement('div')
+    el.className = 'page-sheet'
+    el.style.top = `${f.top}px`
+    el.style.height = `${f.bottom - f.top}px`
+    el.style.left = `${f.left}px`
+    el.style.width = `${f.width}px`
     const cut = framedCuts?.[index]
     if (cut && marginsOf) {
-      for (const [side, value] of Object.entries(marginsOf(cut))) {
-        const key = `--crop-${side}`
-        const px = `${value}px`
-        if (el.style.getPropertyValue(key) !== px) el.style.setProperty(key, px)
-      }
+      for (const [side, value] of Object.entries(marginsOf(cut)))
+        el.style.setProperty(`--crop-${side}`, `${value}px`)
     }
-    const top = `${frame.top}px`
-    const height = `${frame.bottom - frame.top}px`
-    const left = `${frame.left}px`
-    const width = `${frame.width}px`
-    if (el.style.top !== top) el.style.top = top
-    if (el.style.height !== height) el.style.height = height
-    if (el.style.left !== left) el.style.left = left
-    if (el.style.width !== width) el.style.width = width
-  }
-  for (const sheet of sheets.slice(used)) sheet.remove()
-  if (additions.firstChild) layer.append(additions)
-  if (!existing) {
-    layer.className = 'page-sheets'
-    wrap.append(layer)
+    layer.appendChild(el)
   }
 }
 

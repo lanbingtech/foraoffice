@@ -329,7 +329,7 @@ import {
 } from './line-metrics'
 import { saveUntilPersisted } from './save-until-persisted'
 import { SPELLCHECK_KEY, spellcheckEnabled } from './spellcheck-pref'
-import { createDocumentSummary } from './document-summary'
+import { cachedByDoc } from './doc-cache'
 import { useShallowStable, useStableCallbacks } from './use-stable'
 import { FindPanel } from './components/FindPanel'
 import { ZoomDialog } from './components/ZoomDialog'
@@ -627,7 +627,8 @@ const EMPTY_BLOCKS: Block[] = []
 
 // O(doc) derivations cached by PM doc reference: caret moves and unrelated
 // state updates reuse the last result instead of re-walking the whole document
-const emptyRevisions: RevisionRange[] = []
+const wordCountOfDoc = cachedByDoc((d) => countWords(documentTextForWordCount(d)))
+const revisionsOfDoc = cachedByDoc((d) => collectRevisions(d))
 
 /**
  * Document position of a measured line-start DOM anchor. posAtDOM works from the DOM
@@ -3486,9 +3487,7 @@ export function App({
   const compareWithFile = useCallback(() => compareWithFileImpl(reviewCtxRef.current), [])
 
   // the ribbon's revision badge walks every block: paced with the word count below
-  const documentSummary = useMemo(() => createDocumentSummary(Boolean(doc)), [doc])
-  const [summary, setSummary] = useState<ReturnType<typeof documentSummary.read>>()
-  const revisionRanges = summary?.revisions ?? emptyRevisions
+  const [revisionRanges, setRevisionRanges] = useState<RevisionRange[]>([])
   // open comment threads add the markup column right of the paper: width-fit
   // zoom must count it or the canvas overflows the pane
   // (Simple Markup collapses threads to glyphs inside the page margin: no column)
@@ -6088,7 +6087,7 @@ export function App({
   // status-bar word count: the whole text is re-walked per doc, so pace it
   // (Word refreshes its count on idle too). A trailing throttle, not a
   // debounce: the streamed tail of a phased open would keep resetting one
-  const wordCount = summary?.words ?? 0
+  const [wordCount, setWordCount] = useState(0)
   // Word's "selected/total" pair; 0 means no selection, so the bar falls back
   // to the plain total. Cheap enough (a text range, not a document walk) to
   // follow the selection directly rather than ride the throttle above.
@@ -6101,13 +6100,13 @@ export function App({
     const pmDoc = editor.state.doc
     return [
       ...collectHfRevisions(hfState),
-      ...documentSummary.read(pmDoc).textboxes,
+      ...collectTextboxRevisions(pmDoc),
       ...collectNoteRevisions(pmDoc, 'footnote', footnotes),
       ...collectNoteRevisions(pmDoc, 'endnote', endnotes),
     ]
-    // The snapshot advances even when only notes or textboxes changed.
+    // revisionRanges: the throttled document-change trigger
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor, doc, hfState, footnotes, endnotes, documentSummary, summary])
+  }, [editor, doc, hfState, footnotes, endnotes, revisionRanges])
   storyRevisionsRef.current = storyRevisions
   const allRevisions = useMemo(
     () => (storyRevisions.length ? [...revisionRanges, ...storyRevisions] : revisionRanges),
@@ -6165,11 +6164,11 @@ export function App({
     let timer = 0
     const refresh = () => {
       timer = 0
-      setSummary(documentSummary.read(editor.state.doc))
+      setWordCount(wordCountOfDoc(editor.state.doc))
+      setRevisionRanges(doc ? revisionsOfDoc(editor.state.doc) : [])
       setSelectionWordCount(selectedWordCount(editor.state.doc, editor.state.selection))
     }
-    const onUpdate = ({ transaction }: { transaction: Transaction }) => {
-      documentSummary.observe(transaction, editor.state.doc)
+    const onUpdate = () => {
       if (!timer) timer = window.setTimeout(refresh, WORD_COUNT_THROTTLE_MS)
     }
     refresh()
@@ -6178,7 +6177,7 @@ export function App({
       window.clearTimeout(timer)
       editor.off('update', onUpdate)
     }
-  }, [editor, documentSummary, docLoading])
+  }, [editor, doc, docLoading])
 
   /** Word word-count dialog: pages/lines estimated from the current layout */
   const openStats = useCallback(() => {

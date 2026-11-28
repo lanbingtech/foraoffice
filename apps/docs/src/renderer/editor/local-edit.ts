@@ -2,7 +2,6 @@ import type { Node as PmNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, type Transaction } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { touchedTopLevelBlocks } from './touched-blocks'
-import { appendedStreamedTail } from './streaming-tail-guard'
 
 /**
  * Block-attribute decoration plugins used to rebuild their whole set on every
@@ -62,14 +61,10 @@ interface BlockDecorationState {
   sig: string
 }
 
-type StreamedTail = NonNullable<ReturnType<typeof appendedStreamedTail>>
-
 export interface BlockDecorationSpec {
   key: PluginKey<BlockDecorationState>
   /** decorations of the whole document */
   build: (doc: PmNode) => Decoration[]
-  /** a verified whole-block append; null requests a full rebuild */
-  append?: (tr: Transaction, tail: StreamedTail, old: DecorationSet) => DecorationSet | null
   /** a touched block whose current content forces a rebuild */
   needsRecompute: (node: PmNode) => boolean
   /** with both sides of a touched block at hand, decides the rebuild instead of needsRecompute */
@@ -94,13 +89,6 @@ export function blockDecorationPlugin(spec: BlockDecorationSpec): Plugin<BlockDe
         const sig = spec.signature?.() ?? ''
         if (sig !== old.sig) return compute(tr.doc)
         if (!tr.docChanged) return old
-        if (spec.append) {
-          const tail = appendedStreamedTail(tr)
-          if (tail) {
-            const set = spec.append(tr, tail, old.set)
-            return set ? (set === old.set ? old : { set, sig }) : compute(tr.doc)
-          }
-        }
         const touched = localEditBlocks(tr)
         if (!touched) return compute(tr.doc)
         const mapped = old.set.map(tr.mapping, tr.doc)

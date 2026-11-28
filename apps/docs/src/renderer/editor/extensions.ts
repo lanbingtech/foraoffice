@@ -21,7 +21,7 @@ import { wrapGroupCss, type WrapPicture } from './wrap-group'
 import type { ChainedCommands, RawCommands } from '@tiptap/core'
 import { Gapcursor, UndoRedo } from '@tiptap/extensions'
 import { DOMSerializer } from '@tiptap/pm/model'
-import type { DOMOutputSpec, Fragment, Node as PmNode } from '@tiptap/pm/model'
+import type { DOMOutputSpec, Node as PmNode } from '@tiptap/pm/model'
 import {
   AllSelection,
   NodeSelection,
@@ -33,12 +33,7 @@ import {
 } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import { appendsAtEnd, touchedTopLevelBlocks } from './touched-blocks'
-import {
-  blockDecorationPlugin,
-  containsNode,
-  localEditBlocks,
-  touchedNeedsRecompute,
-} from './local-edit'
+import { containsNode, localEditBlocks, touchedNeedsRecompute } from './local-edit'
 import { BalloonMarkersExtension } from './balloon-markers'
 import { CommentEndpointsExtension } from './comment-endpoints'
 import { installProseMirrorPerf } from './prosemirror-perf'
@@ -2191,9 +2186,9 @@ export function anchorLineSpec(line: Record<string, unknown>): DomSpec {
 export const AnchorLineExtension = Extension.create({
   name: 'anchorLine',
   addProseMirrorPlugins() {
-    const build = (content: Fragment, from = 0): Decoration[] => {
+    const build = (doc: PmNode): DecorationSet => {
       const decos: Decoration[] = []
-      content.descendants((node, offset) => {
+      doc.descendants((node, pos) => {
         if (node.type.name !== 'docProtected') return true
         const line = node.attrs.anchorLine as Record<string, unknown> | null
         if (
@@ -2203,7 +2198,7 @@ export const AnchorLineExtension = Extension.create({
         ) {
           decos.push(
             Decoration.widget(
-              from + offset + node.nodeSize,
+              pos + node.nodeSize,
               () => DOMSerializer.renderSpec(document, anchorLineSpec(line) as never).dom,
               { side: -1, key: `anchor-line-${String(node.attrs.docxIndex)}` },
             ),
@@ -2211,14 +2206,31 @@ export const AnchorLineExtension = Extension.create({
         }
         return false
       })
-      return decos
+      return DecorationSet.create(doc, decos)
     }
     return [
-      blockDecorationPlugin({
-        key: new PluginKey('anchorLine'),
-        build: (doc) => build(doc.content),
-        append: (tr, tail, old) => old.add(tr.doc, build(tail.content, tail.from)),
-        needsRecompute: (node) => containsNode(node, (n) => n.type.name === 'docProtected'),
+      new Plugin({
+        state: {
+          init: (_, state) => build(state.doc),
+          apply: (tr, old) => {
+            if (!tr.docChanged) return old
+            // a local edit outside every anchored textbox block keeps the widgets
+            const touched = localEditBlocks(tr)
+            if (!touched) return build(tr.doc)
+            const mapped = old.map(tr.mapping, tr.doc)
+            // anchored textbox blocks also live inside table cells
+            return touchedNeedsRecompute(tr, touched, mapped, (node) =>
+              containsNode(node, (n) => n.type.name === 'docProtected'),
+            )
+              ? build(tr.doc)
+              : mapped
+          },
+        },
+        props: {
+          decorations(state) {
+            return this.getState(state)
+          },
+        },
       }),
     ]
   },
@@ -2242,11 +2254,10 @@ export const RuleOverlayExtension = Extension.create({
   addProseMirrorPlugins() {
     const hasRules = (n: PmNode) =>
       n.type.name === 'docParagraph' && Array.isArray(n.attrs.ruleOverlays)
-    const build = (content: Fragment, from = 0): Decoration[] => {
+    const build = (doc: PmNode): DecorationSet => {
       const decos: Decoration[] = []
-      content.descendants((node, offset) => {
+      doc.descendants((node, pos) => {
         if (!hasRules(node)) return node.type.name !== 'docParagraph'
-        const pos = from + offset
         decos.push(Decoration.node(pos, pos + node.nodeSize, { class: 'doc-p-ruled' }))
         ;(node.attrs.ruleOverlays as RuleOverlay[]).forEach((rule, i) => {
           decos.push(
@@ -2259,14 +2270,29 @@ export const RuleOverlayExtension = Extension.create({
         })
         return false
       })
-      return decos
+      return DecorationSet.create(doc, decos)
     }
     return [
-      blockDecorationPlugin({
-        key: new PluginKey('ruleOverlay'),
-        build: (doc) => build(doc.content),
-        append: (tr, tail, old) => old.add(tr.doc, build(tail.content, tail.from)),
-        needsRecompute: (node) => containsNode(node, hasRules),
+      new Plugin({
+        state: {
+          init: (_, state) => build(state.doc),
+          apply: (tr, old) => {
+            if (!tr.docChanged) return old
+            const touched = localEditBlocks(tr)
+            if (!touched) return build(tr.doc)
+            const mapped = old.map(tr.mapping, tr.doc)
+            return touchedNeedsRecompute(tr, touched, mapped, (node) =>
+              containsNode(node, hasRules),
+            )
+              ? build(tr.doc)
+              : mapped
+          },
+        },
+        props: {
+          decorations(state) {
+            return this.getState(state)
+          },
+        },
       }),
     ]
   },

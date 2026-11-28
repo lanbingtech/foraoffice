@@ -1,28 +1,10 @@
 import { Extension } from '@tiptap/core'
 import { Plugin, type Transaction } from '@tiptap/pm/state'
-import { ReplaceStep } from '@tiptap/pm/transform'
 import type { EditorView } from '@tiptap/pm/view'
 import { PHASED_CONTENT_SETTLED_EVENT, isPhasedContentPending } from '../phased-content'
 
 /** set on the transactions that append a streamed chunk */
 export const PHASED_APPEND = 'phasedAppend'
-
-/** Only a complete-block append preserves every already mounted position. */
-export function appendedStreamedTail(transaction: Transaction) {
-  if (!transaction.getMeta(PHASED_APPEND) || transaction.steps.length !== 1) return null
-  const step = transaction.steps[0]
-  const from = transaction.before.content.size
-  if (
-    !(step instanceof ReplaceStep) ||
-    step.from !== from ||
-    step.to !== from ||
-    step.slice.openStart !== 0 ||
-    step.slice.openEnd !== 0 ||
-    step.slice.content.childCount === 0
-  )
-    return null
-  return { from, content: step.slice.content }
-}
 
 /**
  * A phased open streams the document tail in behind the first screens. The

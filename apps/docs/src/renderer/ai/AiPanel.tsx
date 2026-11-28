@@ -19,7 +19,6 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { aiRevisionAuthor } from './revision-author'
 import type { Editor } from '@tiptap/core'
-import type { Transaction } from '@tiptap/pm/state'
 import type { Block } from '@genoffice/docx-engine'
 import {
   AgentLoop,
@@ -81,7 +80,6 @@ import { KIND_LABEL } from '../components/ReviewingPane'
 import { STORY_LABEL } from '../editor/story-revisions'
 import { DOCS_CONTINUE_INSTRUCTION } from './continuation'
 import { waitForFullContent } from '../phased-content'
-import { appendedStreamedTail } from '../editor/streaming-tail-guard'
 import { currentDocGeneration } from '../file-actions'
 import { createFilesSkill } from './files-skill'
 import { createSkillsSkill } from './skills-skill'
@@ -994,24 +992,11 @@ export function AiPanel({
       if (editor.state.selection.empty) setScopePreviewOpen(false)
       setScopeTick((t) => t + 1)
     }
-    const updateScope = ({
-      transaction,
-      appendedTransactions = [],
-    }: {
-      transaction: Transaction
-      appendedTransactions?: readonly Transaction[]
-    }) => {
-      if (
-        !appendedStreamedTail(transaction) ||
-        appendedTransactions.some((tr) => tr.docChanged && !appendedStreamedTail(tr))
-      )
-        bump()
-    }
     editor.on('selectionUpdate', bump)
-    editor.on('update', updateScope)
+    editor.on('update', bump)
     return () => {
       editor.off('selectionUpdate', bump)
-      editor.off('update', updateScope)
+      editor.off('update', bump)
     }
   }, [editor])
 
